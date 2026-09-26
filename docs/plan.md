@@ -8,9 +8,14 @@ infrastructure but not the milestones.
 
 Make Microsoft Storage Spaces pools fully usable from Linux:
 
-1. **Stage 1 - read-only:** any pool created by Windows 8 .. Windows 11 /
-   Server 2025 appears on Linux as ordinary read-only block devices (one per
-   virtual disk) that can be partitioned-scanned and mounted like any disk.
+1. **Stage 1 - read-only:** any pool created by Windows 11 appears on Linux
+   as ordinary read-only block devices (one per virtual disk) that can be
+   partition-scanned and mounted like any disk.
+
+Scope decision (2026-09-26): only Windows 11 pools (current layout, pool
+version 29) are targeted. Older Windows releases, Windows Server and pools
+created by them are out of scope unless a user need appears; the parser
+rejects unknown layout versions instead of guessing.
 2. **Stage 2 - writes:** the same block devices are writable, and Windows
    accepts the pool afterwards as healthy, including after a crash of Linux
    mid-write.
@@ -71,8 +76,8 @@ in this repository.
   stripe the parity journal marks unknown and whose parity mismatches, which
   is refused by default (`--unclean-parity data` reads the disk as is)
   (`cargo test --test crash`).
-* Open: the Q code of dual parity (two-column rebuild), old Windows layouts
-  (needs older Windows VMs), extent/disk health states, quorum rules.
+* Open: the Q code of dual parity (two-column rebuild), extent/disk health
+  states, quorum rules.
 
 ### M2 (backends done, corpus matrix pending)
 
@@ -97,11 +102,9 @@ in this repository.
 
 ## Test infrastructure (continuous, feeds every stage)
 
-T1. **Windows matrix.** Extend VM tooling to more Windows builds: Windows 10
-    22H2, Server 2016/2019/2022/2025 (evaluation ISOs), Windows 8.1 /
-    Server 2012 R2 for the old layout, current Windows 11 release and Insider.
-    One script per VM, same `New-TestPool.ps1` interface, manifests record the
-    build and pool version.
+T1. **Windows 11 only.** All pools are created by the Windows 11 test VM
+    (currently Insider build 26340, pool version 29). When that VM moves to
+    a newer Windows 11 build, regenerate the corpus and diff the metadata.
 
 T2. **Corpus.** Large images stay out of git (`testdata/pools/`). Add a
     `spaces fixture` command that extracts only metadata regions (headers,
@@ -139,9 +142,8 @@ T6. **Fuzzing.** `cargo fuzz` targets for record decoding, database assembly,
    (expected Reed-Solomon / LRC variant), implement read and 1-2 disk rebuild.
 2. Storage tiers and mirror-accelerated parity: tiered spaces (several tier
    children per space), per-tier layouts, virtual-to-tier mapping.
-3. Old layouts: Windows 8 / Server 2012 (R2) and early Windows 10 pools (the
-   SPACEDB version and record layouts differ); detect the pool version from
-   metadata and dispatch.
+3. Layout versions: reject SPACEDB/record layouts other than the Windows 11
+   one with a clear message (older Windows is out of scope).
 4. Remaining record fields needed for correctness: provisioning type, extent
    state (active / stale / needs regeneration), disk state (retired, missing,
    removed), space state (detached, read-only, degraded), usage flags.
@@ -160,8 +162,8 @@ T6. **Fuzzing.** `cargo fuzz` targets for record decoding, database assembly,
    (degraded) and quorum rules (refuse when metadata quorum is lost unless
    forced).
 
-Exit: every configuration of T3 on every Windows build of T1 passes metadata
-and pattern tests; crash-state cases are either read correctly or refused.
+Exit: every configuration of T3 created by Windows 11 passes metadata and
+pattern tests; crash-state cases are either read correctly or refused.
 
 ### M2: block device exposure
 
@@ -309,7 +311,7 @@ guarantees and risks, `v0.2.0`.
 4. Pool health report compatible with Windows states.
 
 Exit for stage 3: pools created and modified only on Linux are imported by
-every supported Windows build without warnings, show the expected properties
+Windows 11 without warnings, show the expected properties
 in `Get-StoragePool` / `Get-VirtualDisk`, and survive Windows' own repair and
 optimize operations; and the reverse (Windows-created pools managed on Linux)
 passes the same checks. Release `v1.0.0`.
