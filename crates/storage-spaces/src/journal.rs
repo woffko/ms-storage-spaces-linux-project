@@ -55,7 +55,7 @@ impl ParityJournal {
         let slot_offset = le_u64(&head[0x30..]);
         let slot_size = le_u32(&head[0x38..]) as usize;
         let slot_count = le_u32(&head[0x3c..]) as usize;
-        if !(0x40..=0x10000).contains(&slot_size) || slot_count > 1 << 16 {
+        if !(0x40..=0x10000).contains(&slot_size) || slot_count > 1 << 16 || slot_size * slot_count > 64 << 20 {
             return Err(format_err!("implausible parity journal geometry"));
         }
         let mut area = vec![0u8; slot_size * slot_count];

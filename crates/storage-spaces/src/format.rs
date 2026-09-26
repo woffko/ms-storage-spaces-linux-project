@@ -117,7 +117,10 @@ pub fn read_database<D: ReadAt + ?Sized>(dev: &D, offset: u64) -> Result<Option<
         timestamp: be_u64(&h[0x48..]),
     };
     let entry_size = header.entry_size as usize;
-    if !(0x20..=0x1000).contains(&entry_size) || header.entry_count > 1 << 20 {
+    if !(0x20..=0x1000).contains(&entry_size)
+        || header.entry_count > 1 << 20
+        || entry_size * header.entry_count as usize > 64 << 20
+    {
         return Err(format_err!(
             "implausible database geometry: entry size {entry_size:#x}, {} entries",
             header.entry_count

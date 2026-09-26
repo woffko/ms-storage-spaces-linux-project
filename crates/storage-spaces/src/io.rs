@@ -173,6 +173,11 @@ impl SparseImage {
         self.ranges.insert(start, bytes);
     }
 
+    /// Stored ranges as (offset, length).
+    pub fn ranges(&self) -> Vec<(u64, usize)> {
+        self.ranges.iter().map(|(o, d)| (*o, d.len())).collect()
+    }
+
     /// Stored bytes (without holes).
     pub fn stored(&self) -> usize {
         self.ranges.values().map(Vec::len).sum()

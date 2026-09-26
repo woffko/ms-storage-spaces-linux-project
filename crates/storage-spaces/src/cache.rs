@@ -89,7 +89,12 @@ impl CacheHeader {
             chunk_size: le_u32(&b[0x58..]),
             chunk_count: le_u32(&b[0x5c..]),
         };
-        if !(0x40..=0x10000).contains(&h.slot_size) || h.chunk_size == 0 || !h.chunk_size.is_multiple_of(4096) {
+        if !(0x40..=0x10000).contains(&h.slot_size)
+            || h.slot_count > 1 << 16
+            || (h.slot_size as u64) * (h.slot_count as u64) > 64 << 20
+            || h.chunk_size == 0
+            || !h.chunk_size.is_multiple_of(4096)
+        {
             return Err(format_err!("implausible cache geometry: {h:?}"));
         }
         Ok(Some(h))
