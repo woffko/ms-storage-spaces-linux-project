@@ -7,6 +7,7 @@ bin=${1:-$here/../target/release/spaces}
 install -m 755 "$bin" /usr/local/sbin/spaces
 install -m 644 "$here/udev/69-storage-spaces.rules" /etc/udev/rules.d/69-storage-spaces.rules
 install -m 644 "$here/systemd/storage-spaces-attach.service" /etc/systemd/system/storage-spaces-attach.service
+install -D -m 644 "$here/man/spaces.8" /usr/local/share/man/man8/spaces.8
 # Kernel modules the backends use.
 printf 'ublk_drv\nnbd\n' > /etc/modules-load.d/storage-spaces.conf
 modprobe ublk_drv 2>/dev/null || true

@@ -1,0 +1,128 @@
+.TH SPACES 8 "2026-09-26" "storage-spaces 0.1" "System Administration"
+.SH NAME
+spaces \- read Microsoft Storage Spaces pools on Linux
+.SH SYNOPSIS
+.B spaces scan
+.br
+.B spaces attach
+.RB [ \-\-pool
+.IR name ]
+.RB [ \-\-space
+.IR name ]
+.RB [ \-\-backend
+.IR auto | dm | ublk | nbd | fuse ]
+.RB [ \-\-degraded ]
+.RI [ device ...]
+.br
+.B spaces detach
+.RI [ space ]
+.br
+.B spaces status
+.br
+.B spaces info
+.RB [ \-\-all ]
+.IR device ...
+.br
+.B spaces extents
+.I device ...
+.B \-\-space
+.I name
+.br
+.B spaces export
+.I device ...
+.B \-\-space
+.I name
+.B \-\-output
+.I file
+.br
+.B spaces dm\-table
+.I device ...
+.B \-\-space
+.I name
+.SH DESCRIPTION
+.B spaces
+reads the metadata of Microsoft Storage Spaces pools (Windows 10 and 11
+layout) from their member disks and exposes the virtual disks ("spaces") as
+read-only Linux block devices. It never writes to pool members.
+.PP
+Supported: simple, two- and three-way mirror, single and dual parity spaces,
+fixed and thin provisioning, the per-space write-back cache, pools with
+missing or failing disks as far as the redundancy allows. Not supported yet:
+writing, storage tiers, rebuilding two lost columns of a dual parity space,
+pools created by Windows 8 or Windows Server 2012.
+.SH COMMANDS
+.TP
+.B scan
+Lists the Storage Spaces pool members found among the block devices, grouped
+by pool, with the spaces of each pool.
+.TP
+.B attach
+Attaches the spaces of every complete pool (or of the selected pool/space).
+Each space appears as
+.BI /dev/mapper/ss\- pool \- space
+and every partition inside it as
+.BI /dev/mapper/ss\- pool \- space \-p N\fR.
+Pools with missing disks are skipped unless
+.B \-\-degraded
+is given. Spaces already attached are left alone.
+.TP
+.B detach
+Removes the devices of the given space (name, GUID or device-mapper name) or
+of all attached spaces, and stops their serving processes.
+.TP
+.B status
+Lists attached spaces, their backends and partition devices.
+.TP
+.B info\fR, \fBextents\fR, \fBexport\fR, \fBdm\-table
+Inspect a pool given by its member devices or images: pool, disks and
+spaces; the slab allocation of a space; copy a space into a sparse image
+file; print a device-mapper table for a simple or mirror space.
+.SH BACKENDS
+.TP
+.B dm
+Device-mapper table over the member devices; no process. Used by
+.B auto
+for simple spaces whose logical sector size matches the members'.
+.TP
+.B ublk
+A
+.B spaces serve\-ublk
+process (transient systemd unit) behind
+.BR /dev/ublkb N;
+needs Linux 6.0 or newer and the
+.B ublk_drv
+module. Exposes the space's own sector size and keeps reading when a mirror
+copy or parity column fails.
+.TP
+.B nbd
+A
+.B spaces serve\-nbd
+process connected with
+.BR nbd\-client (8).
+.TP
+.B fuse
+A
+.B spaces serve\-fuse
+process exposing an image file, attached with
+.BR losetup (8).
+.SH FILES
+.TP
+.I /run/storage-spaces/
+State of attached spaces.
+.TP
+.I /etc/udev/rules.d/69-storage-spaces.rules
+Starts
+.B storage-spaces-attach.service
+when a pool member appears.
+.SH EXAMPLES
+.nf
+spaces scan
+spaces attach
+mount \-o ro /dev/mapper/ss\-Storage_pool\-Data\-p2 /mnt
+spaces detach
+.fi
+.SH SEE ALSO
+.BR dmsetup (8),
+.BR nbd\-client (8),
+.BR losetup (8),
+.BR mount (8)
