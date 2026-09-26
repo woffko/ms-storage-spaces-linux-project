@@ -1,0 +1,17 @@
+[Unit]
+Description=Attach Microsoft Storage Spaces pools read-only
+Documentation=https://github.com/w0wkin/Linux_Storage_Spaces
+DefaultDependencies=no
+After=systemd-udevd.service systemd-modules-load.service
+Before=local-fs-pre.target
+Wants=local-fs-pre.target
+
+[Service]
+Type=oneshot
+# Let the other members of a pool finish appearing first.
+ExecStartPre=-/usr/bin/udevadm settle --timeout=30
+ExecStart=/usr/local/sbin/spaces attach
+TimeoutStartSec=120
+
+[Install]
+WantedBy=local-fs-pre.target

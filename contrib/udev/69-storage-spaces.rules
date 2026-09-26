@@ -1,0 +1,5 @@
+# Attach Microsoft Storage Spaces pools read-only when their member disks
+# appear. The service attaches every complete pool and skips pools that are
+# still missing disks; it runs again for every further member that shows up.
+ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_PART_ENTRY_TYPE}=="e75caf8f-f680-4cee-afa3-b001e56efc2d", \
+  TAG+="systemd", ENV{SYSTEMD_WANTS}+="storage-spaces-attach.service"
