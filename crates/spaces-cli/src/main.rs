@@ -17,14 +17,39 @@ use clap::{Parser, Subcommand};
 use storage_spaces::format::{SLAB_SIZE, SpaceRole};
 use storage_spaces::io::ReadAt;
 use storage_spaces::segments::SegmentKind;
-use storage_spaces::{Pool, Space, testpattern};
+use storage_spaces::{Pool, Space, UncleanParity, testpattern};
 
 /// Inspect and read Microsoft Storage Spaces pools.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
+    /// What to return for parity stripes whose parity does not match their
+    /// data after an unclean shutdown: fail the read, or the on-disk data.
+    #[arg(long, global = true, value_enum, default_value = "refuse")]
+    unclean_parity: UncleanArg,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum UncleanArg {
+    Refuse,
+    Data,
+}
+
+static OPEN_OPTIONS: std::sync::OnceLock<storage_spaces::OpenOptions> = std::sync::OnceLock::new();
+
+/// Opens a space with the options given on the command line.
+fn open_space<'p>(pool: &'p Pool<File>, id: u64) -> storage_spaces::Result<storage_spaces::SpaceReader<'p, File>> {
+    pool.open_space_with(id, OPEN_OPTIONS.get().copied().unwrap_or_default())
+}
+
+/// Command-line arguments that serving processes inherit from `attach`.
+pub(crate) fn inherited_args() -> Vec<String> {
+    match OPEN_OPTIONS.get().map(|o| o.unclean_parity) {
+        Some(UncleanParity::PreferData) => vec!["--unclean-parity".into(), "data".into()],
+        _ => Vec::new(),
+    }
 }
 
 #[derive(Subcommand)]
@@ -168,7 +193,13 @@ enum Command {
 }
 
 fn main() -> Result<()> {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    let unclean_parity = match cli.unclean_parity {
+        UncleanArg::Refuse => UncleanParity::Refuse,
+        UncleanArg::Data => UncleanParity::PreferData,
+    };
+    let _ = OPEN_OPTIONS.set(storage_spaces::OpenOptions { unclean_parity });
+    match cli.command {
         Command::Info { devices, all } => info(&open_pool(&devices)?, all),
         Command::Extents { devices, space } => {
             let pool = open_pool(&devices)?;
@@ -194,7 +225,7 @@ fn main() -> Result<()> {
             ready_file,
         } => {
             let pool: &'static Pool<File> = Box::leak(Box::new(open_pool_exclusive(&devices)?));
-            let reader = Box::leak(Box::new(pool.open_space(find_space(pool, &space)?.id())?));
+            let reader = Box::leak(Box::new(open_space(pool, find_space(pool, &space)?.id())?));
             ublk::serve(pool, reader, move |dev| {
                 println!("{dev}");
                 if let Some(path) = &ready_file
@@ -212,7 +243,7 @@ fn main() -> Result<()> {
             ready_file,
         } => {
             let pool: &'static Pool<File> = Box::leak(Box::new(open_pool_exclusive(&devices)?));
-            let reader = Box::leak(Box::new(pool.open_space(find_space(pool, &space)?.id())?));
+            let reader = Box::leak(Box::new(open_space(pool, find_space(pool, &space)?.id())?));
             fuse::serve(reader, pool.logical_sector_size, &mountpoint, ready_file.as_deref())
         }
         #[cfg(target_os = "linux")]
@@ -350,8 +381,22 @@ fn info(pool: &Pool<File>, all: bool) -> Result<()> {
             println!("       parent {parent}");
         }
         if s.is_user() {
-            match pool.open_space(s.id()) {
+            match open_space(pool, s.id()) {
                 Ok(r) => {
+                    if r.unclean_parity_runs() > 0 {
+                        println!(
+                            "       parity journal: {} extent run(s) not cleanly shut down; mismatching stripes are {}",
+                            r.unclean_parity_runs(),
+                            if OPEN_OPTIONS
+                                .get()
+                                .is_some_and(|o| o.unclean_parity == UncleanParity::PreferData)
+                            {
+                                "read as on disk"
+                            } else {
+                                "refused (--unclean-parity data reads them as on disk)"
+                            }
+                        );
+                    }
                     if let Some(cache) = r.cache() {
                         println!(
                             "       write-back cache: {} of {} chunks of {} in use",
@@ -393,7 +438,7 @@ fn extents(pool: &Pool<File>, space: &Space) -> Result<()> {
 }
 
 fn export(pool: &Pool<File>, space: &Space, output: &PathBuf) -> Result<()> {
-    let reader = pool.open_space(space.id())?;
+    let reader = open_space(pool, space.id())?;
     let mut out = OpenOptions::new().write(true).create_new(true).open(output)?;
     const CHUNK: usize = 1 << 20;
     let mut buf = vec![0u8; CHUNK];
@@ -420,7 +465,7 @@ fn export(pool: &Pool<File>, space: &Space, output: &PathBuf) -> Result<()> {
 }
 
 fn check_pattern(pool: &Pool<File>, space: &Space, length: Option<u64>) -> Result<()> {
-    let reader = pool.open_space(space.id())?;
+    let reader = open_space(pool, space.id())?;
     let total = length.unwrap_or(reader.size()).min(reader.size());
     const CHUNK: usize = 1 << 20;
     let mut buf = vec![0u8; CHUNK];
@@ -438,7 +483,7 @@ fn check_pattern(pool: &Pool<File>, space: &Space, length: Option<u64>) -> Resul
 }
 
 fn dm_table(pool: &Pool<File>, space: &Space, paths: &[PathBuf]) -> Result<()> {
-    let reader = pool.open_space(space.id())?;
+    let reader = open_space(pool, space.id())?;
     for seg in reader.segments()? {
         let (start, length) = (seg.start / 512, seg.length / 512);
         match seg.kind {
@@ -511,7 +556,7 @@ fn verify_pattern(path: &PathBuf, tag: &str, length: Option<u64>, random: Option
 }
 
 fn serve_nbd(pool: &Pool<File>, space: &Space, socket: &PathBuf, ready_file: Option<&std::path::Path>) -> Result<()> {
-    let reader = pool.open_space(space.id())?;
+    let reader = open_space(pool, space.id())?;
     let listener = std::os::unix::net::UnixListener::bind(socket)
         .with_context(|| format!("cannot listen on {}", socket.display()))?;
     let export = nbd::Export {

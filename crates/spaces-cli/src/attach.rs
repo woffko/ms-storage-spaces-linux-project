@@ -295,6 +295,7 @@ fn start_server(unit: &str, kind: &str, paths: &[PathBuf], space: &str, extra: &
         ready.display().to_string(),
     ]);
     args.extend(extra.iter().map(|s| s.to_string()));
+    args.extend(crate::inherited_args());
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     run("systemd-run", &refs, None)?;
     if let Err(e) = wait_for(&ready, Duration::from_secs(30)) {
@@ -325,7 +326,7 @@ pub fn is_attached(space: &Space) -> bool {
 /// Attaches one space. Returns the state describing what was created.
 pub fn attach_space(pool: &Pool<File>, space: &Space, paths: &[PathBuf], requested: Backend) -> Result<State> {
     let guid = space.info.guid.to_string();
-    let reader = pool.open_space(space.id())?;
+    let reader = crate::open_space(pool, space.id())?;
     let sector = pool.logical_sector_size;
     let backend = choose(requested, &reader, paths, sector)?;
     let name = dm_name(&pool.name, space.name());

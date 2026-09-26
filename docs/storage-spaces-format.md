@@ -218,13 +218,44 @@ every read.
 Extent `slab_count` is always in 256 MiB units, also for spaces with a 1 GiB
 allocation unit (**verified**: pool `au1g`).
 
+## Parity journal (SPVDT, LE)
+
+Parity spaces have a hidden role 0x0a child holding "SPVDT\0\0\0", with the
+same header and slot geometry as SPCACHE (CRC-32 fields, owner GUID,
+`slot_offset`, `slot_size`, `slot_count`). Mapping slots (type 0) hold
+entries keyed by the owner offset where an extent run starts:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0x00 | 8 | owner offset of the extent run |
+| 0x08 | 2 | state: 1 = bitmap, 2 = run list, 3 = whole run consistent |
+| 0x0a | 2 | states 1 and 2: byte length of what follows |
+| 0x0c | … | state 1: bitmap, one bit per stripe; state 2: u16 LE runs (bit 15 = consistent, bits 0-14 = stripes); state 3: 4 bytes |
+
+The newest entry per run wins. After a clean shutdown the runs are state 3
+(or all-set bitmaps). In the crash experiment `crashparity` (disks pulled
+while writing) the entry was state 2 `consistent 1164, unknown 2932` over
+4096 stripes, and exactly stripe 1165 held new parity with a stale (zero) data
+unit; Windows recovered that unit from parity, while in stripe 1164 it kept
+the data and rewrote the stale parity. Because the rule Windows applies is
+not known, the reader checks every stripe the journal does not mark
+consistent (P = XOR of the data) and refuses reads of mismatching stripes
+unless told to prefer the data (**verified**: every other MiB of the crashed
+pool equals what Windows shows after recovery).
+
+The mirror dirty region log (SPACEDRT, role 6) was unchanged in the mirror
+crash experiment; Windows' recovered content equalled copy 0, which the reader
+prefers. The thin space crash (cache in use) read exactly like Windows'
+recovered space.
+
 ## Open questions
 
 * SDBB entries carry no checksum of their own; how Windows detects torn
   entries is unknown.
 * Remaining record fields (provisioning type, sizes, disk attributes, tiers).
 * Per-space databases (type 7 record lists member disks).
-* Role 6 / 0x0a children; slot type 1; cache head/tail and destaging.
+* SPACEDRT contents when regions are dirty; cache slot type 1; cache head/tail.
+* Which side Windows trusts for an inconsistent parity stripe.
 * The second parity code of dual parity.
 * Tier movement by the tiering optimizer (not exercised yet), enclosure
   awareness, older pool versions

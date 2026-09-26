@@ -89,11 +89,15 @@ impl Layout {
                     policy.copies
                 ));
             }
-            let slab = e.virtual_slab.checked_sub(base_slab).ok_or_else(|| {
-                format_err!("extent at virtual slab {} lies before the layout start", e.virtual_slab)
-            })?;
+            let slab = e
+                .virtual_slab
+                .checked_sub(base_slab)
+                .ok_or_else(|| format_err!("extent at virtual slab {} lies before the layout start", e.virtual_slab))?;
             if slab % data_columns != 0 {
-                return Err(format_err!("extent starts at virtual slab {} not aligned to a row", e.virtual_slab));
+                return Err(format_err!(
+                    "extent starts at virtual slab {} not aligned to a row",
+                    e.virtual_slab
+                ));
             }
             runs.entry((e.column, e.copy)).or_default().push(Run {
                 first_row: slab / data_columns,
@@ -158,16 +162,23 @@ impl Layout {
     /// Parity rotation restarts at the first row of every extent run.
     fn rotation_stripe(&self, stripe: u64) -> u64 {
         let per_row = SLAB_SIZE / self.interleave;
-        let row = stripe / per_row;
-        let first_row = self
-            .runs
+        stripe - self.run_first_row(stripe / per_row) * per_row
+    }
+
+    /// First row of the extent run holding `row` (0 if unallocated).
+    pub fn run_first_row(&self, row: u64) -> u64 {
+        self.runs
             .get(&(0, 0))
             .and_then(|runs| {
                 let i = runs.partition_point(|r| r.first_row + r.rows <= row);
                 runs.get(i).filter(|r| r.first_row <= row)
             })
-            .map_or(0, |r| r.first_row);
-        stripe - first_row * per_row
+            .map_or(0, |r| r.first_row)
+    }
+
+    /// Owner offset where the extent run holding `row` starts.
+    pub fn run_start_offset(&self, row: u64) -> u64 {
+        self.base + self.run_first_row(row) * SLAB_SIZE * self.data_columns
     }
 
     /// Physical slab backing a row of a column copy, if allocated.

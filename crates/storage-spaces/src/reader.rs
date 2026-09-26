@@ -6,13 +6,34 @@ use crate::cache::{CacheHeader, CacheIndex, Lookup};
 use crate::error::{Error, Result, format_err};
 use crate::format::{Resiliency, SLAB_SIZE, SpaceRole};
 use crate::io::ReadAt;
+use crate::journal::ParityJournal;
 use crate::layout::{Layout, Location};
 use crate::pool::{Pool, Space};
+use std::sync::Arc;
+
+/// What to do with a parity stripe whose data does not match its parity
+/// after an unclean shutdown (the parity journal marks such stripes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UncleanParity {
+    /// Fail the read: Windows may resolve the stripe either way.
+    #[default]
+    Refuse,
+    /// Return the data columns as they are on disk.
+    PreferData,
+}
+
+/// Options for opening a space.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OpenOptions {
+    pub unclean_parity: UncleanParity,
+}
 
 /// A space layout bound to the pool it reads from.
 struct Mapped<'p, D> {
     pool: &'p Pool<D>,
     layout: Layout,
+    journal: Option<Arc<ParityJournal>>,
+    unclean: UncleanParity,
 }
 
 impl<D: ReadAt> Mapped<'_, D> {
@@ -25,6 +46,8 @@ impl<D: ReadAt> Mapped<'_, D> {
         Ok(Mapped {
             pool,
             layout: Layout::with_base(&policy, &space.extents, base)?,
+            journal: None,
+            unclean: UncleanParity::default(),
         })
     }
 
@@ -39,6 +62,16 @@ impl<D: ReadAt> Mapped<'_, D> {
         let loc = l.locate(offset);
         let n = buf.len().min(loc.contiguous as usize);
         let buf = &mut buf[..n];
+        if let Some(journal) = &self.journal
+            && l.resiliency == Resiliency::Parity
+            && self.unclean == UncleanParity::Refuse
+            && journal.is_dirty(l.run_start_offset(loc.row), l.stripe_of(&loc))
+            && !self.stripe_consistent(&loc, n)?
+        {
+            return Err(Error::Pool(format!(
+                "parity stripe at {offset:#x} does not match its data after an unclean shutdown"
+            )));
+        }
         let mut allocated = false;
         let mut last_error = None;
         for copy in 0..l.copies {
@@ -68,6 +101,27 @@ impl<D: ReadAt> Mapped<'_, D> {
             )));
         }
         Ok((n, false)) // not allocated (thin provisioning, or another tier)
+    }
+
+    /// Whether the XOR parity of the stripe holding `loc` matches its data
+    /// over `len` bytes. Missing columns count as consistent (nothing to check).
+    fn stripe_consistent(&self, loc: &Location, len: usize) -> Result<bool> {
+        let l = &self.layout;
+        let p = l.parity_column(l.stripe_of(loc));
+        let q = (l.parity_units == 2).then(|| (p + 1) % l.columns);
+        let mut acc = vec![0u8; len];
+        let mut unit = vec![0u8; len];
+        for column in (0..l.columns).filter(|&c| Some(c) != q) {
+            let Some((disk, slab)) = l.physical(column, 0, loc.row) else {
+                return Ok(true);
+            };
+            match self.pool.read_slab(disk, slab, loc.offset_in_slab, &mut unit) {
+                Ok(true) => acc.iter_mut().zip(&unit).for_each(|(a, u)| *a ^= u),
+                Ok(false) | Err(Error::Io(_)) => return Ok(true),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(acc.iter().all(|&b| b == 0))
     }
 
     /// Rebuilds a unit of a missing column from the XOR parity and the other
@@ -119,12 +173,12 @@ pub struct SpaceReader<'p, D> {
 }
 
 impl<'p, D: ReadAt> SpaceReader<'p, D> {
-    pub(crate) fn new(pool: &'p Pool<D>, id: u64) -> Result<Self> {
+    pub(crate) fn new(pool: &'p Pool<D>, id: u64, options: OpenOptions) -> Result<Self> {
         let space = pool
             .spaces
             .get(&id)
             .ok_or_else(|| Error::Pool(format!("no space with id {id}")))?;
-        let base = Mapped::new(pool, space)?;
+        let mut base = Mapped::new(pool, space)?;
         let size = match space.info.size {
             Some(size) => size,
             None => {
@@ -140,11 +194,16 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
             }
         };
         let cache = Self::open_cache(pool, space)?;
-        let tiers = pool
+        let mut tiers = pool
             .children(space.id())
             .filter(|c| c.info.is_child && !c.extents.is_empty())
             .map(|c| Mapped::new(pool, c))
             .collect::<Result<Vec<_>>>()?;
+        let journal = Self::open_journal(pool, space)?.map(Arc::new);
+        for m in std::iter::once(&mut base).chain(tiers.iter_mut()) {
+            m.journal = journal.clone();
+            m.unclean = options.unclean_parity;
+        }
         Ok(SpaceReader {
             space,
             size,
@@ -188,6 +247,26 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
 
     pub fn pool(&self) -> &'p Pool<D> {
         self.base.pool
+    }
+
+    /// Loads the parity journal of a space, if it has one.
+    fn open_journal(pool: &'p Pool<D>, space: &Space) -> Result<Option<ParityJournal>> {
+        let containers = pool
+            .children(space.id())
+            .filter(|c| c.info.role == SpaceRole::Other(0x0a));
+        for container in containers {
+            if let Some(child) = pool.children(container.id()).find(|c| !c.extents.is_empty()) {
+                let mapped = Mapped::new(pool, child)?;
+                return ParityJournal::load(space.info.guid, |off, buf| mapped.read_exact(off, buf));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Number of extent runs whose parity journal marks stripes that may be
+    /// inconsistent (0 after a clean shutdown).
+    pub fn unclean_parity_runs(&self) -> usize {
+        self.base.journal.as_ref().map_or(0, |j| j.dirty_runs())
     }
 
     /// Size of the space in bytes.

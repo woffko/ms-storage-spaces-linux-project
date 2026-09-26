@@ -10,7 +10,7 @@ use crate::format::{
 use crate::gpt::{PartitionLocation, find_spaces_partition};
 use crate::guid::Guid;
 use crate::io::{ReadAt, read_vec};
-use crate::reader::SpaceReader;
+use crate::reader::{OpenOptions, SpaceReader};
 
 /// A device that belongs to the pool.
 #[derive(Debug, Clone)]
@@ -227,7 +227,12 @@ impl<D: ReadAt> Pool<D> {
 
     /// Opens a space for reading.
     pub fn open_space(&self, id: u64) -> Result<SpaceReader<'_, D>> {
-        SpaceReader::new(self, id)
+        SpaceReader::new(self, id, OpenOptions::default())
+    }
+
+    /// Opens a space with explicit options.
+    pub fn open_space_with(&self, id: u64, options: OpenOptions) -> Result<SpaceReader<'_, D>> {
+        SpaceReader::new(self, id, options)
     }
 
     /// Device index and byte offset of a physical slab, or `None` if its

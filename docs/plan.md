@@ -63,9 +63,16 @@ in this repository.
   journal).
 * Degraded reads: any single member missing at open time or failing at run
   time for mirror, parity and dual parity pools (`reads_fail_over_...`).
-* Open: the Q code of dual parity (two-column rebuild), tiers (generating),
-  old Windows layouts (needs older Windows VMs), DRT/journal replay after a
-  crash, extent/disk health states, quorum rules.
+* Storage tiers and mirror-accelerated parity read correctly (`tiered`,
+  `mapar`); tiers are child spaces with their own start and layout.
+* Crash experiments (`tools/vm/New-CrashPool.ps1`, disks pulled during
+  writes, Windows' recovered content recorded): mirror and thin+cache read
+  exactly like Windows after recovery; parity equals it except one MiB whose
+  stripe the parity journal marks unknown and whose parity mismatches, which
+  is refused by default (`--unclean-parity data` reads the disk as is)
+  (`cargo test --test crash`).
+* Open: the Q code of dual parity (two-column rebuild), old Windows layouts
+  (needs older Windows VMs), extent/disk health states, quorum rules.
 
 ### M2 (backends done, corpus matrix pending)
 
