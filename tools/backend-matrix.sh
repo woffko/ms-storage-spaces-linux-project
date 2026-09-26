@@ -6,9 +6,6 @@
 set -uo pipefail
 corpus=${1:-/srv/spaces/pools}
 backends=${BACKENDS:-"dm ublk nbd fuse"}
-# Keep the udev-triggered service from attaching the loop devices itself.
-systemctl mask --runtime --quiet storage-spaces-attach.service
-trap 'systemctl unmask --runtime --quiet storage-spaces-attach.service' EXIT
 json() { python3 -c 'import json,sys; m=json.load(open(sys.argv[1],encoding="utf-8-sig")); print(eval(sys.argv[2]))' "$@"; }
 pass=0; fail=0; skip=0
 for dir in "$corpus"/*/; do
@@ -16,10 +13,16 @@ for dir in "$corpus"/*/; do
   [[ -f $dir/manifest.json ]] || continue
   space=$(json "$dir/manifest.json" 'm["space"]["name"]')
   plen=$(json "$dir/manifest.json" 'm.get("pattern_size") or m["space"]["size"]')
-  loops=()
-  for img in "$dir"/disk*.img; do loops+=("$(losetup -r -P -f --show "$img")"); done
-  udevadm settle
-  parts=(); for l in "${loops[@]}"; do parts+=("${l}p2"); done
+  # Loop devices without partition scanning (so the udev rule does not
+  # attach them) plus a linear device-mapper wrapper over the Storage
+  # Spaces partition of each image.
+  loops=(); parts=(); k=0
+  for img in "$dir"/disk*.img; do
+    l=$(losetup -r -f --show "$img"); loops+=("$l")
+    read -r start size < <(sfdisk -d "$l" | awk -F'[=,]' '/type=E75CAF8F/{gsub(/ /,""); print $2, $4}')
+    echo "0 $size linear $l $start" | dmsetup create --readonly "matrix-$k"
+    parts+=("/dev/mapper/matrix-$k"); k=$((k + 1))
+  done
   for b in $backends; do
     if ! out=$(spaces attach --backend "$b" "${parts[@]}" 2>&1); then
       if [[ $b == dm && $out == *"cannot map"* ]]; then
@@ -36,6 +39,7 @@ for dir in "$corpus"/*/; do
     fi
     spaces detach >/dev/null || echo "WARN detach failed for $name/$b"
   done
+  for ((i = 0; i < k; i++)); do dmsetup remove "matrix-$i"; done
   for l in "${loops[@]}"; do losetup -d "$l"; done
 done
 echo "passed $pass, failed $fail, skipped $skip"
