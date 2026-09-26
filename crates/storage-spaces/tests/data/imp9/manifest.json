@@ -1,0 +1,127 @@
+﻿{
+    "name":  "imp9",
+    "kind":  "impulse",
+    "windows_build":  "10.0.26340.0",
+    "space":  {
+                  "name":  "imp9",
+                  "guid":  "00fb99de-20f7-4b89-af9a-bcef776417a4",
+                  "size":  7516192768,
+                  "columns":  9,
+                  "interleave":  65536,
+                  "redundancy":  2,
+                  "write_cache":  1610612736
+              },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "600224800A495AD0D0AB421023E02F9A",
+                      "spaces_guid":  "183ff660-f0b9-94b0-af68-f4a1e9a7d81a",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "600224802372E736E6E739C6E02071D8",
+                      "spaces_guid":  "9d6004cf-8017-1888-91b3-a2520cf928ea",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk2.vhdx",
+                      "unique_id":  "60022480EDA5EE38677D81530C2E6105",
+                      "spaces_guid":  "6064e356-8db8-ab2b-1029-09291352e2f1",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk3.vhdx",
+                      "unique_id":  "60022480A7AFD4F3448EB4944B52EAF2",
+                      "spaces_guid":  "b2eb33f6-e0e8-1326-23ba-11d2c0bc2e53",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk4.vhdx",
+                      "unique_id":  "60022480F0CEEEABD6191303E5E414FA",
+                      "spaces_guid":  "ab87b292-c82c-adb5-6cbc-1c1df674bc66",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk5.vhdx",
+                      "unique_id":  "6002248036B2CE10A2EAAAFEE36CB9A5",
+                      "spaces_guid":  "b228626f-fee7-aaad-d406-baf5ea45ffab",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk6.vhdx",
+                      "unique_id":  "600224803573A496A91F25A54BDEE492",
+                      "spaces_guid":  "83284e52-7069-1246-6b42-8095560b6865",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk7.vhdx",
+                      "unique_id":  "60022480430235262F3B490C22D02F34",
+                      "spaces_guid":  "80b3b4f7-e30e-7248-ec0a-640cf3d81a86",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk8.vhdx",
+                      "unique_id":  "60022480DF4BA6648AC1366711BD9218",
+                      "spaces_guid":  "9004d17c-4e4c-e7ea-0c50-3d25843b5a21",
+                      "size":  8589934592
+                  }
+              ],
+    "impulses":  [
+                     [
+
+                     ],
+                     [
+                         [
+                             0,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             1,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             2,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             3,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             4,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             5,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             6,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+
+                     ]
+                 ]
+}

@@ -169,12 +169,18 @@ Column offset `o` is in row `o / 256 MiB` of the column.
   chunk of a unit is four 128-byte packets, packet `j` holding bit `j` of
   4-bit symbols, and Q = sum of `c_k * D_k` where multiplying by `c` XORs
   input packet `j` into output packet `i` when bit `i` of `c * x^j` is set.
-  With 5 data columns the coefficients are `c = 9, 1, 8, 2, 11` for data
-  units 0..4 of the stripe, independent of the physical column
+  The coefficients depend on the number of data columns D and not on the
+  physical column: D = 5: `9, 1, 8, 2, 11`; D = 6..8: the first D of
+  `13, 9, 4, 1, 12, 8, 5, 2` (5 data columns use every second element of
+  that sequence). Measured with impulse pools of 7-10 columns (`imp7b`,
+  `imp8`-`imp10`)
   (**verified**: derived from single-byte impulse stripes written by Windows
   (pool `imp7b`) and checked over whole units of 12 stripes of `dual7`; any
-  two failed disks of `dual7` read back its full pattern). Coefficients for
-  other column counts are not known yet.
+  two failed disks of `dual7` read back its full pattern).
+* Dual parity with 11 or more columns uses several groups (`groups` in the
+  policy: 11-12 columns 2 groups, 17 columns 3 groups) and more parity units
+  per stripe (12 columns: 9 data columns), a local reconstruction code. Its
+  layout is not decoded; such spaces are refused.
 * Thin spaces: rows without an extent are unallocated and read as zeros.
 
 ## Write-back cache (SPCACHE, LE) (**verified** for thin spaces)
@@ -270,7 +276,7 @@ recovered space.
 * Per-space databases (type 7 record lists member disks).
 * SPACEDRT contents when regions are dirty; cache slot type 1; cache head/tail.
 * Which side Windows trusts for an inconsistent parity stripe.
-* Dual parity Q coefficients for column counts other than 7.
+* Dual parity with several groups (local reconstruction code, 11+ columns).
 * Tier movement by the tiering optimizer (not exercised yet), enclosure
   awareness, older pool versions
   (Windows 8/Server 2012 layout differs, see StorageSpaceReconstructor).

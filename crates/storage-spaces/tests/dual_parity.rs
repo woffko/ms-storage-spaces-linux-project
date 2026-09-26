@@ -29,41 +29,54 @@ impl ReadAt for Failing {
     }
 }
 
+fn manifest(dir: &Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
+    serde_json::from_str(text.trim_start_matches('\u{feff}')).unwrap()
+}
+
 #[test]
 fn any_two_columns_are_rebuilt_from_p_and_q() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/imp7b");
-    let images: Vec<SparseImage> = (0..7)
-        .map(|i| SparseImage::read_from(File::open(dir.join(format!("disk{i}.fixture"))).unwrap()).unwrap())
-        .collect();
-    let stripe = 5 * 0x10000u64;
-    let stripes = 15;
-    let reference: Vec<u8> = {
-        let pool = Pool::open(images.clone()).unwrap();
-        let r = pool.open_space(pool.find_space("imp7b").unwrap().id()).unwrap();
-        let mut v = vec![0u8; (stripe * stripes) as usize];
-        r.read_exact_at(&mut v, 0).unwrap();
-        v
-    };
-    assert!(reference.iter().any(|&b| b != 0));
-    for a in 0..7 {
-        for b in a + 1..7 {
-            let flags: Vec<Arc<AtomicBool>> = (0..7).map(|_| Arc::new(AtomicBool::new(false))).collect();
-            let devices: Vec<Failing> = images
-                .iter()
-                .zip(&flags)
-                .map(|(image, f)| Failing {
-                    image: image.clone(),
-                    broken: f.clone(),
-                })
-                .collect();
-            let pool = Pool::open(devices).unwrap();
-            let r = pool.open_space(pool.find_space("imp7b").unwrap().id()).unwrap();
-            flags[a].store(true, Ordering::Relaxed);
-            flags[b].store(true, Ordering::Relaxed);
-            let mut v = vec![0u8; reference.len()];
-            r.read_exact_at(&mut v, 0)
-                .unwrap_or_else(|e| panic!("disks {a}+{b}: {e}"));
-            assert!(v == reference, "disks {a}+{b} rebuilt different data");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let mut dirs: Vec<_> = std::fs::read_dir(&root).unwrap().map(|e| e.unwrap().path()).collect();
+    dirs.sort();
+    for dir in dirs {
+        let m = manifest(&dir);
+        let name = m["space"]["name"].as_str().unwrap();
+        let columns = m["space"]["columns"].as_u64().unwrap() as usize;
+        let n = m["disks"].as_array().unwrap().len();
+        let images: Vec<SparseImage> = (0..n)
+            .map(|i| SparseImage::read_from(File::open(dir.join(format!("disk{i}.fixture"))).unwrap()).unwrap())
+            .collect();
+        let stripe = (columns as u64 - 2) * 0x10000;
+        let stripes = m["impulses"].as_array().unwrap().len() as u64;
+        let reference: Vec<u8> = {
+            let pool = Pool::open(images.clone()).unwrap();
+            let r = pool.open_space(pool.find_space(name).unwrap().id()).unwrap();
+            let mut v = vec![0u8; (stripe * stripes) as usize];
+            r.read_exact_at(&mut v, 0).unwrap();
+            v
+        };
+        assert!(reference.iter().any(|&b| b != 0), "{name}");
+        for a in 0..n {
+            for b in a + 1..n {
+                let flags: Vec<Arc<AtomicBool>> = (0..n).map(|_| Arc::new(AtomicBool::new(false))).collect();
+                let devices: Vec<Failing> = images
+                    .iter()
+                    .zip(&flags)
+                    .map(|(image, f)| Failing {
+                        image: image.clone(),
+                        broken: f.clone(),
+                    })
+                    .collect();
+                let pool = Pool::open(devices).unwrap();
+                let r = pool.open_space(pool.find_space(name).unwrap().id()).unwrap();
+                flags[a].store(true, Ordering::Relaxed);
+                flags[b].store(true, Ordering::Relaxed);
+                let mut v = vec![0u8; reference.len()];
+                r.read_exact_at(&mut v, 0)
+                    .unwrap_or_else(|e| panic!("{name}: disks {a}+{b}: {e}"));
+                assert!(v == reference, "{name}: disks {a}+{b} rebuilt different data");
+            }
         }
     }
 }

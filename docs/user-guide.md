@@ -11,7 +11,8 @@ never writes to the pool disks.
 | Simple (striped), any column count and interleave | read |
 | Two-way and three-way mirror | read, survives missing or failing disks |
 | Single parity | read, one missing or failing disk rebuilt from parity |
-| Dual parity | read; one missing disk rebuilt, two for 7-column spaces |
+| Dual parity, 7-10 columns | read; any two missing disks rebuilt |
+| Dual parity, 11+ columns (grouped) | not supported yet |
 | Fixed and thin provisioning | read |
 | Write-back cache (default for new spaces) | read, including data not yet moved out of the cache |
 | Storage tiers, mirror-accelerated parity | read |

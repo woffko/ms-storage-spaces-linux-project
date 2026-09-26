@@ -10,11 +10,16 @@ const POLY: u8 = 0x13;
 pub const PACKET: usize = 128;
 pub const CHUNK: usize = 4 * PACKET;
 
-/// Q coefficients of the data units, by number of data columns (verified
-/// for 5 data columns, a 7-column dual parity space).
+/// Q coefficients of the data units, by number of data columns, as
+/// measured on Windows-created spaces of 7 to 10 columns (the widths that use
+/// a single group; wider dual parity spaces use local reconstruction codes).
+/// From 6 data columns on they are prefixes of one sequence; 5 data columns
+/// use every second element of it.
 pub fn coefficients(data_columns: u64) -> Option<&'static [u8]> {
+    const WIDE: [u8; 8] = [13, 9, 4, 1, 12, 8, 5, 2];
     match data_columns {
         5 => Some(&[9, 1, 8, 2, 11]),
+        6..=8 => Some(&WIDE[..data_columns as usize]),
         _ => None,
     }
 }

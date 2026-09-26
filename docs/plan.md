@@ -85,9 +85,10 @@ in this repository.
   the old state).
 * Dual parity Q decoded (GF(16) bit-matrix Reed-Solomon, found with
   single-byte impulse stripes written by Windows, `tools/vm/New-ImpulsePool.ps1`);
-  any two failed disks of the 7-column pool are rebuilt (`cargo test`, also
-  in CI on the impulse pool fixture). Coefficients are known for 5 data
-  columns only; other widths rebuild one lost column.
+  any two failed disks are rebuilt for 7-10 column spaces (`cargo test`,
+  also in CI on the impulse pool fixtures).
+* Open: dual parity with 11+ columns uses groups (a local reconstruction
+  code); refused for now.
 
 ### M2 (exit criteria met on the test VM, 2026-09-26)
 

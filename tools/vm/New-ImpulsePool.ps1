@@ -7,35 +7,43 @@ it. The manifest lists the impulses per stripe.
 #>
 param(
     [Parameter(Mandatory)] [string] $Name,
-    [int] $DiskCount = 7,
+    [int] $DiskCount = 0,
     [int] $Columns = 7,
     [int] $InterleaveKB = 64,
     [int] $SizeMB = 5120,
+    [switch] $Simple,
     [string] $Root = 'C:\sstest'
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 if ($env:COMPUTERNAME -ne 'DESKTOP-ELS4LDK') { throw 'Unexpected machine' }
 
-# stripe -> list of (data unit index, byte offset in the unit, value)
-$impulses = @(
-    @(),
-    @(, @(0, 0, 1)),
-    @(, @(0, 0, 2)),
-    @(, @(0, 1, 1)),
-    @(, @(1, 0, 1)),
-    @(@(0, 0, 1), @(1, 0, 1)),
-    @(, @(0, 4096, 1)),
-    @(, @(2, 0, 1)),
-    @(, @(3, 0, 1)),
-    @(, @(4, 0, 1)),
-    @(, @(0, 0, 0x80)),
-    @(, @(0, 512, 1)),
-    @(, @(0, 8, 1)),
-    @(, @(0, 0, 3)),
-    @()
-)
-
+# stripe -> list of (data unit index, byte offset in the unit, value).
+# -Simple: stripe 0 empty, then one stripe per data unit with byte 0 = 1.
+if ($Simple) {
+    $impulses = @(, @())
+    for ($k = 0; $k -lt $Columns - 2; $k++) { $impulses += , @(, @($k, 0, 1)) }
+    $impulses += , @()
+} else {
+    $impulses = @(
+        @(),
+        @(, @(0, 0, 1)),
+        @(, @(0, 0, 2)),
+        @(, @(0, 1, 1)),
+        @(, @(1, 0, 1)),
+        @(@(0, 0, 1), @(1, 0, 1)),
+        @(, @(0, 4096, 1)),
+        @(, @(2, 0, 1)),
+        @(, @(3, 0, 1)),
+        @(, @(4, 0, 1)),
+        @(, @(0, 0, 0x80)),
+        @(, @(0, 512, 1)),
+        @(, @(0, 8, 1)),
+        @(, @(0, 0, 3)),
+        @()
+    )
+}
+if ($DiskCount -le 0) { $DiskCount = $Columns }
 $dir = Join-Path $Root $Name
 if (Test-Path $dir) { throw "Test pool directory already exists: $dir" }
 New-Item -ItemType Directory -Path $dir | Out-Null

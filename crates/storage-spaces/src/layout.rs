@@ -66,6 +66,12 @@ impl Layout {
         let base_slab = base / SLAB_SIZE;
         let data_columns = match policy.resiliency {
             Resiliency::Simple | Resiliency::Mirror => policy.columns,
+            Resiliency::Parity if policy.groups > 1 => {
+                return Err(Error::Unsupported(format!(
+                    "parity with {} groups (local reconstruction code, {} columns)",
+                    policy.groups, policy.columns
+                )));
+            }
             Resiliency::Parity if (1..=2).contains(&policy.redundancy) && policy.columns >= policy.redundancy + 2 => {
                 policy.columns - policy.redundancy
             }
