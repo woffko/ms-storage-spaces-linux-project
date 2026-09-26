@@ -13,6 +13,7 @@ while [[ ${1:-} == --* ]]; do
     --remove-remote) remove=1 ;;
     --crash) kind=crash; src_sub=crash/ ;;
     --stale) kind=stale ;;
+    --impulse) kind=impulse ;;
   esac
   shift
 done

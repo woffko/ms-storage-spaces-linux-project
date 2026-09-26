@@ -46,10 +46,10 @@ layout) from their member disks and exposes the virtual disks ("spaces") as
 read-only Linux block devices. It never writes to pool members.
 .PP
 Supported: simple, two- and three-way mirror, single and dual parity spaces,
+storage tiers,
 fixed and thin provisioning, the per-space write-back cache, pools with
 missing or failing disks as far as the redundancy allows. Not supported yet:
-writing, storage tiers, rebuilding two lost columns of a dual parity space,
-pools created by Windows 8 or Windows Server 2012.
+writing, pool management, pools created by other Windows releases.
 .SH COMMANDS
 .TP
 .B scan

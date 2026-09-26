@@ -1,0 +1,162 @@
+﻿{
+    "name":  "imp7b",
+    "kind":  "impulse",
+    "windows_build":  "10.0.26340.0",
+    "space":  {
+                  "name":  "imp7b",
+                  "guid":  "7417a9c8-9372-4993-80eb-3c64aa204a8d",
+                  "size":  5368709120,
+                  "columns":  7,
+                  "interleave":  65536,
+                  "redundancy":  2,
+                  "write_cache":  1073741824
+              },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "600224804F498BA44EA29F0B1B068650",
+                      "spaces_guid":  "8ec39a93-b59c-bbe5-3a3a-c658aad23341",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "6002248076B3F5CB6B58BBAF33784F22",
+                      "spaces_guid":  "a8e937a2-0425-6c43-1c33-0d10d2da09e4",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk2.vhdx",
+                      "unique_id":  "60022480F415AADFA6E5FDB56DD5905E",
+                      "spaces_guid":  "7788a784-0197-837e-5910-0a7964b0f951",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk3.vhdx",
+                      "unique_id":  "60022480BB0AD22AECA1647C0BBD9634",
+                      "spaces_guid":  "a917f2be-0c56-25b6-7ddc-086b8ffb00e5",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk4.vhdx",
+                      "unique_id":  "60022480B296885A2B29C067E2525739",
+                      "spaces_guid":  "d6aec1c7-2b43-4f44-20e3-92c66f391976",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk5.vhdx",
+                      "unique_id":  "60022480B5348F4EBA7EC976B4AEAAF1",
+                      "spaces_guid":  "fef43d9d-0569-90d9-f920-f009fc728186",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk6.vhdx",
+                      "unique_id":  "600224800939291E11D5627E4D18CB86",
+                      "spaces_guid":  "1bb109bb-e053-d061-f05f-2aa446bcf524",
+                      "size":  8589934592
+                  }
+              ],
+    "impulses":  [
+                     [
+
+                     ],
+                     [
+                         [
+                             0,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             0,
+                             0,
+                             2
+                         ]
+                     ],
+                     [
+                         [
+                             0,
+                             1,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             1,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             0,
+                             0,
+                             1
+                         ],
+                         [
+                             1,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             0,
+                             4096,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             2,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             3,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             4,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             0,
+                             0,
+                             128
+                         ]
+                     ],
+                     [
+                         [
+                             0,
+                             512,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             0,
+                             8,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             0,
+                             0,
+                             3
+                         ]
+                     ],
+                     [
+
+                     ]
+                 ]
+}

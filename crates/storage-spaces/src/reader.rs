@@ -5,6 +5,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use crate::cache::{CacheHeader, CacheIndex, Lookup};
 use crate::error::{Error, Result, format_err};
 use crate::format::{Resiliency, SLAB_SIZE, SpaceRole};
+use crate::gf16;
 use crate::io::ReadAt;
 use crate::journal::ParityJournal;
 use crate::layout::{Layout, Location};
@@ -130,28 +131,94 @@ impl<D: ReadAt> Mapped<'_, D> {
         Ok(acc.iter().all(|&b| b == 0))
     }
 
-    /// Rebuilds a unit of a missing column from the XOR parity and the other
-    /// data units of its stripe.
+    /// Reads `len` bytes of a column at `offset_in_slab` of `row`; `None`
+    /// when its disk is missing or fails.
+    fn read_column(&self, column: u64, row: u64, offset_in_slab: u64, len: usize) -> Result<Option<Vec<u8>>> {
+        let Some((disk, slab)) = self.layout.physical(column, 0, row) else {
+            return Err(format_err!("parity stripe with an unallocated column {column}"));
+        };
+        let mut v = vec![0u8; len];
+        match self.pool.read_slab(disk, slab, offset_in_slab, &mut v) {
+            Ok(true) => Ok(Some(v)),
+            Ok(false) | Err(Error::Io(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Rebuilds a unit of a missing data column from the parity units and
+    /// the other data units of its stripe: from P (XOR) when one column is
+    /// lost, from P and Q (GF(16), see `gf16`) when two are.
     fn reconstruct(&self, loc: &Location, buf: &mut [u8]) -> Result<()> {
         let l = &self.layout;
+        let lost = || Error::Pool(format!("row {} lost more columns than its parity covers", loc.row));
         let p = l.parity_column(l.stripe_of(loc));
-        // The second parity unit of dual parity is not part of the XOR.
         let q = (l.parity_units == 2).then(|| (p + 1) % l.columns);
-        buf.fill(0);
-        let mut other = vec![0u8; buf.len()];
-        for column in (0..l.columns).filter(|&c| c != loc.column && Some(c) != q) {
-            let (disk, slab) = self
-                .layout
-                .physical(column, 0, loc.row)
-                .ok_or_else(|| format_err!("parity stripe with an unallocated column {column}"))?;
-            let lost = || Error::Pool(format!("row {} lost two or more columns", loc.row));
-            match self.pool.read_slab(disk, slab, loc.offset_in_slab, &mut other) {
-                Ok(true) => {}
-                Ok(false) | Err(Error::Io(_)) => return Err(lost()),
-                Err(e) => return Err(e),
-            }
-            buf.iter_mut().zip(&other).for_each(|(b, o)| *b ^= o);
+        let data: Vec<u64> = (0..l.data_columns)
+            .map(|i| (p + l.parity_units + i) % l.columns)
+            .collect();
+        let target = data.iter().position(|&c| c == loc.column).ok_or_else(lost)?;
+
+        // Work on whole 512-byte chunks of the unit (the Q code's granularity).
+        let within = loc.offset_in_slab % l.interleave;
+        let unit_start = loc.offset_in_slab - within;
+        let from = within / gf16::CHUNK as u64 * gf16::CHUNK as u64;
+        let to = (within + buf.len() as u64).div_ceil(gf16::CHUNK as u64) * gf16::CHUNK as u64;
+        let (at, len) = (unit_start + from, (to.min(l.interleave) - from) as usize);
+
+        let mut units: Vec<Option<Vec<u8>>> = Vec::with_capacity(data.len());
+        for (k, &c) in data.iter().enumerate() {
+            units.push(if k == target {
+                None
+            } else {
+                self.read_column(c, loc.row, at, len)?
+            });
         }
+        let missing: Vec<usize> = (0..data.len()).filter(|&k| k != target && units[k].is_none()).collect();
+        let pu = self.read_column(p, loc.row, at, len)?;
+        let qu = match q {
+            Some(q) if missing.len() == 1 || pu.is_none() => self.read_column(q, loc.row, at, len)?,
+            _ => None,
+        };
+        let coef = gf16::coefficients(l.data_columns);
+        let xor_into = |acc: &mut [u8], x: &[u8]| acc.iter_mut().zip(x).for_each(|(a, b)| *a ^= b);
+
+        let rebuilt = match (missing.as_slice(), &pu, &qu) {
+            ([], Some(pu), _) => {
+                let mut acc = pu.clone();
+                units.iter().flatten().for_each(|u| xor_into(&mut acc, u));
+                acc
+            }
+            ([], None, Some(qu)) => {
+                let coef = coef.ok_or_else(|| Error::Unsupported("dual parity Q for this column count".into()))?;
+                let mut acc = qu.clone();
+                for (k, u) in units.iter().enumerate() {
+                    if let Some(u) = u {
+                        gf16::mul_region_xor(coef[k], u, &mut acc);
+                    }
+                }
+                let mut out = vec![0u8; len];
+                gf16::mul_region_xor(gf16::inv(coef[target]).ok_or_else(lost)?, &acc, &mut out);
+                out
+            }
+            (&[other], Some(pu), Some(qu)) => {
+                let coef = coef.ok_or_else(|| Error::Unsupported("dual parity Q for this column count".into()))?;
+                // P' = D_t + D_o and Q' = e_t D_t + e_o D_o after removing the known units.
+                let (mut p2, mut q2) = (pu.clone(), qu.clone());
+                for (k, u) in units.iter().enumerate() {
+                    if let Some(u) = u {
+                        xor_into(&mut p2, u);
+                        gf16::mul_region_xor(coef[k], u, &mut q2);
+                    }
+                }
+                gf16::mul_region_xor(coef[other], &p2, &mut q2); // e_t D_t + e_o D_t = (e_t + e_o) D_t
+                let mut out = vec![0u8; len];
+                gf16::mul_region_xor(gf16::inv(coef[target] ^ coef[other]).ok_or_else(lost)?, &q2, &mut out);
+                out
+            }
+            _ => return Err(lost()),
+        };
+        let skip = (within - from) as usize;
+        buf.copy_from_slice(&rebuilt[skip..skip + buf.len()]);
         Ok(())
     }
 

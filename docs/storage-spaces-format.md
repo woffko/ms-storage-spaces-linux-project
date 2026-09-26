@@ -164,14 +164,17 @@ Column offset `o` is in row `o / 256 MiB` of the column.
   stripe `s` are in columns `P = (C - 2 - 2s) mod C` and `P + 1`, data unit
   `i` in column `(P + 2 + i) % C` (**verified**: pool `dual7`, 7 columns).
   The general rule for `r` parity units is `P = (C - r - r*s) mod C`.
-  P is the XOR of the data units (**verified**); the second unit (Q) is not
-  decoded yet, so reads and single-disk rebuilds work but rebuilding two lost
-  data columns does not. Hypotheses ruled out on `dual7`: a byte-wise
-  GF(2^8) Reed-Solomon syndrome for every primitive polynomial and any
-  coefficients; any GF(2)-linear function of the same-position words of the
-  stripe's data (8 to 128-bit words, also within 64-byte windows); the same
-  against the data of other stripes; the XOR of any subset of data units;
-  a row-diagonal XOR code over 1..256 rows per unit.
+  P is the XOR of the data units (**verified**). Q is a Reed-Solomon code
+  over GF(16) (polynomial x^4 + x + 1) in bit-matrix form: each 512-byte
+  chunk of a unit is four 128-byte packets, packet `j` holding bit `j` of
+  4-bit symbols, and Q = sum of `c_k * D_k` where multiplying by `c` XORs
+  input packet `j` into output packet `i` when bit `i` of `c * x^j` is set.
+  With 5 data columns the coefficients are `c = 9, 1, 8, 2, 11` for data
+  units 0..4 of the stripe, independent of the physical column
+  (**verified**: derived from single-byte impulse stripes written by Windows
+  (pool `imp7b`) and checked over whole units of 12 stripes of `dual7`; any
+  two failed disks of `dual7` read back its full pattern). Coefficients for
+  other column counts are not known yet.
 * Thin spaces: rows without an extent are unallocated and read as zeros.
 
 ## Write-back cache (SPCACHE, LE) (**verified** for thin spaces)
@@ -267,7 +270,7 @@ recovered space.
 * Per-space databases (type 7 record lists member disks).
 * SPACEDRT contents when regions are dirty; cache slot type 1; cache head/tail.
 * Which side Windows trusts for an inconsistent parity stripe.
-* The second parity code of dual parity.
+* Dual parity Q coefficients for column counts other than 7.
 * Tier movement by the tiering optimizer (not exercised yet), enclosure
   awareness, older pool versions
   (Windows 8/Server 2012 layout differs, see StorageSpaceReconstructor).

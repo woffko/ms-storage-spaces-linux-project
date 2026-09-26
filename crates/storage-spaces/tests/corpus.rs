@@ -193,3 +193,42 @@ fn reads_fail_over_when_a_disk_disappears() {
         }
     }
 }
+
+#[test]
+fn dual_parity_survives_any_two_failed_disks() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/pools/dual7");
+    if !is_complete_pool(&dir) {
+        return;
+    }
+    let m = manifest(&dir);
+    let n = m["disks"].as_array().unwrap().len();
+    for a in 0..n {
+        for b in a + 1..n {
+            let flags: Vec<_> = (0..n)
+                .map(|_| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)))
+                .collect();
+            let devices: Vec<Flaky> = (0..n)
+                .map(|i| Flaky {
+                    file: File::open(dir.join(format!("disk{i}.img"))).unwrap(),
+                    broken: flags[i].clone(),
+                })
+                .collect();
+            let pool = Pool::open(devices).unwrap();
+            let reader = pool.open_space(pool.find_space("dual7").unwrap().id()).unwrap();
+            flags[a].store(true, std::sync::atomic::Ordering::Relaxed);
+            flags[b].store(true, std::sync::atomic::Ordering::Relaxed);
+            let mut block = vec![0u8; testpattern::BLOCK];
+            for offset in (0..reader.size()).step_by(0x3f000) {
+                let offset = offset / 4096 * 4096;
+                reader
+                    .read_exact_at(&mut block, offset)
+                    .unwrap_or_else(|e| panic!("disks {a}+{b} at {offset:#x}: {e}"));
+                assert_eq!(
+                    testpattern::verify(&block, offset, "dual7"),
+                    None,
+                    "disks {a}+{b} at {offset:#x}"
+                );
+            }
+        }
+    }
+}

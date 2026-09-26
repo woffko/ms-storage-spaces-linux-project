@@ -93,6 +93,11 @@ fn a_lone_dropped_out_disk_has_no_quorum() {
     let removed = m["removed_disk"].as_u64().unwrap();
     let pool = Pool::open(vec![File::open(dir.join(format!("disk{removed}.img"))).unwrap()]).unwrap();
     assert!(!pool.has_quorum());
-    let full = Pool::open((0..3).map(|i| File::open(dir.join(format!("disk{i}.img"))).unwrap()).collect()).unwrap();
+    let full = Pool::open(
+        (0..3)
+            .map(|i| File::open(dir.join(format!("disk{i}.img"))).unwrap())
+            .collect(),
+    )
+    .unwrap();
     assert!(full.has_quorum());
 }

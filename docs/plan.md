@@ -83,7 +83,11 @@ in this repository.
 * Quorum: pools with fewer than half of their disks present are refused by
   attach unless `--force` (the lone removed disk of `stale3` otherwise reads
   the old state).
-* Open: the Q code of dual parity (two-column rebuild).
+* Dual parity Q decoded (GF(16) bit-matrix Reed-Solomon, found with
+  single-byte impulse stripes written by Windows, `tools/vm/New-ImpulsePool.ps1`);
+  any two failed disks of the 7-column pool are rebuilt (`cargo test`, also
+  in CI on the impulse pool fixture). Coefficients are known for 5 data
+  columns only; other widths rebuild one lost column.
 
 ### M2 (exit criteria met on the test VM, 2026-09-26)
 

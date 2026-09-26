@@ -18,6 +18,7 @@ pub mod cache;
 mod crc;
 mod error;
 pub mod format;
+pub mod gf16;
 pub mod gpt;
 mod guid;
 pub mod io;
