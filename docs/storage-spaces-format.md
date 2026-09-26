@@ -156,11 +156,14 @@ Column offset `o` is in row `o / 256 MiB` of the column.
   stripe `s` are in columns `P = (C - 2 - 2s) mod C` and `P + 1`, data unit
   `i` in column `(P + 2 + i) % C` (**verified**: pool `dual7`, 7 columns).
   The general rule for `r` parity units is `P = (C - r - r*s) mod C`.
-  P is the XOR of the data units (**verified**); the second unit (Q) is not a
-  byte-wise GF(2^8) Reed-Solomon syndrome nor any word-local GF(2)-linear
-  function of the data (tested for 8..128-bit words), so it is not decoded
-  yet: reads and single-disk rebuilds work, rebuilding two lost data columns
-  does not.
+  P is the XOR of the data units (**verified**); the second unit (Q) is not
+  decoded yet, so reads and single-disk rebuilds work but rebuilding two lost
+  data columns does not. Hypotheses ruled out on `dual7`: a byte-wise
+  GF(2^8) Reed-Solomon syndrome for every primitive polynomial and any
+  coefficients; any GF(2)-linear function of the same-position words of the
+  stripe's data (8 to 128-bit words, also within 64-byte windows); the same
+  against the data of other stripes; the XOR of any subset of data units;
+  a row-diagonal XOR code over 1..256 rows per unit.
 * Thin spaces: rows without an extent are unallocated and read as zeros.
 
 ## Write-back cache (SPCACHE, LE) (**verified** for thin spaces)
