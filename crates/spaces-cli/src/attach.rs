@@ -279,10 +279,16 @@ fn start_server(unit: &str, kind: &str, paths: &[PathBuf], space: &str, extra: &
     let ready = Path::new(STATE_DIR).join(format!("{unit}.ready"));
     let _ = fs::remove_file(&ready);
     let exe = std::env::current_exe()?;
+    // The attach service runs early at boot (before local-fs-pre.target);
+    // with default dependencies the server unit would wait for
+    // sysinit.target and deadlock with it.
     let mut args: Vec<String> = vec![
         format!("--unit={unit}"),
         "--collect".into(),
         "--quiet".into(),
+        "--property=DefaultDependencies=no".into(),
+        "--property=Conflicts=shutdown.target".into(),
+        "--property=Before=shutdown.target".into(),
         "--".into(),
         exe.display().to_string(),
     ];
