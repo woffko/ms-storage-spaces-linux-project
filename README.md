@@ -2,22 +2,44 @@
 
 Read Microsoft Storage Spaces pools (and later ReFS volumes) on Linux, in Rust.
 
-Status: early development. Reading works for simple, mirror (2/3-way) and
-single-parity spaces, fixed and thin provisioning, including data held in the
-per-space write-back cache and degraded pools with missing disks. Writing,
-dual parity and storage tiers are not supported yet.
+Status: early development. Reading works for simple, mirror (2/3-way),
+single and dual parity spaces, fixed and thin provisioning, including data
+held in the per-space write-back cache and degraded pools with missing or
+failing disks. Spaces can be attached as read-only block devices. Writing
+and storage tiers are not supported yet.
 
 ## Usage
 
 ```sh
 cargo build --release
-# Pool members: whole disks, partitions or raw images
+sudo contrib/install.sh            # binary, udev rule, systemd unit
+
+sudo spaces scan                   # find pool members
+sudo spaces attach                 # attach every complete pool
+sudo spaces status
+sudo mount -o ro /dev/mapper/ss-<pool>-<space>-p2 /mnt
+sudo spaces detach
+```
+
+Each space appears as `/dev/mapper/ss-<pool>-<space>` with one `-p<N>`
+device per partition. Backends (`--backend`):
+
+| Backend | Needs | Used by `auto` for |
+|---|---|---|
+| `dm` | dmsetup | simple spaces whose sector size matches the disks |
+| `ublk` | Linux 6.0+, `ublk_drv` | everything else |
+| `nbd` | `nbd` module, nbd-client | fallback (e.g. WSL) |
+| `fuse` | FUSE, losetup | last resort |
+
+Pools with missing disks are attached only with `--degraded`. Without
+installing anything, pools can be inspected and copied out:
+
+```sh
 spaces info /dev/sdb /dev/sdc
 spaces extents /dev/sdb /dev/sdc --space "My space"
 spaces export /dev/sdb /dev/sdc --space "My space" --output space.img
 ```
 
-The exported image can then be attached with `losetup -P` and mounted.
 Everything is read-only; the tools never write to the pool members.
 
 ## Layout

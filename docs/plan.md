@@ -41,6 +41,53 @@ Guiding rules for all stages:
 * VM tooling to create pools on VHDX and a corpus of 8 pools; tests compare
   with `Get-PhysicalExtent` and a verification pattern.
 
+## Progress log (Stage 1)
+
+Evidence is recorded here as milestones advance; commands refer to the tools
+in this repository.
+
+### M1 (in progress)
+
+* Corpus of 16+ Windows-created pools (Windows 11 Insider 26340, pool version
+  29): simple 1-3 columns, 2/3-way mirror, single parity 3-5 columns, dual
+  parity 7 columns, thin and fixed, 512/4096 logical sectors, 1 GiB
+  allocation unit, write-back cache 0 / 64 MiB / default, plus the real
+  `test_ubuntu` pool on two VMware SATA disks.
+* Every pool: parsed extents equal `Get-PhysicalExtent` exactly; pool version
+  and sector sizes equal `Get-StoragePool`/`Get-VirtualDisk`; the whole
+  verification pattern reads back (`cargo test`, corpus + fixture tests).
+* Decoded since M0: pool version and sector sizes, SPACEDB/SDBC CRC-32,
+  members without a database copy, write-back cache entry states with
+  partially valid chunks and wrapped logs, dual parity layout (P = XOR),
+  hidden children identified (SPACEDRT dirty region tracking, SPVDT parity
+  journal).
+* Degraded reads: any single member missing at open time or failing at run
+  time for mirror, parity and dual parity pools (`reads_fail_over_...`).
+* Open: the Q code of dual parity (two-column rebuild), tiers (generating),
+  old Windows layouts (needs older Windows VMs), DRT/journal replay after a
+  crash, extent/disk health states, quorum rules.
+
+### M2 (backends done, corpus matrix pending)
+
+* dm (`dm-table`), ublk (`serve-ublk`), NBD (`serve-nbd`) and FUSE
+  (`serve-fuse`) all expose the real `test_ubuntu` pool: data equal to the
+  exported image (full SHA-256 for dm, sampled ranges for the others), writes
+  refused, NTFS mounted read-only through each. ublk and NBD expose the 4 KiB
+  logical sector size; dm inherits the members' 512.
+* Pending: `tools/backend-matrix.sh` over the whole corpus on the Linux VM.
+
+### M3 (in progress)
+
+* `spaces scan/attach/detach/status`: stable `/dev/mapper/ss-<pool>-<space>`
+  and `-p<N>` partition devices from our own GPT parser (Windows omitted the
+  protective MBR inside `test_ubuntu`, so the kernel would not see it).
+* All backends attach and detach cleanly on the real pool; `auto` picks dm
+  for simple spaces with matching sectors, ublk otherwise.
+* udev rule + `storage-spaces-attach.service` attach the pool when its
+  members appear (`udevadm trigger --action=add` test on the Linux VM).
+* Pending: reboot test on the Linux VM, unplug-a-mirror-member test on the
+  VM, performance targets.
+
 ## Test infrastructure (continuous, feeds every stage)
 
 T1. **Windows matrix.** Extend VM tooling to more Windows builds: Windows 10

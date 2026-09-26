@@ -141,6 +141,10 @@ enum Command {
         tag: String,
         #[arg(long)]
         length: Option<u64>,
+        /// Instead of a sequential pass, do this many random reads of random
+        /// length (4 KiB to 1 MiB, 4 KiB aligned).
+        #[arg(long)]
+        random: Option<u64>,
     },
     /// Capture the metadata a test pool needs into small fixture files.
     #[command(hide = true)]
@@ -229,7 +233,12 @@ fn main() -> Result<()> {
             let pool = open_pool(&devices)?;
             dm_table(&pool, find_space(&pool, &space)?, &devices)
         }
-        Command::VerifyPattern { path, tag, length } => verify_pattern(&path, &tag, length),
+        Command::VerifyPattern {
+            path,
+            tag,
+            length,
+            random,
+        } => verify_pattern(&path, &tag, length, random),
         Command::Fixture { pool_dir, output } => fixture(&pool_dir, &output),
         Command::CheckPattern { devices, space, length } => {
             let pool = open_pool(&devices)?;
@@ -458,9 +467,34 @@ fn dm_table(pool: &Pool<File>, space: &Space, paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn verify_pattern(path: &PathBuf, tag: &str, length: Option<u64>) -> Result<()> {
+fn verify_pattern(path: &PathBuf, tag: &str, length: Option<u64>, random: Option<u64>) -> Result<()> {
     let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let total = length.map_or_else(|| file.size(), Ok)?;
+    if let Some(count) = random {
+        // xorshift64*, seeded from the clock; failures print the offset.
+        let mut state = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos() as u64
+            | 1;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        let blocks = total / 4096;
+        let mut buf = vec![0u8; 1 << 20];
+        for _ in 0..count {
+            let len = ((next() % 256 + 1) * 4096).min(total) as usize;
+            let offset = (next() % (blocks - len as u64 / 4096 + 1)) * 4096;
+            file.read_exact_at(&mut buf[..len], offset)?;
+            if let Some(bad) = testpattern::verify(&buf[..len], offset, tag) {
+                bail!("pattern mismatch at offset {bad:#x}");
+            }
+        }
+        println!("pattern OK for {count} random reads over {}", size(total));
+        return Ok(());
+    }
     const CHUNK: usize = 1 << 20;
     let mut buf = vec![0u8; CHUNK];
     let mut offset = 0;

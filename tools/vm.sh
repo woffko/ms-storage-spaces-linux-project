@@ -43,7 +43,7 @@ case "${1:-}" in
     done
     # The inner script runs in a process created by WMI, outside the job
     # object of the SSH session, so it survives disconnects.
-    inner="\$ErrorActionPreference='Stop'; try { & 'C:\\sstest\\$name'$args *>&1 | Out-String -Stream -Width 250; \$c=0 } catch { 'ERROR: ' + \$_; \$c=1 }; \"EXIT \$c\""
+    inner="\$ProgressPreference='SilentlyContinue'; \$ErrorActionPreference='Stop'; try { & 'C:\\sstest\\$name'$args *>&1 | Out-String -Stream -Width 250; \$c=0 } catch { 'ERROR: ' + \$_; \$c=1 }; \"EXIT \$c\""
     enc=$(printf '%s' "$inner" | iconv -t UTF-16LE | base64 -w0)
     run_ps "New-Item -ItemType Directory -Force C:\\sstest\\logs | Out-Null; if (Test-Path C:\\sstest\\logs\\$log.log) { 'already started'; return }; \$cmd = 'cmd.exe /c powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $enc > C:\\sstest\\logs\\$log.log 2>&1'; \$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = \$cmd }; if (\$r.ReturnValue -ne 0) { throw \"start failed: \$(\$r.ReturnValue)\" }; \"started pid \$(\$r.ProcessId)\""
     ;;
