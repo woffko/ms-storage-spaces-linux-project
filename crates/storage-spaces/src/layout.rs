@@ -29,13 +29,13 @@ pub struct Location {
 /// written round-robin across the columns; each column is a sequence of slab
 /// rows, each backed by one physical slab per copy.
 ///
-/// Parity spaces keep `r` parity units per stripe (r = redundancy, 1 or 2)
-/// in consecutive columns starting at `(C - r - r * s) mod C` for stripe
-/// `s`; the data units follow them, wrapping around. For r = 1 this is the
-/// left-symmetric RAID-5 layout; the stripe number counts from the first row
-/// of the extent run the stripe lies in. The first parity unit (P) is the XOR of
-/// the data units; the second one (Q, dual parity) uses a code that is not
-/// decoded yet.
+/// Parity spaces keep `r` parity units per stripe in consecutive columns
+/// starting at `(C - r - r * s) mod C` for stripe `s`; the data units follow
+/// them, wrapping around. For r = 1 this is the left-symmetric RAID-5 layout;
+/// the stripe number counts from the first row of the extent run the stripe
+/// lies in. `r` is the redundancy (1 or 2), or `groups + 1` for dual parity
+/// with several groups (a local reconstruction code). What the parity units
+/// hold is described by [`Layout::parity_code`].
 #[derive(Debug, Clone)]
 pub struct Layout {
     pub resiliency: Resiliency,
@@ -43,6 +43,9 @@ pub struct Layout {
     pub data_columns: u64,
     /// Parity units per stripe (0 for simple and mirror).
     pub parity_units: u64,
+    /// Local groups of a dual parity space (1 unless it uses a local
+    /// reconstruction code).
+    pub groups: u64,
     /// Start of the layout in the owner's address space (storage tiers);
     /// rows and parity rotation count from here.
     pub base: u64,
@@ -67,10 +70,14 @@ impl Layout {
         let data_columns = match policy.resiliency {
             Resiliency::Simple | Resiliency::Mirror => policy.columns,
             Resiliency::Parity if policy.groups > 1 => {
-                return Err(Error::Unsupported(format!(
-                    "parity with {} groups (local reconstruction code, {} columns)",
-                    policy.groups, policy.columns
-                )));
+                // One local parity unit per group and one global one.
+                if policy.redundancy != 2 || policy.columns < 2 * policy.groups + 1 {
+                    return Err(Error::Unsupported(format!(
+                        "parity with {} groups, {} columns and redundancy {}",
+                        policy.groups, policy.columns, policy.redundancy
+                    )));
+                }
+                policy.columns - policy.groups - 1
             }
             Resiliency::Parity if (1..=2).contains(&policy.redundancy) && policy.columns >= policy.redundancy + 2 => {
                 policy.columns - policy.redundancy
@@ -140,6 +147,11 @@ impl Layout {
             columns: policy.columns,
             data_columns,
             parity_units: policy.columns - data_columns,
+            groups: if policy.resiliency == Resiliency::Parity {
+                policy.groups.max(1)
+            } else {
+                1
+            },
             base,
             copies,
             interleave: policy.interleave,
@@ -176,6 +188,42 @@ impl Layout {
         let c = self.columns;
         let r = self.parity_units;
         (c - r + c * r - (r * stripe) % c) % c
+    }
+
+    /// What the parity units of a stripe hold, in column order: parity unit
+    /// `i` is the sum over the data units `k` of `code[i][k] * D_k` in GF(16)
+    /// (see `gf16`); a coefficient of 1 is plain XOR. `None` stands for a
+    /// parity unit whose code is not known for this width.
+    ///
+    /// * single parity: P, the XOR of the data units;
+    /// * dual parity: P and Q (`gf16::coefficients`);
+    /// * dual parity with `g` groups: the data units are split into `g`
+    ///   consecutive groups (the first `D mod g` of them one unit larger);
+    ///   one local XOR parity per group, then a global one with the
+    ///   coefficients 1, 2, 3, ... restarting in every group.
+    pub fn parity_code(&self) -> Vec<Option<Vec<u8>>> {
+        let d = self.data_columns as usize;
+        if self.groups > 1 {
+            let g = self.groups as usize;
+            let mut code = Vec::with_capacity(g + 1);
+            let mut global = Vec::with_capacity(d);
+            let mut start = 0;
+            for i in 0..g {
+                let len = d / g + usize::from(i < d % g);
+                let mut row = vec![0u8; d];
+                row[start..start + len].fill(1);
+                code.push(Some(row));
+                global.extend((1..=len).map(|c| c as u8));
+                start += len;
+            }
+            code.push(Some(global));
+            return code;
+        }
+        let mut code = vec![Some(vec![1u8; d])];
+        if self.parity_units == 2 {
+            code.push(crate::gf16::coefficients(self.data_columns).map(<[u8]>::to_vec));
+        }
+        code
     }
 
     /// Stripe number of a location (parity layouts).
@@ -291,6 +339,48 @@ mod tests {
         // Stripe 1: P in 3, Q in 4, data units 5..9 in columns 5, 6, 0, 1, 2.
         let cols: Vec<u64> = (5..10).map(|u| l.locate(u * 0x10000).column).collect();
         assert_eq!(cols, [5, 6, 0, 1, 2]);
+    }
+
+    #[test]
+    fn local_reconstruction_code() {
+        // Twelve columns in two groups, as measured on a Windows-created
+        // space: nine data units, the local parities of units 0-4 and 5-8,
+        // then the global parity; three parity units rotating by three.
+        let p = Policy {
+            resiliency: Resiliency::Parity,
+            redundancy: 2,
+            copies: 1,
+            groups: 2,
+            columns: 12,
+            interleave: 0x10000,
+        };
+        let l = Layout::new(&p, &[]).unwrap();
+        assert_eq!((l.data_columns, l.parity_units), (9, 3));
+        assert_eq!((0..5).map(|s| l.parity_column(s)).collect::<Vec<_>>(), [9, 6, 3, 0, 9]);
+        let code: Vec<Vec<u8>> = l.parity_code().into_iter().map(Option::unwrap).collect();
+        assert_eq!(
+            code,
+            [
+                vec![1, 1, 1, 1, 1, 0, 0, 0, 0],
+                vec![0, 0, 0, 0, 0, 1, 1, 1, 1],
+                vec![1, 2, 3, 4, 5, 1, 2, 3, 4],
+            ]
+        );
+        // Seventeen columns: three groups of 13 data units.
+        let l = Layout::new(
+            &Policy {
+                groups: 3,
+                columns: 17,
+                ..p
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!((l.data_columns, l.parity_units), (13, 4));
+        assert_eq!(
+            l.parity_code()[3].as_deref(),
+            Some(&[1, 2, 3, 4, 5, 1, 2, 3, 4, 1, 2, 3, 4][..])
+        );
     }
 
     #[test]

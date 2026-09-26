@@ -4,11 +4,19 @@ Creates a dual parity space without write-back cache and writes "impulse"
 stripes: all-zero stripes where single bytes of chosen data units are set.
 Reading the second parity unit (Q) of each stripe shows how Windows computes
 it. The manifest lists the impulses per stripe.
+
+Dual parity spaces of 11 and more columns use a local reconstruction code
+with fewer data columns (-DataColumns, e.g. 9 for 12 columns) and always get
+a write-back cache; -FlushMB then writes that many MB of zeros after the
+impulses, so that the impulse stripes are moved out of the cache to their
+parity stripes before the pool is detached.
 #>
 param(
     [Parameter(Mandatory)] [string] $Name,
     [int] $DiskCount = 0,
     [int] $Columns = 7,
+    [int] $DataColumns = 0,
+    [int] $FlushMB = 0,
     [int] $InterleaveKB = 64,
     [int] $SizeMB = 5120,
     [switch] $Simple,
@@ -22,7 +30,7 @@ if ($env:COMPUTERNAME -ne 'DESKTOP-ELS4LDK') { throw 'Unexpected machine' }
 # -Simple: stripe 0 empty, then one stripe per data unit with byte 0 = 1.
 if ($Simple) {
     $impulses = @(, @())
-    for ($k = 0; $k -lt $Columns - 2; $k++) { $impulses += , @(, @($k, 0, 1)) }
+    for ($k = 0; $k -lt $(if ($DataColumns -gt 0) { $DataColumns } else { $Columns - 2 }); $k++) { $impulses += , @(, @($k, 0, 1)) }
     $impulses += , @()
 } else {
     $impulses = @(
@@ -72,7 +80,7 @@ if ($disk.IsReadOnly) { $disk | Set-Disk -IsReadOnly $false }
 $vd = Get-VirtualDisk -FriendlyName $Name
 
 $unit = [int64]$InterleaveKB * 1KB
-$dataColumns = $Columns - 2
+$dataColumns = if ($DataColumns -gt 0) { $DataColumns } else { $Columns - 2 }
 $stripeBytes = $unit * $dataColumns
 Add-Type -TypeDefinition @'
 using System;
@@ -100,6 +108,16 @@ for ($s = 0; $s -lt $impulses.Count; $s++) {
     }
     [SsImpulse]::WriteAt($device, $s * $stripeBytes, $buf)
 }
+if ($FlushMB -gt 0) {
+    # 4 MiB write-through writes, paced at about 15 MB/s (see New-TestPool.ps1).
+    $zeros = New-Object byte[] (4MB)
+    $at = [int64]$impulses.Count * $stripeBytes
+    $at = [int64][Math]::Ceiling($at / 4MB) * 4MB
+    for ($i = 0; $i -lt $FlushMB / 4; $i++) {
+        [SsImpulse]::WriteAt($device, $at + [int64]$i * 4MB, $zeros)
+        Start-Sleep -Milliseconds 270
+    }
+}
 Start-Sleep -Seconds 5
 
 $vdGuid = if ($vd.ObjectId -match '\{([0-9a-fA-F-]+)\}"?$') { $Matches[1].ToLowerInvariant() } else { $null }
@@ -113,7 +131,8 @@ $manifest = [ordered]@{
     kind = 'impulse'
     windows_build = [Environment]::OSVersion.Version.ToString()
     space = [ordered]@{ name = $Name; guid = $vdGuid; size = $vd.Size; columns = $vd.NumberOfColumns
-        interleave = $vd.Interleave; redundancy = $vd.PhysicalDiskRedundancy; write_cache = $vd.WriteCacheSize }
+        interleave = $vd.Interleave; redundancy = $vd.PhysicalDiskRedundancy; write_cache = $vd.WriteCacheSize
+        data_columns = $dataColumns; stripe_size = $stripeBytes }
     disks = @($poolDisks)
     impulses = @($impulses | ForEach-Object { , @($_ | Where-Object { $_.Count -ge 3 } | ForEach-Object { , @($_) }) })
 }

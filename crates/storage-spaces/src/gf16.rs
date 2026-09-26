@@ -12,7 +12,8 @@ pub const CHUNK: usize = 4 * PACKET;
 
 /// Q coefficients of the data units, by number of data columns, as
 /// measured on Windows-created spaces of 7 to 10 columns (the widths that use
-/// a single group; wider dual parity spaces use local reconstruction codes).
+/// a single group; wider dual parity spaces use a local reconstruction code,
+/// see `Layout::parity_code`).
 /// From 6 data columns on they are prefixes of one sequence; 5 data columns
 /// use every second element of it.
 pub fn coefficients(data_columns: u64) -> Option<&'static [u8]> {

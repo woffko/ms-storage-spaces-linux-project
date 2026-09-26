@@ -177,10 +177,25 @@ Column offset `o` is in row `o / 256 MiB` of the column.
   (**verified**: derived from single-byte impulse stripes written by Windows
   (pool `imp7b`) and checked over whole units of 12 stripes of `dual7`; any
   two failed disks of `dual7` read back its full pattern).
-* Dual parity with 11 or more columns uses several groups (`groups` in the
-  policy: 11-12 columns 2 groups, 17 columns 3 groups) and more parity units
-  per stripe (12 columns: 9 data columns), a local reconstruction code. Its
-  layout is not decoded; such spaces are refused.
+* Dual parity with 11 or more columns uses `g` groups (`groups` in the
+  policy: 11-12 columns 2 groups, 17 columns 3 groups), a local
+  reconstruction code with `r = g + 1` parity units per stripe and
+  `D = C - g - 1` data units. The parity units rotate like above
+  (`P = (C - r - r*s) mod C`, data following them). The data units of a
+  stripe are split into `g` consecutive groups, the first `D mod g` groups
+  one unit larger (12 columns: 5 + 4, 17 columns: 5 + 4 + 4). Parity unit
+  `i < g` is the XOR of group `i` (local parity); the last one is a global
+  GF(16) parity in the bit-matrix form above with the coefficients
+  `1, 2, 3, ...` restarting in every group (12 columns: `1 2 3 4 5 1 2 3 4`).
+  (**verified**: the unit map and all three parity units of the first 8
+  stripes of pattern pool `lrc12`, the global code solved bit by bit over
+  GF(2) and matching GF(16) multiplication; any two failed disks of `lrc11`
+  and `lrc12` read back their pattern, and of impulse pool `lrc17i` its
+  impulses.) Two lost units of one group are solved from the local and the
+  global parity, lost units of different groups from their local parities.
+  Windows gives these spaces a write-back cache even with
+  `-WriteCacheSize 0` (`lrc11`: 1.5 GiB, `lrc12`: 1 GiB); its chunk size is
+  one data stripe.
 * Thin spaces: rows without an extent are unallocated and read as zeros.
 
 ## Write-back cache (SPCACHE, LE) (**verified** for thin spaces)
@@ -276,7 +291,8 @@ recovered space.
 * Per-space databases (type 7 record lists member disks).
 * SPACEDRT contents when regions are dirty; cache slot type 1; cache head/tail.
 * Which side Windows trusts for an inconsistent parity stripe.
-* Dual parity with several groups (local reconstruction code, 11+ columns).
+* Group sizes of grouped dual parity for 13-16 columns (not generated yet;
+  the rule above predicts them).
 * Tier movement by the tiering optimizer (not exercised yet), enclosure
   awareness, older pool versions
   (Windows 8/Server 2012 layout differs, see StorageSpaceReconstructor).

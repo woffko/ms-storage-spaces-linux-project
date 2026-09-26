@@ -1,0 +1,219 @@
+﻿{
+    "name":  "lrc17i",
+    "kind":  "impulse",
+    "windows_build":  "10.0.26340.0",
+    "space":  {
+                  "name":  "lrc17i",
+                  "guid":  "5f4e87cf-ccf6-4eab-940e-7ba805912b3b",
+                  "size":  13958643712,
+                  "columns":  17,
+                  "interleave":  65536,
+                  "redundancy":  2,
+                  "write_cache":  1342177280,
+                  "data_columns":  13,
+                  "stripe_size":  851968
+              },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "600224804576E2269FF972B86ABE7EA2",
+                      "spaces_guid":  "c7d5a797-0d3e-4ec5-a25c-598c7efe7dc9",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "60022480BD8030142B91815AEF797122",
+                      "spaces_guid":  "f42ad3cf-0a05-c52f-77d2-8980ca58d386",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk2.vhdx",
+                      "unique_id":  "60022480ED273572ED339F6168C3B426",
+                      "spaces_guid":  "8c40cd2e-bc54-215c-2800-28c4d6ac5c42",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk3.vhdx",
+                      "unique_id":  "60022480AB42125E848DAD596CEE1233",
+                      "spaces_guid":  "715dfd03-0d47-1333-3985-78031df28c3a",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk4.vhdx",
+                      "unique_id":  "60022480F0D4113D486502D94D99DBBE",
+                      "spaces_guid":  "6e531535-7984-398a-723a-66d740c9221e",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk5.vhdx",
+                      "unique_id":  "60022480A918F111F4F0E7E55741E0BC",
+                      "spaces_guid":  "69763ec9-fd55-c337-cf5f-11785c982cdb",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk6.vhdx",
+                      "unique_id":  "600224804A520607098EB6D4AF1A5B65",
+                      "spaces_guid":  "2329692d-d373-5add-b74f-db7da839fa30",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk7.vhdx",
+                      "unique_id":  "60022480D7996BC2CD326A4DEA259D1B",
+                      "spaces_guid":  "3e6a7409-c564-f050-15d8-0edc7ac69896",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk8.vhdx",
+                      "unique_id":  "60022480D40DD367A4DCEC993D6EF20B",
+                      "spaces_guid":  "7a17f843-147c-b13f-b6f9-a3d65b4810f3",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk9.vhdx",
+                      "unique_id":  "600224802AA545F63A78FB360294DC71",
+                      "spaces_guid":  "3d751aad-67eb-861d-28c7-27d551b99627",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk10.vhdx",
+                      "unique_id":  "600224803AA5799BF751FC67C72295D4",
+                      "spaces_guid":  "64e0fddc-2c67-a351-afb4-e321d62839a7",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk11.vhdx",
+                      "unique_id":  "6002248022C1C0173D6381D8B5FE47A8",
+                      "spaces_guid":  "1b689964-1ac8-28df-e30c-44d177f4e8c5",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk12.vhdx",
+                      "unique_id":  "60022480AB079CF9012C84B2961F8C68",
+                      "spaces_guid":  "712e3105-0c73-abe6-d011-2aed9b6e12cc",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk13.vhdx",
+                      "unique_id":  "60022480E2846ED1A8668300A86B1B69",
+                      "spaces_guid":  "29ae07a4-c604-f39c-d710-47469c984509",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk14.vhdx",
+                      "unique_id":  "600224807BD7FD7E4550AC3DE322B4E0",
+                      "spaces_guid":  "7ff56f8a-b0f3-a2e2-306f-0509cdd62c25",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk15.vhdx",
+                      "unique_id":  "60022480759771A7285B1EB61B6BBB14",
+                      "spaces_guid":  "c015aeb8-a4d3-8b3d-9c8e-31501fb16eb4",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk16.vhdx",
+                      "unique_id":  "60022480259E20421404741A675CCE4B",
+                      "spaces_guid":  "231106a7-f371-9949-7b86-1f74b7d2a642",
+                      "size":  8589934592
+                  }
+              ],
+    "impulses":  [
+                     [
+
+                     ],
+                     [
+                         [
+                             0,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             1,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             2,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             3,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             4,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             5,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             6,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             7,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             8,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             9,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             10,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             11,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+                         [
+                             12,
+                             0,
+                             1
+                         ]
+                     ],
+                     [
+
+                     ]
+                 ]
+}

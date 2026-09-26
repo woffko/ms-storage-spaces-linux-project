@@ -3,10 +3,11 @@
 Read Microsoft Storage Spaces pools (and later ReFS volumes) on Linux, in Rust.
 
 Status: early development. Reading works for simple, mirror (2/3-way),
-single and dual parity spaces, fixed and thin provisioning, including data
+single and dual parity spaces (including the local reconstruction code of
+11+ columns), storage tiers, fixed and thin provisioning, including data
 held in the per-space write-back cache and degraded pools with missing or
 failing disks. Spaces can be attached as read-only block devices. Writing
-and storage tiers are not supported yet.
+and pool management are not supported yet.
 
 ## Usage
 

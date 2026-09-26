@@ -157,7 +157,9 @@ impl ReadAt for Flaky {
 
 #[test]
 fn reads_fail_over_when_a_disk_disappears() {
-    for name in ["mirror2", "mirror3", "parity3", "parity4", "parity5", "dual7", "mapar"] {
+    for name in [
+        "mirror2", "mirror3", "parity3", "parity4", "parity5", "dual7", "mapar", "lrc11", "lrc12",
+    ] {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/pools")
             .join(name);
@@ -181,7 +183,8 @@ fn reads_fail_over_when_a_disk_disappears() {
             let reader = pool.open_space(pool.find_space(name).unwrap().id()).unwrap();
             broken.store(true, std::sync::atomic::Ordering::Relaxed);
             let mut block = vec![0u8; testpattern::BLOCK];
-            for offset in (0..reader.size()).step_by(0x40000 + 0x1000) {
+            let pattern = m["pattern_size"].as_u64().unwrap_or(reader.size());
+            for offset in (0..pattern).step_by(0x40000 + 0x1000) {
                 let offset = offset / 4096 * 4096;
                 reader.read_exact_at(&mut block, offset).unwrap();
                 assert_eq!(
@@ -196,7 +199,15 @@ fn reads_fail_over_when_a_disk_disappears() {
 
 #[test]
 fn dual_parity_survives_any_two_failed_disks() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/pools/dual7");
+    for name in ["dual7", "lrc11", "lrc12"] {
+        survives_two_failed_disks(name);
+    }
+}
+
+fn survives_two_failed_disks(name: &str) {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/pools")
+        .join(name);
     if !is_complete_pool(&dir) {
         return;
     }
@@ -214,19 +225,21 @@ fn dual_parity_survives_any_two_failed_disks() {
                 })
                 .collect();
             let pool = Pool::open(devices).unwrap();
-            let reader = pool.open_space(pool.find_space("dual7").unwrap().id()).unwrap();
+            let reader = pool.open_space(pool.find_space(name).unwrap().id()).unwrap();
             flags[a].store(true, std::sync::atomic::Ordering::Relaxed);
             flags[b].store(true, std::sync::atomic::Ordering::Relaxed);
             let mut block = vec![0u8; testpattern::BLOCK];
-            for offset in (0..reader.size()).step_by(0x3f000) {
-                let offset = offset / 4096 * 4096;
+            // About 2000 blocks per pair, spread over all stripe positions.
+            let step = 0x3f000 * (reader.size() / 2000 / 0x3f000).max(1);
+            let pattern = m["pattern_size"].as_u64().unwrap_or(reader.size());
+            for offset in (0..pattern).step_by(step as usize) {
                 reader
                     .read_exact_at(&mut block, offset)
-                    .unwrap_or_else(|e| panic!("disks {a}+{b} at {offset:#x}: {e}"));
+                    .unwrap_or_else(|e| panic!("{name}: disks {a}+{b} at {offset:#x}: {e}"));
                 assert_eq!(
-                    testpattern::verify(&block, offset, "dual7"),
+                    testpattern::verify(&block, offset, name),
                     None,
-                    "disks {a}+{b} at {offset:#x}"
+                    "{name}: disks {a}+{b} at {offset:#x}"
                 );
             }
         }

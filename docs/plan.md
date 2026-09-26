@@ -87,8 +87,14 @@ in this repository.
   single-byte impulse stripes written by Windows, `tools/vm/New-ImpulsePool.ps1`);
   any two failed disks are rebuilt for 7-10 column spaces (`cargo test`,
   also in CI on the impulse pool fixtures).
-* Open: dual parity with 11+ columns uses groups (a local reconstruction
-  code); refused for now.
+* Dual parity with 11+ columns (local reconstruction code, 2-3 groups)
+  decoded on pattern pools `lrc11`/`lrc12` and impulse pool `lrc17i`: local
+  XOR parity per group plus a global GF(16) parity; any two failed disks are
+  rebuilt (corpus tests; CI on the `lrc17i` fixture). The Windows VM
+  crashes seen while generating wide pools (bugcheck 0x124, parameter
+  0x10 = WHEA error reported by a device driver, after stornvme reset the
+  VM's virtual NVMe disk during multi-second host write stalls) stopped
+  once the generators pace their writes (15 MB/s, write-through).
 
 ### M2 (exit criteria met on the test VM, 2026-09-26)
 

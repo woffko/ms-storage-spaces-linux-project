@@ -111,14 +111,17 @@ impl<D: ReadAt> Mapped<'_, D> {
     }
 
     /// Whether the XOR parity of the stripe holding `loc` matches its data
-    /// over `len` bytes. Missing columns count as consistent (nothing to check).
+    /// over `len` bytes: the XOR of all units but the last parity unit of a
+    /// dual parity stripe is zero (P, or the local parities of all groups,
+    /// sum up to the XOR of the data). Missing columns count as consistent
+    /// (nothing to check).
     fn stripe_consistent(&self, loc: &Location, len: usize) -> Result<bool> {
         let l = &self.layout;
         let p = l.parity_column(l.stripe_of(loc));
-        let q = (l.parity_units == 2).then(|| (p + 1) % l.columns);
+        let last = (l.parity_units >= 2).then(|| (p + l.parity_units - 1) % l.columns);
         let mut acc = vec![0u8; len];
         let mut unit = vec![0u8; len];
-        for column in (0..l.columns).filter(|&c| Some(c) != q) {
+        for column in (0..l.columns).filter(|&c| Some(c) != last) {
             let Some((disk, slab)) = l.physical(column, 0, loc.row) else {
                 return Ok(true);
             };
@@ -146,80 +149,103 @@ impl<D: ReadAt> Mapped<'_, D> {
     }
 
     /// Rebuilds a unit of a missing data column from the parity units and
-    /// the other data units of its stripe: from P (XOR) when one column is
-    /// lost, from P and Q (GF(16), see `gf16`) when two are.
+    /// the other data units of its stripe (see [`Layout::parity_code`]).
+    /// Parity equations are taken in column order and solved by Gaussian
+    /// elimination over GF(16) until the lost unit is determined, so a single
+    /// loss reads one parity unit and the units it covers.
     fn reconstruct(&self, loc: &Location, buf: &mut [u8]) -> Result<()> {
         let l = &self.layout;
         let lost = || Error::Pool(format!("row {} lost more columns than its parity covers", loc.row));
         let p = l.parity_column(l.stripe_of(loc));
-        let q = (l.parity_units == 2).then(|| (p + 1) % l.columns);
         let data: Vec<u64> = (0..l.data_columns)
             .map(|i| (p + l.parity_units + i) % l.columns)
             .collect();
         let target = data.iter().position(|&c| c == loc.column).ok_or_else(lost)?;
 
-        // Work on whole 512-byte chunks of the unit (the Q code's granularity).
+        // Work on whole 512-byte chunks of the unit (the GF(16) code's granularity).
         let within = loc.offset_in_slab % l.interleave;
         let unit_start = loc.offset_in_slab - within;
         let from = within / gf16::CHUNK as u64 * gf16::CHUNK as u64;
         let to = (within + buf.len() as u64).div_ceil(gf16::CHUNK as u64) * gf16::CHUNK as u64;
         let (at, len) = (unit_start + from, (to.min(l.interleave) - from) as usize);
 
-        let mut units: Vec<Option<Vec<u8>>> = Vec::with_capacity(data.len());
-        for (k, &c) in data.iter().enumerate() {
-            units.push(if k == target {
-                None
-            } else {
-                self.read_column(c, loc.row, at, len)?
-            });
+        // Data units read so far: Some(Some(bytes)) present, Some(None) lost.
+        let mut units: Vec<Option<Option<Vec<u8>>>> = vec![None; data.len()];
+        units[target] = Some(None);
+        // Unknown data units, and the reduced equations over them: each row
+        // is (coefficients per unknown, right-hand side), in reduced row
+        // echelon form; `pivots[i]` is the unknown row `i` solves for.
+        let mut unknowns = vec![target];
+        let mut rows: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut pivots: Vec<usize> = Vec::new();
+        let mut unknown_code = false;
+        for (i, code) in l.parity_code().iter().enumerate() {
+            let Some(code) = code else {
+                unknown_code = true;
+                continue;
+            };
+            if !unknowns.iter().any(|&k| code[k] != 0) {
+                continue;
+            }
+            let Some(mut rhs) = self.read_column((p + i as u64) % l.columns, loc.row, at, len)? else {
+                continue;
+            };
+            for (k, &c) in data.iter().enumerate() {
+                if code[k] == 0 {
+                    continue;
+                }
+                if units[k].is_none() {
+                    let u = self.read_column(c, loc.row, at, len)?;
+                    if u.is_none() {
+                        unknowns.push(k);
+                    }
+                    units[k] = Some(u);
+                }
+                if let Some(Some(u)) = &units[k] {
+                    gf16::mul_region_xor(code[k], u, &mut rhs);
+                }
+            }
+            let mut coef: Vec<u8> = unknowns.iter().map(|&k| code[k]).collect();
+            for (j, (row, row_rhs)) in rows.iter().enumerate() {
+                let f = coef[pivots[j]];
+                if f != 0 {
+                    coef.resize(unknowns.len(), 0);
+                    coef.iter_mut().zip(row).for_each(|(c, r)| *c ^= gf16::mul(f, *r));
+                    gf16::mul_region_xor(f, row_rhs, &mut rhs);
+                }
+            }
+            let Some(pivot) = coef.iter().position(|&c| c != 0) else {
+                continue; // adds nothing
+            };
+            // Normalize the new row and remove its unknown from the others.
+            let inv = gf16::inv(coef[pivot]).ok_or_else(lost)?;
+            let coef: Vec<u8> = coef.iter().map(|&c| gf16::mul(inv, c)).collect();
+            let mut scaled = vec![0u8; len];
+            gf16::mul_region_xor(inv, &rhs, &mut scaled);
+            for (row, row_rhs) in &mut rows {
+                row.resize(unknowns.len(), 0);
+                let f = row[pivot];
+                if f != 0 {
+                    row.iter_mut().zip(&coef).for_each(|(r, c)| *r ^= gf16::mul(f, *c));
+                    gf16::mul_region_xor(f, &scaled, row_rhs);
+                }
+            }
+            rows.push((coef, scaled));
+            pivots.push(pivot);
+            // Solved once a row holds the target alone.
+            if let Some((_, rhs)) = rows
+                .iter()
+                .find(|(row, _)| row[0] != 0 && row.iter().skip(1).all(|&c| c == 0))
+            {
+                let skip = (within - from) as usize;
+                buf.copy_from_slice(&rhs[skip..skip + buf.len()]);
+                return Ok(());
+            }
         }
-        let missing: Vec<usize> = (0..data.len()).filter(|&k| k != target && units[k].is_none()).collect();
-        let pu = self.read_column(p, loc.row, at, len)?;
-        let qu = match q {
-            Some(q) if missing.len() == 1 || pu.is_none() => self.read_column(q, loc.row, at, len)?,
-            _ => None,
-        };
-        let coef = gf16::coefficients(l.data_columns);
-        let xor_into = |acc: &mut [u8], x: &[u8]| acc.iter_mut().zip(x).for_each(|(a, b)| *a ^= b);
-
-        let rebuilt = match (missing.as_slice(), &pu, &qu) {
-            ([], Some(pu), _) => {
-                let mut acc = pu.clone();
-                units.iter().flatten().for_each(|u| xor_into(&mut acc, u));
-                acc
-            }
-            ([], None, Some(qu)) => {
-                let coef = coef.ok_or_else(|| Error::Unsupported("dual parity Q for this column count".into()))?;
-                let mut acc = qu.clone();
-                for (k, u) in units.iter().enumerate() {
-                    if let Some(u) = u {
-                        gf16::mul_region_xor(coef[k], u, &mut acc);
-                    }
-                }
-                let mut out = vec![0u8; len];
-                gf16::mul_region_xor(gf16::inv(coef[target]).ok_or_else(lost)?, &acc, &mut out);
-                out
-            }
-            (&[other], Some(pu), Some(qu)) => {
-                let coef = coef.ok_or_else(|| Error::Unsupported("dual parity Q for this column count".into()))?;
-                // P' = D_t + D_o and Q' = e_t D_t + e_o D_o after removing the known units.
-                let (mut p2, mut q2) = (pu.clone(), qu.clone());
-                for (k, u) in units.iter().enumerate() {
-                    if let Some(u) = u {
-                        xor_into(&mut p2, u);
-                        gf16::mul_region_xor(coef[k], u, &mut q2);
-                    }
-                }
-                gf16::mul_region_xor(coef[other], &p2, &mut q2); // e_t D_t + e_o D_t = (e_t + e_o) D_t
-                let mut out = vec![0u8; len];
-                gf16::mul_region_xor(gf16::inv(coef[target] ^ coef[other]).ok_or_else(lost)?, &q2, &mut out);
-                out
-            }
-            _ => return Err(lost()),
-        };
-        let skip = (within - from) as usize;
-        buf.copy_from_slice(&rebuilt[skip..skip + buf.len()]);
-        Ok(())
+        if unknown_code {
+            return Err(Error::Unsupported("dual parity Q for this column count".into()));
+        }
+        Err(lost())
     }
 
     fn read_exact(&self, mut offset: u64, mut buf: &mut [u8]) -> Result<()> {

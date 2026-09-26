@@ -12,7 +12,7 @@ never writes to the pool disks.
 | Two-way and three-way mirror | read, survives missing or failing disks |
 | Single parity | read, one missing or failing disk rebuilt from parity |
 | Dual parity, 7-10 columns | read; any two missing disks rebuilt |
-| Dual parity, 11+ columns (grouped) | not supported yet |
+| Dual parity, 11+ columns (local reconstruction code) | read; any two missing disks rebuilt |
 | Fixed and thin provisioning | read |
 | Write-back cache (default for new spaces) | read, including data not yet moved out of the cache |
 | Storage tiers, mirror-accelerated parity | read |
@@ -76,7 +76,8 @@ device-mapper mapping reads one copy only.
 
 `attach` skips pools with missing disks. `spaces info <disks...>` shows which
 disk is missing. If the redundancy of every space still covers the loss
-(mirror: at least one copy of every slab; parity: at most one missing disk),
+(mirror: at least one copy of every slab; single parity: at most one
+missing disk; dual parity: at most two),
 attach anyway:
 
 ```sh

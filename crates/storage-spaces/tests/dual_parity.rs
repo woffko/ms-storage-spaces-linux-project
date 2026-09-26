@@ -1,7 +1,8 @@
-//! The second parity of dual parity spaces, on the impulse pool written by
-//! tools/vm/New-ImpulsePool.ps1 (7 columns; all-zero stripes with single
-//! bytes set). Every unit read with any two disks failing must equal the
-//! unit read from all disks.
+//! The parity codes of dual parity spaces, on impulse pools written by
+//! tools/vm/New-ImpulsePool.ps1 (all-zero stripes with single bytes set):
+//! 7 to 10 columns (P and Q) and 11+ columns (local reconstruction code).
+//! Every unit read with any two disks failing must equal the unit read from
+//! all disks, and the impulses must be where the manifest puts them.
 
 use std::fs::File;
 use std::path::Path;
@@ -35,19 +36,19 @@ fn manifest(dir: &Path) -> serde_json::Value {
 }
 
 #[test]
-fn any_two_columns_are_rebuilt_from_p_and_q() {
+fn any_two_columns_are_rebuilt() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
     let mut dirs: Vec<_> = std::fs::read_dir(&root).unwrap().map(|e| e.unwrap().path()).collect();
     dirs.sort();
     for dir in dirs {
         let m = manifest(&dir);
         let name = m["space"]["name"].as_str().unwrap();
-        let columns = m["space"]["columns"].as_u64().unwrap() as usize;
+        let columns = m["space"]["columns"].as_u64().unwrap();
         let n = m["disks"].as_array().unwrap().len();
         let images: Vec<SparseImage> = (0..n)
             .map(|i| SparseImage::read_from(File::open(dir.join(format!("disk{i}.fixture"))).unwrap()).unwrap())
             .collect();
-        let stripe = (columns as u64 - 2) * 0x10000;
+        let stripe = m["space"]["stripe_size"].as_u64().unwrap_or((columns - 2) * 0x10000);
         let stripes = m["impulses"].as_array().unwrap().len() as u64;
         let reference: Vec<u8> = {
             let pool = Pool::open(images.clone()).unwrap();
@@ -56,7 +57,18 @@ fn any_two_columns_are_rebuilt_from_p_and_q() {
             r.read_exact_at(&mut v, 0).unwrap();
             v
         };
-        assert!(reference.iter().any(|&b| b != 0), "{name}");
+        let mut expected = vec![0u8; reference.len()];
+        for (s, list) in m["impulses"].as_array().unwrap().iter().enumerate() {
+            for imp in list.as_array().unwrap() {
+                let v: Vec<u64> = imp.as_array().unwrap().iter().map(|x| x.as_u64().unwrap()).collect();
+                expected[(s as u64 * stripe + v[0] * 0x10000 + v[1]) as usize] = v[2] as u8;
+            }
+        }
+        assert!(expected.iter().any(|&b| b != 0), "{name}");
+        assert!(
+            reference == expected,
+            "{name}: impulses not where the manifest puts them"
+        );
         for a in 0..n {
             for b in a + 1..n {
                 let flags: Vec<Arc<AtomicBool>> = (0..n).map(|_| Arc::new(AtomicBool::new(false))).collect();
