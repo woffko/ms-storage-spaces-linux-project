@@ -324,6 +324,14 @@ fn free_nbd() -> Result<String> {
     bail!("no free NBD device")
 }
 
+/// Serializes attach and detach runs (udev can start one while another runs).
+pub fn lock() -> Result<File> {
+    fs::create_dir_all(STATE_DIR)?;
+    let file = File::create(Path::new(STATE_DIR).join("lock"))?;
+    file.lock()?;
+    Ok(file)
+}
+
 /// Whether a space is attached already.
 pub fn is_attached(space: &Space) -> bool {
     State::path(&space.info.guid.to_string()).exists()

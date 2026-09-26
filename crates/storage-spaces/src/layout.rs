@@ -58,7 +58,7 @@ impl Layout {
 
     /// A layout that starts at byte `base` of the owner space (a tier).
     pub fn with_base(policy: &Policy, extents: &[ExtentRecord], base: u64) -> Result<Self> {
-        if base % SLAB_SIZE != 0 {
+        if !base.is_multiple_of(SLAB_SIZE) {
             return Err(format_err!("layout starts at {base:#x}, not on a slab boundary"));
         }
         let base_slab = base / SLAB_SIZE;
@@ -75,7 +75,7 @@ impl Layout {
             }
             Resiliency::Other(r) => return Err(Error::Unsupported(format!("resiliency type {r}"))),
         };
-        if SLAB_SIZE % policy.interleave != 0 {
+        if !SLAB_SIZE.is_multiple_of(policy.interleave) {
             return Err(Error::Unsupported(format!("interleave {:#x}", policy.interleave)));
         }
         let mut runs: BTreeMap<(u64, u64), Vec<Run>> = BTreeMap::new();

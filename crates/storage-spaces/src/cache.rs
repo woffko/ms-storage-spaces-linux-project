@@ -89,7 +89,7 @@ impl CacheHeader {
             chunk_size: le_u32(&b[0x58..]),
             chunk_count: le_u32(&b[0x5c..]),
         };
-        if !(0x40..=0x10000).contains(&h.slot_size) || h.chunk_size == 0 || h.chunk_size % 4096 != 0 {
+        if !(0x40..=0x10000).contains(&h.slot_size) || h.chunk_size == 0 || !h.chunk_size.is_multiple_of(4096) {
             return Err(format_err!("implausible cache geometry: {h:?}"));
         }
         Ok(Some(h))
@@ -165,7 +165,7 @@ impl CacheIndex {
                     .get(pos + 16..pos + 16 + words * 2)
                     .ok_or_else(|| format_err!("cache entry overflows its slot"))?;
                 pos += 16 + words * 2;
-                if offset % chunk != 0 {
+                if !offset.is_multiple_of(chunk) {
                     return Err(format_err!("bad cache entry: offset {offset:#x}"));
                 }
                 let validity = match state {

@@ -52,7 +52,7 @@ impl<D: ReadAt> SpaceReader<'_, D> {
             return Err(Error::Unsupported("the space has data in its write-back cache".into()));
         }
         let row_size = SLAB_SIZE * l.columns;
-        if self.size() % (l.interleave * l.columns) != 0 {
+        if !self.size().is_multiple_of(l.interleave * l.columns) {
             return Err(format_err!(
                 "space size {:#x} is not a whole number of stripes",
                 self.size()

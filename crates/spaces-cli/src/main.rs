@@ -626,6 +626,7 @@ fn cmd_attach(
     degraded: bool,
     devices: &[PathBuf],
 ) -> Result<()> {
+    let _lock = attach::lock()?;
     let groups: Vec<Vec<PathBuf>> = if devices.is_empty() {
         scan::scan()
             .into_values()
@@ -679,6 +680,7 @@ fn cmd_attach(
 
 #[cfg(target_os = "linux")]
 fn cmd_detach(sel: Option<&str>) -> Result<()> {
+    let _lock = attach::lock()?;
     let mut failures = 0;
     for state in attach::State::load_all() {
         let matches = sel.is_none_or(|s| {
