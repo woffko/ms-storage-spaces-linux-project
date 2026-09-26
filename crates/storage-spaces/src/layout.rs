@@ -1,0 +1,200 @@
+//! Mapping virtual space offsets to physical slabs.
+
+use std::collections::BTreeMap;
+
+use crate::error::{Error, Result, format_err};
+use crate::format::{ExtentRecord, Policy, Resiliency, SLAB_SIZE};
+
+/// A run of consecutive physical slabs backing consecutive rows of one column copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Run {
+    pub first_row: u64,
+    pub rows: u64,
+    pub disk_id: u64,
+    pub physical_slab: u64,
+}
+
+/// Where a virtual offset lives within the column layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Location {
+    pub column: u64,
+    /// Slab row within the column.
+    pub row: u64,
+    pub offset_in_slab: u64,
+    /// Bytes that stay contiguous from this point (up to the interleave boundary).
+    pub contiguous: u64,
+}
+
+/// Striping layout of a space: data is split into `interleave`-sized units
+/// written round-robin across the columns; each column is a sequence of slab
+/// rows, each backed by one physical slab per copy.
+///
+/// Single parity uses the left-symmetric RAID-5 layout: in stripe `s` the
+/// parity unit is in column `C - 1 - s % C` and the data units follow it,
+/// wrapping around. Parity is the XOR of the data units.
+#[derive(Debug, Clone)]
+pub struct Layout {
+    pub resiliency: Resiliency,
+    pub columns: u64,
+    pub data_columns: u64,
+    pub copies: u64,
+    pub interleave: u64,
+    runs: BTreeMap<(u64, u64), Vec<Run>>,
+}
+
+impl Layout {
+    pub fn new(policy: &Policy, extents: &[ExtentRecord]) -> Result<Self> {
+        let data_columns = match policy.resiliency {
+            Resiliency::Simple | Resiliency::Mirror => policy.columns,
+            Resiliency::Parity if policy.redundancy == 1 && policy.columns >= 3 => policy.columns - 1,
+            Resiliency::Parity => {
+                return Err(Error::Unsupported(format!(
+                    "parity with {} columns and redundancy {}",
+                    policy.columns, policy.redundancy
+                )));
+            }
+            Resiliency::Other(r) => return Err(Error::Unsupported(format!("resiliency type {r}"))),
+        };
+        if SLAB_SIZE % policy.interleave != 0 {
+            return Err(Error::Unsupported(format!("interleave {:#x}", policy.interleave)));
+        }
+        let mut runs: BTreeMap<(u64, u64), Vec<Run>> = BTreeMap::new();
+        for e in extents {
+            if e.column >= policy.columns || e.copy >= policy.copies.max(1) {
+                return Err(format_err!(
+                    "extent column {} copy {} outside a {}x{} layout",
+                    e.column,
+                    e.copy,
+                    policy.columns,
+                    policy.copies
+                ));
+            }
+            if e.virtual_slab % data_columns != 0 {
+                return Err(format_err!(
+                    "extent starts at virtual slab {} not aligned to a row",
+                    e.virtual_slab
+                ));
+            }
+            runs.entry((e.column, e.copy)).or_default().push(Run {
+                first_row: e.virtual_slab / data_columns,
+                rows: e.slab_count,
+                disk_id: e.disk_id,
+                physical_slab: e.physical_slab,
+            });
+        }
+        for list in runs.values_mut() {
+            list.sort_by_key(|r| r.first_row);
+            if list.windows(2).any(|w| w[0].first_row + w[0].rows > w[1].first_row) {
+                return Err(format_err!("overlapping extents"));
+            }
+        }
+        Ok(Layout {
+            resiliency: policy.resiliency,
+            columns: policy.columns,
+            data_columns,
+            copies: policy.copies.max(1),
+            interleave: policy.interleave,
+            runs,
+        })
+    }
+
+    /// Locates a virtual offset.
+    pub fn locate(&self, offset: u64) -> Location {
+        let unit = offset / self.interleave;
+        let within = offset % self.interleave;
+        let stripe = unit / self.data_columns;
+        let index = unit % self.data_columns;
+        let column = match self.resiliency {
+            Resiliency::Parity => (self.parity_column(stripe) + 1 + index) % self.columns,
+            _ => index,
+        };
+        let column_offset = stripe * self.interleave + within;
+        Location {
+            column,
+            row: column_offset / SLAB_SIZE,
+            offset_in_slab: column_offset % SLAB_SIZE,
+            contiguous: self.interleave - within,
+        }
+    }
+
+    /// Column holding the parity unit of a stripe (parity layouts only).
+    pub fn parity_column(&self, stripe: u64) -> u64 {
+        self.columns - 1 - stripe % self.columns
+    }
+
+    /// Physical slab backing a row of a column copy, if allocated.
+    pub fn physical(&self, column: u64, copy: u64, row: u64) -> Option<(u64, u64)> {
+        let runs = self.runs.get(&(column, copy))?;
+        let i = runs.partition_point(|r| r.first_row + r.rows <= row);
+        let run = runs.get(i).filter(|r| r.first_row <= row)?;
+        Some((run.disk_id, run.physical_slab + (row - run.first_row)))
+    }
+
+    /// All runs, keyed by (column, copy).
+    pub fn runs(&self) -> &BTreeMap<(u64, u64), Vec<Run>> {
+        &self.runs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy(columns: u64, interleave: u64) -> Policy {
+        Policy {
+            resiliency: Resiliency::Simple,
+            redundancy: 0,
+            copies: 1,
+            groups: 1,
+            columns,
+            interleave,
+        }
+    }
+
+    #[test]
+    fn stripes_round_robin() {
+        let l = Layout::new(&policy(2, 0x10000), &[]).unwrap();
+        assert_eq!(l.locate(0x10000).column, 1);
+        let loc = l.locate(0x2_0000 + 5);
+        assert_eq!((loc.column, loc.row, loc.offset_in_slab), (0, 0, 0x10005));
+        let loc = l.locate(2 * SLAB_SIZE + 0x10000);
+        assert_eq!((loc.column, loc.row, loc.offset_in_slab), (1, 1, 0));
+    }
+
+    #[test]
+    fn rotates_parity_left_symmetric() {
+        let p = Policy {
+            resiliency: Resiliency::Parity,
+            redundancy: 1,
+            copies: 1,
+            groups: 1,
+            columns: 3,
+            interleave: 0x10000,
+        };
+        let l = Layout::new(&p, &[]).unwrap();
+        // Units D0..D5 as observed on a Windows-created 3-column parity space.
+        let columns: Vec<u64> = (0..6).map(|u| l.locate(u * 0x10000).column).collect();
+        assert_eq!(columns, [0, 1, 2, 0, 1, 2]);
+        assert_eq!(l.locate(3 * 0x10000).column, 0);
+        assert_eq!(l.locate(2 * 0x10000).column, 2);
+        assert_eq!((0..3).map(|s| l.parity_column(s)).collect::<Vec<_>>(), [2, 1, 0]);
+        assert_eq!(l.locate(5 * 0x10000).offset_in_slab, 2 * 0x10000);
+    }
+
+    #[test]
+    fn finds_runs() {
+        let e = |virtual_slab, slab_count, physical_slab| ExtentRecord {
+            space_id: 5,
+            virtual_slab,
+            column: 0,
+            copy: 0,
+            slab_count,
+            disk_id: 1,
+            physical_slab,
+        };
+        let l = Layout::new(&policy(1, 0x40000), &[e(0, 2, 10), e(5, 1, 3)]).unwrap();
+        assert_eq!(l.physical(0, 0, 1), Some((1, 11)));
+        assert_eq!(l.physical(0, 0, 2), None);
+        assert_eq!(l.physical(0, 0, 5), Some((1, 3)));
+    }
+}

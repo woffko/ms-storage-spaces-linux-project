@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = ["crates/storage-spaces", "crates/spaces-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-or-later"
+rust-version = "1.85"
+
+[workspace.dependencies]
+storage-spaces = { path = "crates/storage-spaces" }
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }

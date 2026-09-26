@@ -1,0 +1,16 @@
+[package]
+name = "spaces-cli"
+description = "Command-line tool for Microsoft Storage Spaces pools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "spaces"
+path = "src/main.rs"
+
+[dependencies]
+storage-spaces.workspace = true
+anyhow.workspace = true
+clap.workspace = true
