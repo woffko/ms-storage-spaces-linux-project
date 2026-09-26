@@ -250,7 +250,11 @@ mod tests {
     #[test]
     fn reused_block_does_not_resurrect_old_mapping() {
         // Block 2 holds chunk 0, is reused for chunk 1, and chunk 1 is destaged.
-        let i = index(&[slot(1, &[(0, 2)]), slot(2, &[(CHUNK, 2)]), slot(3, &[(CHUNK, NO_BLOCK)])]);
+        let i = index(&[
+            slot(1, &[(0, 2)]),
+            slot(2, &[(CHUNK, 2)]),
+            slot(3, &[(CHUNK, NO_BLOCK)]),
+        ]);
         assert_eq!(hit(&i, 0), None);
         assert_eq!(hit(&i, CHUNK), None);
     }

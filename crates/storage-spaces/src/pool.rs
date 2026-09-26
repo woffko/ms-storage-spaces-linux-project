@@ -88,7 +88,14 @@ impl<D: ReadAt> Pool<D> {
         for (index, dev) in devices.iter().enumerate() {
             let partition = find_spaces_partition(dev)?
                 .ok_or_else(|| Error::Pool(format!("device {index} has no Storage Spaces partition")))?;
-            let header = DiskHeader::parse(&read_vec(dev, partition.offset, DiskHeader::SIZE)?)?;
+            let header = match DiskHeader::parse(&read_vec(dev, partition.offset, DiskHeader::SIZE)?) {
+                Ok(header) => header,
+                Err(Error::Format(e)) => {
+                    warnings.push(format!("device {index} ignored: {e}"));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             members.push(Member {
                 device: index,
                 partition,
@@ -96,7 +103,10 @@ impl<D: ReadAt> Pool<D> {
                 db_sequence: None,
             });
         }
-        let guid = members[0].header.pool_guid;
+        let Some(first) = members.first() else {
+            return Err(Error::Pool(format!("no usable pool member: {}", warnings.join("; "))));
+        };
+        let guid = first.header.pool_guid;
         if let Some(m) = members.iter().find(|m| m.header.pool_guid != guid) {
             return Err(Error::Pool(format!(
                 "device {} belongs to pool {}, device 0 to pool {guid}",

@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::crc::crc32_excluding;
 use crate::error::{Result, format_err};
 use crate::guid::Guid;
 use crate::io::{ReadAt, read_vec};
@@ -39,11 +40,14 @@ pub struct DiskHeader {
 }
 
 impl DiskHeader {
-    pub const SIZE: usize = 0x40;
+    pub const SIZE: usize = HEADER_CRC_SPAN;
 
     pub fn parse(b: &[u8]) -> Result<Self> {
         if b.len() < Self::SIZE || &b[0..8] != SPACEDB_SIGNATURE {
             return Err(format_err!("missing SPACEDB signature"));
+        }
+        if !header_crc_ok(b) {
+            return Err(format_err!("SPACEDB checksum mismatch"));
         }
         let version = u16::from_be_bytes([b[8], b[9]]);
         if version != 3 {
@@ -58,6 +62,14 @@ impl DiskHeader {
             disk_guid: Guid::from_slice(&b[0x30..0x40]).unwrap(),
         })
     }
+}
+
+/// SPACEDB and SDBC headers carry a big-endian CRC-32 (zlib) at 0x0c over
+/// their first 0x200 bytes, computed with the checksum field zeroed.
+const HEADER_CRC_SPAN: usize = 0x200;
+
+fn header_crc_ok(b: &[u8]) -> bool {
+    crc32_excluding(&b[..HEADER_CRC_SPAN], 0x0c) == be_u32(&b[0x0c..])
 }
 
 /// Header of a metadata database ("SDBC").
@@ -89,6 +101,9 @@ pub fn read_database<D: ReadAt + ?Sized>(dev: &D, offset: u64) -> Result<(DbHead
     if &h[0..8] != SDBC_SIGNATURE {
         return Err(format_err!("missing SDBC signature at {offset:#x}"));
     }
+    if !header_crc_ok(&h) {
+        return Err(format_err!("SDBC checksum mismatch at {offset:#x}"));
+    }
     let header = DbHeader {
         owner_guid: Guid::from_slice(&h[0x10..0x20]).unwrap(),
         entry_size: be_u32(&h[0x24..]),
@@ -112,9 +127,15 @@ pub fn read_database<D: ReadAt + ?Sized>(dev: &D, offset: u64) -> Result<(DbHead
 fn assemble_records(raw: &[u8], entry_size: usize) -> Result<Vec<RawRecord>> {
     // record id -> fragment index -> payload
     let mut fragments: BTreeMap<u32, (u16, BTreeMap<u16, &[u8]>)> = BTreeMap::new();
-    for entry in raw.chunks_exact(entry_size).skip(8) {
+    for (slot, entry) in raw.chunks_exact(entry_size).enumerate().skip(8) {
         if &entry[0..4] != SDBB_SIGNATURE {
             continue;
+        }
+        if be_u32(&entry[4..]) as usize != slot {
+            return Err(format_err!(
+                "SDBB entry {slot} claims to be slot {}",
+                be_u32(&entry[4..])
+            ));
         }
         let id = be_u32(&entry[8..]);
         let index = u16::from_be_bytes([entry[12], entry[13]]);
@@ -489,6 +510,26 @@ mod tests {
             version: 0,
             body: hex(body),
         }
+    }
+
+    fn disk_header() -> Vec<u8> {
+        let mut b = vec![0u8; DiskHeader::SIZE];
+        b[0..8].copy_from_slice(SPACEDB_SIGNATURE);
+        b[8..10].copy_from_slice(&3u16.to_be_bytes());
+        b[0x20..0x30].copy_from_slice(&[0x11; 16]);
+        b[0x30..0x40].copy_from_slice(&[0x22; 16]);
+        let crc = crate::crc::crc32(&b);
+        b[0x0c..0x10].copy_from_slice(&crc.to_be_bytes());
+        b
+    }
+
+    #[test]
+    fn checks_header_crc() {
+        let mut b = disk_header();
+        let h = DiskHeader::parse(&b).unwrap();
+        assert_eq!(h.pool_guid, Guid([0x11; 16]));
+        b[0x1ff] ^= 1; // inside the checksummed range
+        assert!(DiskHeader::parse(&b).is_err());
     }
 
     #[test]

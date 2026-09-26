@@ -32,7 +32,7 @@ Slabs are 256 MiB.
 | 0x00 | 8 | "SPACEDB " |
 | 0x08 | 2 | layout version, 3 on Windows 10/11 |
 | 0x0a | 2 | 0x0200 |
-| 0x0c | 4 | checksum (algorithm unknown) |
+| 0x0c | 4 | CRC-32 (zlib, stored BE) of bytes 0..0x200 with this field zeroed (**verified**) |
 | 0x18 | 8 | FILETIME when the disk joined the pool |
 | 0x20 | 16 | pool GUID |
 | 0x30 | 16 | physical disk GUID (as in the `PD:{...}` part of the disk ObjectId) |
@@ -50,7 +50,7 @@ Header (the first 8 entry slots = 0x200 bytes):
 | Offset | Size | Field |
 |---|---|---|
 | 0x00 | 8 | "SDBC    " |
-| 0x0c | 4 | checksum (unknown) |
+| 0x0c | 4 | CRC-32 like the disk header (**verified**) |
 | 0x10 | 16 | owner GUID (pool or space) |
 | 0x24 | 4 | entry size (0x40) |
 | 0x28 | 4 | entry slots in use, including the 8 header slots |
@@ -62,7 +62,7 @@ Entry slot `i` (i >= 8) is at `i * entry_size`:
 | Offset | Size | Field |
 |---|---|---|
 | 0x00 | 4 | "SDBB" |
-| 0x04 | 4 | unknown (slot number) |
+| 0x04 | 4 | own slot number (checked as an integrity test) |
 | 0x08 | 4 | record id, 0 = free |
 | 0x0c | 2 | fragment index |
 | 0x0e | 2 | fragment count |
@@ -189,7 +189,8 @@ allocation unit (**verified**: pool `au1g`).
 
 ## Open questions
 
-* Checksums of SPACEDB and SDBC/SDBB.
+* SDBB entries carry no checksum of their own; how Windows detects torn
+  entries is unknown.
 * Remaining record fields (provisioning type, sizes, disk attributes, tiers).
 * Per-space databases (type 7 record lists member disks).
 * Role 6 / 0x0a children; slot type 1; cache head/tail and destaging.
