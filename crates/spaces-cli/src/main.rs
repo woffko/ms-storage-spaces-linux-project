@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
+#[cfg(all(target_os = "linux", feature = "fuse"))]
+mod fuse;
 mod nbd;
 #[cfg(all(target_os = "linux", feature = "ublk"))]
 mod ublk;
@@ -69,6 +71,17 @@ enum Command {
         #[arg(short, long)]
         space: String,
     },
+    /// Expose a space as the read-only file MOUNTPOINT/space.img through FUSE
+    /// (foreground; stop by unmounting). Attach it with `losetup -r -b SECTOR`.
+    #[cfg(all(target_os = "linux", feature = "fuse"))]
+    ServeFuse {
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+        #[arg(short, long)]
+        space: String,
+        #[arg(long)]
+        mountpoint: PathBuf,
+    },
     /// Print a device-mapper table for the space (simple and mirror spaces).
     DmTable {
         #[arg(required = true)]
@@ -119,6 +132,16 @@ fn main() -> Result<()> {
             let pool: &'static Pool<File> = Box::leak(Box::new(open_pool(&devices)?));
             let reader = Box::leak(Box::new(pool.open_space(find_space(pool, &space)?.id())?));
             ublk::serve(pool, reader, |dev| println!("{dev}"))
+        }
+        #[cfg(all(target_os = "linux", feature = "fuse"))]
+        Command::ServeFuse {
+            devices,
+            space,
+            mountpoint,
+        } => {
+            let pool: &'static Pool<File> = Box::leak(Box::new(open_pool(&devices)?));
+            let reader = Box::leak(Box::new(pool.open_space(find_space(pool, &space)?.id())?));
+            fuse::serve(reader, pool.logical_sector_size, &mountpoint)
         }
         Command::DmTable { devices, space } => {
             let pool = open_pool(&devices)?;
