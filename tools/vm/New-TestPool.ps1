@@ -186,6 +186,14 @@ $manifest = [ordered]@{
     }
     disks = @($poolDisks)
     extents = @($extents)
+    tiers = @($vd | Get-StorageTier -ErrorAction SilentlyContinue | ForEach-Object {
+        [ordered]@{
+            name = $_.FriendlyName; media = "$($_.MediaType)"; size = $_.Size
+            resiliency = $_.ResiliencySettingName; copies = $_.NumberOfDataCopies
+            redundancy = $_.PhysicalDiskRedundancy; columns = $_.NumberOfColumns
+            interleave = $_.Interleave
+        }
+    })
 }
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $dir 'manifest.json')
 

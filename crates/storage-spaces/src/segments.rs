@@ -39,6 +39,9 @@ impl<D: ReadAt> SpaceReader<'_, D> {
     /// Describes the space as segments, or explains why it cannot be.
     pub fn segments(&self) -> Result<Vec<Segment>> {
         let l = self.layout();
+        if self.is_tiered() {
+            return Err(Error::Unsupported("tiered spaces have no linear mapping yet".into()));
+        }
         if !matches!(l.resiliency, Resiliency::Simple | Resiliency::Mirror) {
             return Err(Error::Unsupported(format!(
                 "{:?} spaces have no linear mapping",

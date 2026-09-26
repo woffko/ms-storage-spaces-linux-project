@@ -50,18 +50,33 @@ pub fn check_metadata<D: ReadAt>(pool: &Pool<D>, m: &Value, dir: &Path) {
         assert_eq!(space.info.guid.to_string(), s["guid"].as_str().unwrap());
     }
     assert_eq!(space.info.size, s["size"].as_u64());
-    let p = space.info.policy.unwrap();
-    let resiliency = match p.resiliency {
+    let name_of = |r: Resiliency| match r {
         Resiliency::Simple => "Simple",
         Resiliency::Mirror => "Mirror",
         Resiliency::Parity => "Parity",
         Resiliency::Other(_) => "?",
     };
-    assert_eq!(resiliency, s["resiliency"].as_str().unwrap());
-    assert_eq!(Some(p.columns), s["columns"].as_u64());
-    assert_eq!(Some(p.copies), s["copies"].as_u64());
-    assert_eq!(Some(p.redundancy), s["redundancy"].as_u64());
-    assert_eq!(Some(p.interleave), s["interleave"].as_u64());
+    if s["resiliency"].is_null() {
+        // Tiered space: Windows reports the policy per tier.
+        for t in m["tiers"].as_array().into_iter().flatten() {
+            let tier = family(pool, space)
+                .into_iter()
+                .find(|c| c.info.is_child && c.name().ends_with(t["name"].as_str().unwrap()))
+                .unwrap_or_else(|| panic!("{}: tier {} not found", dir.display(), t["name"]));
+            let p = tier.info.policy.unwrap();
+            assert_eq!(name_of(p.resiliency), t["resiliency"].as_str().unwrap());
+            assert_eq!(Some(p.columns), t["columns"].as_u64());
+            assert_eq!(Some(p.copies), t["copies"].as_u64());
+            assert_eq!(Some(p.interleave), t["interleave"].as_u64());
+        }
+    } else {
+        let p = space.info.policy.unwrap();
+        assert_eq!(name_of(p.resiliency), s["resiliency"].as_str().unwrap());
+        assert_eq!(Some(p.columns), s["columns"].as_u64());
+        assert_eq!(Some(p.copies), s["copies"].as_u64());
+        assert_eq!(Some(p.redundancy), s["redundancy"].as_u64());
+        assert_eq!(Some(p.interleave), s["interleave"].as_u64());
+    }
 
     // Windows lists the extents of the space and of its hidden children.
     let guid_of = |unique_id: &str| {

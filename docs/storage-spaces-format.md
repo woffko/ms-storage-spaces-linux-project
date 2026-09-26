@@ -119,6 +119,14 @@ user space (type 3, role 2)            data extents
      └─ child (type 6)                extents
 ```
 
+Storage tiers (**verified**: pool `tiered`, SSD mirror tier + HDD 2-column
+simple tier): the user space has no extents of its own; each tier is a type 6
+child of the space with its own policy and extents. Tiers share the space's
+virtual slab numbers (the SSD tier held slabs 0-3, the HDD tier slabs 4-7),
+so each tier is read with its own layout at the space's offset, and every
+row belongs to exactly one tier. Tier templates created with
+`New-StorageTier` are separate type 6 records without extents.
+
 ### Type 4: extent
 ```
 vint, vint (format), vint, u8 flags (0x04 for cache extents),
@@ -213,5 +221,6 @@ allocation unit (**verified**: pool `au1g`).
 * Per-space databases (type 7 record lists member disks).
 * Role 6 / 0x0a children; slot type 1; cache head/tail and destaging.
 * The second parity code of dual parity.
-* Storage tiers, enclosure awareness, older pool versions
+* Tier movement by the tiering optimizer (not exercised yet), enclosure
+  awareness, older pool versions
   (Windows 8/Server 2012 layout differs, see StorageSpaceReconstructor).

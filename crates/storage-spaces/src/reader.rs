@@ -27,8 +27,10 @@ impl<D: ReadAt> Mapped<'_, D> {
         })
     }
 
-    /// Reads from `offset` up to the next interleave boundary; returns bytes read.
-    fn read_some(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+    /// Reads from `offset` up to the next interleave boundary. Returns the
+    /// length covered and whether it is allocated; unallocated ranges leave
+    /// `buf` untouched.
+    fn read_some(&self, offset: u64, buf: &mut [u8]) -> Result<(usize, bool)> {
         let l = &self.layout;
         let loc = l.locate(offset);
         let n = buf.len().min(loc.contiguous as usize);
@@ -41,7 +43,7 @@ impl<D: ReadAt> Mapped<'_, D> {
                 // A read error (a disk that went away) falls through to the
                 // next copy or to parity reconstruction.
                 match self.pool.read_slab(disk, slab, loc.offset_in_slab, buf) {
-                    Ok(true) => return Ok(n),
+                    Ok(true) => return Ok((n, true)),
                     Ok(false) => {}
                     Err(Error::Io(e)) => last_error = Some(e),
                     Err(e) => return Err(e),
@@ -50,7 +52,7 @@ impl<D: ReadAt> Mapped<'_, D> {
         }
         if allocated && l.resiliency == Resiliency::Parity {
             self.reconstruct(&loc, buf)?;
-            return Ok(n);
+            return Ok((n, true));
         }
         if let Some(e) = last_error {
             return Err(Error::Io(e));
@@ -61,8 +63,7 @@ impl<D: ReadAt> Mapped<'_, D> {
                 loc.column, loc.row
             )));
         }
-        buf.fill(0); // not allocated (thin provisioning)
-        Ok(n)
+        Ok((n, false)) // not allocated (thin provisioning, or another tier)
     }
 
     /// Rebuilds a unit of a missing column from the XOR parity and the other
@@ -92,7 +93,10 @@ impl<D: ReadAt> Mapped<'_, D> {
 
     fn read_exact(&self, mut offset: u64, mut buf: &mut [u8]) -> Result<()> {
         while !buf.is_empty() {
-            let n = self.read_some(offset, buf)?;
+            let (n, allocated) = self.read_some(offset, buf)?;
+            if !allocated {
+                buf[..n].fill(0);
+            }
             offset += n as u64;
             buf = &mut buf[n..];
         }
@@ -105,6 +109,8 @@ pub struct SpaceReader<'p, D> {
     pub space: &'p Space,
     size: u64,
     base: Mapped<'p, D>,
+    /// Storage tiers: child spaces sharing the space's virtual slab numbers.
+    tiers: Vec<Mapped<'p, D>>,
     cache: Option<(Mapped<'p, D>, CacheIndex)>,
 }
 
@@ -130,10 +136,16 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
             }
         };
         let cache = Self::open_cache(pool, space)?;
+        let tiers = pool
+            .children(space.id())
+            .filter(|c| c.info.is_child && !c.extents.is_empty())
+            .map(|c| Mapped::new(pool, c))
+            .collect::<Result<Vec<_>>>()?;
         Ok(SpaceReader {
             space,
             size,
             base,
+            tiers,
             cache,
         })
     }
@@ -203,10 +215,10 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
                     }
                     Lookup::Miss { len } => {
                         let n = buf.len().min(len as usize);
-                        self.base.read_some(offset, &mut buf[..n])?
+                        self.read_space(offset, &mut buf[..n])?
                     }
                 },
-                None => self.base.read_some(offset, buf)?,
+                None => self.read_space(offset, buf)?,
             };
             offset += n as u64;
             buf = &mut buf[n..];
@@ -216,8 +228,36 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
 
     /// Reads the space's own extents only, ignoring the write-back cache
     /// (diagnostics and recovery; this is not the current content).
-    pub fn read_uncached_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
-        self.base.read_exact(offset, buf)
+    pub fn read_uncached_at(&self, mut buf: &mut [u8], mut offset: u64) -> Result<()> {
+        while !buf.is_empty() {
+            let n = self.read_space(offset, buf)?;
+            offset += n as u64;
+            buf = &mut buf[n..];
+        }
+        Ok(())
+    }
+
+    /// Reads the space's own extents or those of the tier that holds the
+    /// range; zeros if nothing is allocated. Returns the bytes read.
+    fn read_space(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        let (mut n, allocated) = self.base.read_some(offset, buf)?;
+        if allocated {
+            return Ok(n);
+        }
+        for tier in &self.tiers {
+            let (m, allocated) = tier.read_some(offset, &mut buf[..n])?;
+            if allocated {
+                return Ok(m);
+            }
+            n = n.min(m);
+        }
+        buf[..n].fill(0);
+        Ok(n)
+    }
+
+    /// Whether the space stores its data in storage tiers.
+    pub fn is_tiered(&self) -> bool {
+        !self.tiers.is_empty()
     }
 
     /// Reads what the write-back cache holds for `offset`, if anything.
