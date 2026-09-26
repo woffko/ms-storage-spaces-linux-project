@@ -172,8 +172,20 @@ Data of owner offset `X` held in the cache is at cache offset
 `data_offset + chunk_index * chunk_size + (X % chunk_size)`. The newest slot
 wins per owner chunk and per cache block.
 
-Writes into unallocated rows of a thin space stay in the cache even after the
-pool is cleanly detached, so the cache must be consulted on every read.
+An entry with chunk index `0xffffffff` removes the owner chunk from the cache;
+Windows writes it when it destages the chunk (**verified**: pools `au1g`,
+`wc64`). A mapping is current only if it is the newest entry for its owner
+chunk and the newest assignment of its cache block.
+
+The cache is the space's write-back cache (`WriteCacheSize` of
+`New-VirtualDisk`): with `-WriteCacheSize 0` no cache children exist, and the
+smallest cache Windows creates is 512 MiB (**verified**: pools `nocache`,
+`wc64`). Writes into unallocated rows of a thin space can stay in the cache
+even after the pool is cleanly detached, so the cache must be consulted on
+every read.
+
+Extent `slab_count` is always in 256 MiB units, also for spaces with a 1 GiB
+allocation unit (**verified**: pool `au1g`).
 
 ## Open questions
 

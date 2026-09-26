@@ -10,6 +10,9 @@
 //!   Slots of type 0 map chunks of the owner space to cache blocks; other
 //!   types carry state that is not decoded yet.
 //!
+//! Entries with block `0xffffffff` remove a chunk from the cache (written
+//! when the chunk is destaged).
+//!
 //! Both structures carry a CRC-32 at `0x24` computed with that field zeroed,
 //! over the size stored at `0x1c`.
 //! * data area: `chunk_count` blocks of `chunk_size` bytes (one full stripe).
@@ -23,6 +26,8 @@ use crate::guid::Guid;
 pub const SPCACHE_SIGNATURE: &[u8; 8] = b"SPCACHE\0";
 pub const SPSLOT_SIGNATURE: &[u8; 8] = b"SPSLOT\0\0";
 const SLOT_TYPE_MAPPING: u32 = 0;
+/// Block number of an entry that removes a chunk from the cache (destaged).
+const NO_BLOCK: u32 = u32::MAX;
 
 #[derive(Debug, Clone)]
 pub struct CacheHeader {
@@ -96,9 +101,12 @@ impl CacheIndex {
         let mut area = vec![0u8; slot_size * header.slot_count as usize];
         read(header.slot_offset, &mut area)?;
 
-        // Latest mapping per owner chunk, then per cache block (a block may
-        // have been reused for another chunk by a later slot).
-        let mut by_chunk: HashMap<u64, (u64, u64, u64)> = HashMap::new();
+        // A mapping is current if it is the newest entry for its owner chunk
+        // (a newer entry may be a tombstone written when the chunk was
+        // destaged) and the newest assignment of its cache block (blocks are
+        // reused for other chunks).
+        let mut newest_for_chunk: HashMap<u64, (u64, Option<(u64, u64)>)> = HashMap::new();
+        let mut newest_for_block: HashMap<u64, u64> = HashMap::new();
         for slot in area.chunks_exact(slot_size) {
             if &slot[0..8] != SPSLOT_SIGNATURE
                 || Guid::from_mixed_endian(slot[8..24].try_into().unwrap()) != header.owner_guid
@@ -117,26 +125,33 @@ impl CacheIndex {
             }
             for e in slot[0x38..0x38 + count * 16].chunks_exact(16) {
                 let offset = le_u64(e);
-                let block = le_u32(&e[8..]) as u64;
+                let block = le_u32(&e[8..]);
                 let valid = le_u32(&e[12..]) as u64;
-                if offset % chunk != 0 || block >= header.chunk_count as u64 {
-                    return Err(format_err!("bad cache entry: offset {offset:#x} block {block}"));
+                if offset % chunk != 0 {
+                    return Err(format_err!("bad cache entry: offset {offset:#x}"));
                 }
+                let target = match block {
+                    NO_BLOCK => None,
+                    b if (b as u64) < header.chunk_count as u64 => Some((b as u64, valid)),
+                    b => return Err(format_err!("bad cache entry: block {b}")),
+                };
                 let key = offset / chunk;
-                if by_chunk.get(&key).is_none_or(|&(s, _, _)| sequence > s) {
-                    by_chunk.insert(key, (sequence, block, valid));
+                if newest_for_chunk.get(&key).is_none_or(|&(s, _)| sequence > s) {
+                    newest_for_chunk.insert(key, (sequence, target));
+                }
+                if let Some((b, _)) = target
+                    && newest_for_block.get(&b).is_none_or(|&s| sequence > s)
+                {
+                    newest_for_block.insert(b, sequence);
                 }
             }
         }
-        let mut by_block: HashMap<u64, (u64, u64, u64)> = HashMap::new();
-        for (key, (sequence, block, valid)) in by_chunk {
-            if by_block.get(&block).is_none_or(|&(s, _, _)| sequence > s) {
-                by_block.insert(block, (sequence, key, valid));
-            }
-        }
-        let chunks = by_block
+        let chunks = newest_for_chunk
             .into_iter()
-            .map(|(block, (_, key, valid))| (key, (block, valid)))
+            .filter_map(|(key, (sequence, target))| {
+                let (block, valid) = target?;
+                (newest_for_block.get(&block) == Some(&sequence)).then_some((key, (block, valid)))
+            })
             .collect();
         Ok(CacheIndex { header, unit, chunks })
     }
@@ -166,4 +181,85 @@ fn le_u32(b: &[u8]) -> u32 {
 
 fn le_u64(b: &[u8]) -> u64 {
     u64::from_le_bytes(b[..8].try_into().unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crc::crc32;
+
+    const GUID: [u8; 16] = [7; 16];
+    const CHUNK: u64 = 0x20000;
+
+    fn header() -> CacheHeader {
+        CacheHeader {
+            owner_guid: Guid::from_mixed_endian(&GUID),
+            sequence: 1,
+            slot_offset: 0,
+            slot_size: 0x1000,
+            slot_count: 4,
+            data_offset: 0x10_0000,
+            chunk_size: CHUNK as u32,
+            chunk_count: 16,
+        }
+    }
+
+    fn slot(sequence: u64, entries: &[(u64, u32)]) -> Vec<u8> {
+        let mut s = vec![0u8; 0x1000];
+        s[0..8].copy_from_slice(SPSLOT_SIGNATURE);
+        s[8..24].copy_from_slice(&GUID);
+        s[0x18..0x1c].copy_from_slice(&1u32.to_le_bytes());
+        s[0x1c..0x20].copy_from_slice(&0x1000u32.to_le_bytes());
+        s[0x28..0x30].copy_from_slice(&sequence.to_le_bytes());
+        s[0x30..0x34].copy_from_slice(&(entries.len() as u32).to_le_bytes());
+        for (i, &(offset, block)) in entries.iter().enumerate() {
+            let e = &mut s[0x38 + i * 16..0x48 + i * 16];
+            e[0..8].copy_from_slice(&offset.to_le_bytes());
+            e[8..12].copy_from_slice(&block.to_le_bytes());
+            e[12..16].copy_from_slice(&3u32.to_le_bytes());
+        }
+        let crc = crc32(&s);
+        s[0x24..0x28].copy_from_slice(&crc.to_le_bytes());
+        s
+    }
+
+    fn index(slots: &[Vec<u8>]) -> CacheIndex {
+        let mut area = slots.concat();
+        area.resize(4 * 0x1000, 0);
+        CacheIndex::load(header(), CHUNK / 2, |off, buf| {
+            buf.copy_from_slice(&area[off as usize..off as usize + buf.len()]);
+            Ok(())
+        })
+        .unwrap()
+    }
+
+    fn hit(index: &CacheIndex, offset: u64) -> Option<u64> {
+        match index.lookup(offset) {
+            Lookup::Hit { cache_offset, .. } => Some(cache_offset),
+            Lookup::Miss { .. } => None,
+        }
+    }
+
+    #[test]
+    fn maps_chunks_and_honours_tombstones() {
+        let i = index(&[slot(1, &[(0, 2), (CHUNK, 3)]), slot(2, &[(0, NO_BLOCK)])]);
+        assert_eq!(hit(&i, 5), None);
+        assert_eq!(hit(&i, CHUNK + 5), Some(0x10_0000 + 3 * CHUNK + 5));
+    }
+
+    #[test]
+    fn reused_block_does_not_resurrect_old_mapping() {
+        // Block 2 holds chunk 0, is reused for chunk 1, and chunk 1 is destaged.
+        let i = index(&[slot(1, &[(0, 2)]), slot(2, &[(CHUNK, 2)]), slot(3, &[(CHUNK, NO_BLOCK)])]);
+        assert_eq!(hit(&i, 0), None);
+        assert_eq!(hit(&i, CHUNK), None);
+    }
+
+    #[test]
+    fn ignores_corrupt_slots() {
+        let mut bad = slot(5, &[(0, 1)]);
+        bad[0x40] ^= 1;
+        let i = index(&[slot(1, &[(0, 2)]), bad]);
+        assert_eq!(hit(&i, 0), Some(0x10_0000 + 2 * CHUNK));
+    }
 }
