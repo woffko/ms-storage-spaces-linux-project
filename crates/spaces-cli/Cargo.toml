@@ -10,7 +10,16 @@ rust-version.workspace = true
 name = "spaces"
 path = "src/main.rs"
 
+[features]
+default = ["ublk"]
+# The ublk backend needs libclang at build time (bindgen in libublk-rs-sys).
+ublk = ["dep:libublk", "dep:signal-hook"]
+
 [dependencies]
 storage-spaces.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libublk = { version = "0.4.8", optional = true }
+signal-hook = { version = "0.3", optional = true }

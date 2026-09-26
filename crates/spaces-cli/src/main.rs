@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 
 mod nbd;
+#[cfg(all(target_os = "linux", feature = "ublk"))]
+mod ublk;
 use clap::{Parser, Subcommand};
 use storage_spaces::format::{SLAB_SIZE, SpaceRole};
 use storage_spaces::io::ReadAt;
@@ -58,6 +60,15 @@ enum Command {
         #[arg(long)]
         socket: PathBuf,
     },
+    /// Expose a space read-only as a ublk block device (foreground; stop with
+    /// SIGINT/SIGTERM). Needs root and the ublk_drv kernel module.
+    #[cfg(all(target_os = "linux", feature = "ublk"))]
+    ServeUblk {
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+        #[arg(short, long)]
+        space: String,
+    },
     /// Print a device-mapper table for the space (simple and mirror spaces).
     DmTable {
         #[arg(required = true)]
@@ -102,6 +113,12 @@ fn main() -> Result<()> {
         Command::ServeNbd { devices, space, socket } => {
             let pool = open_pool(&devices)?;
             serve_nbd(&pool, find_space(&pool, &space)?, &socket)
+        }
+        #[cfg(all(target_os = "linux", feature = "ublk"))]
+        Command::ServeUblk { devices, space } => {
+            let pool: &'static Pool<File> = Box::leak(Box::new(open_pool(&devices)?));
+            let reader = Box::leak(Box::new(pool.open_space(find_space(pool, &space)?.id())?));
+            ublk::serve(pool, reader, |dev| println!("{dev}"))
         }
         Command::DmTable { devices, space } => {
             let pool = open_pool(&devices)?;
