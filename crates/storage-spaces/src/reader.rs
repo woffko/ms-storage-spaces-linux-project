@@ -21,9 +21,10 @@ impl<D: ReadAt> Mapped<'_, D> {
             .info
             .policy
             .ok_or_else(|| format_err!("space {} has no recognised placement policy", space.id()))?;
+        let base = space.info.range.map_or(0, |(start, _)| start);
         Ok(Mapped {
             pool,
-            layout: Layout::new(&policy, &space.extents)?,
+            layout: Layout::with_base(&policy, &space.extents, base)?,
         })
     }
 
@@ -32,6 +33,9 @@ impl<D: ReadAt> Mapped<'_, D> {
     /// `buf` untouched.
     fn read_some(&self, offset: u64, buf: &mut [u8]) -> Result<(usize, bool)> {
         let l = &self.layout;
+        if offset < l.base {
+            return Ok((buf.len().min((l.base - offset) as usize), false));
+        }
         let loc = l.locate(offset);
         let n = buf.len().min(loc.contiguous as usize);
         let buf = &mut buf[..n];

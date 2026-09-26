@@ -255,6 +255,9 @@ pub struct SpaceRecord {
     pub policy: Option<Policy>,
     /// Id of the parent space, 0 for top-level spaces.
     pub parent: Option<u64>,
+    /// Child spaces: byte range of the parent's address space they cover
+    /// (a storage tier, or the whole cache).
+    pub range: Option<(u64, u64)>,
 }
 
 /// Record type 4: one run of physical slabs backing a column copy of a space.
@@ -355,6 +358,7 @@ fn decode_space(c: &mut Cursor, is_child: bool) -> Result<SpaceRecord> {
             size,
             policy: None,
             parent: None,
+            range: None,
         });
     };
     c.skip(pos + POLICY_ANCHOR.len())?;
@@ -383,9 +387,18 @@ fn decode_space(c: &mut Cursor, is_child: bool) -> Result<SpaceRecord> {
         interleave: 1 << interleave_log2,
     };
 
+    let mut range = None;
     let parent = if is_child {
         c.varint()?;
-        Some(c.varint()?)
+        let parent = c.varint()?;
+        // u32, then the start and length within the parent (u64 BE each).
+        if c.remaining().len() >= 20 {
+            c.skip(4)?;
+            let start = be_u64(c.take(8)?);
+            let length = be_u64(c.take(8)?);
+            range = Some((start, length));
+        }
+        Some(parent)
     } else {
         for _ in 0..6 {
             c.varint()?;
@@ -401,6 +414,7 @@ fn decode_space(c: &mut Cursor, is_child: bool) -> Result<SpaceRecord> {
         size,
         policy: Some(policy),
         parent,
+        range,
     })
 }
 

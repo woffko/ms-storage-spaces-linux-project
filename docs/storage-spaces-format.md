@@ -119,12 +119,14 @@ user space (type 3, role 2)            data extents
      └─ child (type 6)                extents
 ```
 
-Storage tiers (**verified**: pool `tiered`, SSD mirror tier + HDD 2-column
-simple tier): the user space has no extents of its own; each tier is a type 6
-child of the space with its own policy and extents. Tiers share the space's
-virtual slab numbers (the SSD tier held slabs 0-3, the HDD tier slabs 4-7),
-so each tier is read with its own layout at the space's offset, and every
-row belongs to exactly one tier. Tier templates created with
+Storage tiers (**verified**: pools `tiered`, SSD mirror + HDD 2-column simple,
+and `mapar`, SSD mirror + HDD 3-column parity): the user space has no extents
+of its own; each tier is a type 6 child of the space with its own policy and
+extents. After the parent id a type 6 record holds `u32`, then the start and
+length of the child within the parent's address space (`u64` BE each: SSD
+0/1 GiB, HDD 1 GiB/2 GiB; a cache child covers its own size from 0). Extent
+virtual slab numbers are those of the parent space; rows and parity rotation
+of a tier count from the tier's start. Tier templates created with
 `New-StorageTier` are separate type 6 records without extents.
 
 ### Type 4: extent
@@ -146,7 +148,10 @@ Column offset `o` is in row `o / 256 MiB` of the column.
 * Mirror: as simple; every copy holds the same data.
 * Single parity (`redundancy 1`): `D = columns - 1`, left-symmetric RAID-5:
   parity of stripe `s` in column `C - 1 - s % C`, data unit `i` of the stripe
-  in column `(parity + 1 + i) % C`. Parity = XOR of the data units.
+  in column `(parity + 1 + i) % C`. Parity = XOR of the data units. The
+  stripe number `s` counts from the first row of the extent run (type 4
+  record) that holds the stripe (**verified**: `mapar`, whose parity tier has
+  one run per row; pools with a single run cannot tell the difference).
 * Dual parity (`redundancy 2`): `D = columns - 2`; the two parity units of
   stripe `s` are in columns `P = (C - 2 - 2s) mod C` and `P + 1`, data unit
   `i` in column `(P + 2 + i) % C` (**verified**: pool `dual7`, 7 columns).

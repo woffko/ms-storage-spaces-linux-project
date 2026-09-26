@@ -32,7 +32,8 @@ pub struct Location {
 /// Parity spaces keep `r` parity units per stripe (r = redundancy, 1 or 2)
 /// in consecutive columns starting at `(C - r - r * s) mod C` for stripe
 /// `s`; the data units follow them, wrapping around. For r = 1 this is the
-/// left-symmetric RAID-5 layout. The first parity unit (P) is the XOR of
+/// left-symmetric RAID-5 layout; the stripe number counts from the first row
+/// of the extent run the stripe lies in. The first parity unit (P) is the XOR of
 /// the data units; the second one (Q, dual parity) uses a code that is not
 /// decoded yet.
 #[derive(Debug, Clone)]
@@ -42,6 +43,9 @@ pub struct Layout {
     pub data_columns: u64,
     /// Parity units per stripe (0 for simple and mirror).
     pub parity_units: u64,
+    /// Start of the layout in the owner's address space (storage tiers);
+    /// rows and parity rotation count from here.
+    pub base: u64,
     pub copies: u64,
     pub interleave: u64,
     runs: BTreeMap<(u64, u64), Vec<Run>>,
@@ -49,6 +53,15 @@ pub struct Layout {
 
 impl Layout {
     pub fn new(policy: &Policy, extents: &[ExtentRecord]) -> Result<Self> {
+        Self::with_base(policy, extents, 0)
+    }
+
+    /// A layout that starts at byte `base` of the owner space (a tier).
+    pub fn with_base(policy: &Policy, extents: &[ExtentRecord], base: u64) -> Result<Self> {
+        if base % SLAB_SIZE != 0 {
+            return Err(format_err!("layout starts at {base:#x}, not on a slab boundary"));
+        }
+        let base_slab = base / SLAB_SIZE;
         let data_columns = match policy.resiliency {
             Resiliency::Simple | Resiliency::Mirror => policy.columns,
             Resiliency::Parity if (1..=2).contains(&policy.redundancy) && policy.columns >= policy.redundancy + 2 => {
@@ -76,14 +89,14 @@ impl Layout {
                     policy.copies
                 ));
             }
-            if e.virtual_slab % data_columns != 0 {
-                return Err(format_err!(
-                    "extent starts at virtual slab {} not aligned to a row",
-                    e.virtual_slab
-                ));
+            let slab = e.virtual_slab.checked_sub(base_slab).ok_or_else(|| {
+                format_err!("extent at virtual slab {} lies before the layout start", e.virtual_slab)
+            })?;
+            if slab % data_columns != 0 {
+                return Err(format_err!("extent starts at virtual slab {} not aligned to a row", e.virtual_slab));
             }
             runs.entry((e.column, e.copy)).or_default().push(Run {
-                first_row: e.virtual_slab / data_columns,
+                first_row: slab / data_columns,
                 rows: e.slab_count,
                 disk_id: e.disk_id,
                 physical_slab: e.physical_slab,
@@ -100,20 +113,24 @@ impl Layout {
             columns: policy.columns,
             data_columns,
             parity_units: policy.columns - data_columns,
+            base,
             copies: policy.copies.max(1),
             interleave: policy.interleave,
             runs,
         })
     }
 
-    /// Locates a virtual offset.
+    /// Locates an offset of the owner space; `offset` must be at least `base`.
     pub fn locate(&self, offset: u64) -> Location {
+        let offset = offset - self.base;
         let unit = offset / self.interleave;
         let within = offset % self.interleave;
         let stripe = unit / self.data_columns;
         let index = unit % self.data_columns;
         let column = match self.resiliency {
-            Resiliency::Parity => (self.parity_column(stripe) + self.parity_units + index) % self.columns,
+            Resiliency::Parity => {
+                (self.parity_column(self.rotation_stripe(stripe)) + self.parity_units + index) % self.columns
+            }
             _ => index,
         };
         let column_offset = stripe * self.interleave + within;
@@ -135,7 +152,22 @@ impl Layout {
 
     /// Stripe number of a location (parity layouts).
     pub fn stripe_of(&self, loc: &Location) -> u64 {
-        (loc.row * SLAB_SIZE + loc.offset_in_slab) / self.interleave
+        self.rotation_stripe((loc.row * SLAB_SIZE + loc.offset_in_slab) / self.interleave)
+    }
+
+    /// Parity rotation restarts at the first row of every extent run.
+    fn rotation_stripe(&self, stripe: u64) -> u64 {
+        let per_row = SLAB_SIZE / self.interleave;
+        let row = stripe / per_row;
+        let first_row = self
+            .runs
+            .get(&(0, 0))
+            .and_then(|runs| {
+                let i = runs.partition_point(|r| r.first_row + r.rows <= row);
+                runs.get(i).filter(|r| r.first_row <= row)
+            })
+            .map_or(0, |r| r.first_row);
+        stripe - first_row * per_row
     }
 
     /// Physical slab backing a row of a column copy, if allocated.

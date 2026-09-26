@@ -157,7 +157,7 @@ impl ReadAt for Flaky {
 
 #[test]
 fn reads_fail_over_when_a_disk_disappears() {
-    for name in ["mirror2", "mirror3", "parity3", "parity4", "parity5", "dual7"] {
+    for name in ["mirror2", "mirror3", "parity3", "parity4", "parity5", "dual7", "mapar"] {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/pools")
             .join(name);
