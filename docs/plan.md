@@ -79,7 +79,7 @@ in this repository.
 * Open: the Q code of dual parity (two-column rebuild), extent/disk health
   states, quorum rules.
 
-### M2 (backends done, corpus matrix pending)
+### M2 (backends done, corpus matrix in progress)
 
 * dm (`dm-table`), ublk (`serve-ublk`), NBD (`serve-nbd`) and FUSE
   (`serve-fuse`) all expose the real `test_ubuntu` pool: data equal to the
@@ -88,17 +88,27 @@ in this repository.
   logical sector size; dm inherits the members' 512.
 * Pending: `tools/backend-matrix.sh` over the whole corpus on the Linux VM.
 
-### M3 (in progress)
+### M3 (exit criteria met on the test VM, 2026-09-26)
 
 * `spaces scan/attach/detach/status`: stable `/dev/mapper/ss-<pool>-<space>`
   and `-p<N>` partition devices from our own GPT parser (Windows omitted the
   protective MBR inside `test_ubuntu`, so the kernel would not see it).
-* All backends attach and detach cleanly on the real pool; `auto` picks dm
-  for simple spaces with matching sectors, ublk otherwise.
-* udev rule + `storage-spaces-attach.service` attach the pool when its
-  members appear (`udevadm trigger --action=add` test on the Linux VM).
-* Pending: reboot test on the Linux VM, unplug-a-mirror-member test on the
-  VM, performance targets.
+  attach and detach are serialized by a lock; serving processes open the
+  members with O_EXCL (a second server got EBUSY in a race).
+* Boot: after a reboot of the Linux VM `storage-spaces-attach.service`
+  attached `test_ubuntu` through ublk and its NTFS partition mounted
+  read-only (the first reboot exposed a systemd ordering deadlock, fixed by
+  starting server units without default dependencies).
+* Runtime failure: `mirror2` attached through ublk over device-mapper
+  wrappers; switching one wrapper to the `error` target kept the whole
+  pattern readable (sequential and 500 random reads); with both failed reads
+  return I/O errors; detach took 0.09 s.
+* Throughput on the VM (warm host cache, 1 GiB direct reads): dm 337-342
+  MB/s, ublk 307-317 MB/s (91-93 % of dm; better than dm for 64 KiB reads),
+  NBD 287 MB/s. dm maps the members directly, so it runs at member speed.
+* Not applicable: the corpus pools hold the verification pattern rather than
+  NTFS, and no physical Windows machine is part of the test setup (Windows 11
+  VM only, see the scope decision).
 
 ## Test infrastructure (continuous, feeds every stage)
 
