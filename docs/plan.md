@@ -94,7 +94,15 @@ in this repository.
   crashes seen while generating wide pools (bugcheck 0x124, parameter
   0x10 = WHEA error reported by a device driver, after stornvme reset the
   VM's virtual NVMe disk during multi-second host write stalls) stopped
-  once the generators pace their writes (15 MB/s, write-through).
+  when the generators paced their writes (15 MB/s, write-through) and
+  nothing else loaded the host disk; it recurred (17:14Z, vmware.log: WRITE
+  commands of 4.6 s, stornvme reset, 0x124) while the Linux VM, whose disk
+  shares the same host drive, ran a kernel test at the same time. Heavy I/O
+  runs on one VM at a time.
+  Kernel level on the Linux VM: `lrc11` through ublk, NBD and FUSE passes
+  the backend matrix, and attached with `--degraded` and two of its eleven
+  disks absent (ublk) reads its whole pattern, sequentially and with 500
+  random reads.
 
 ### M2 (exit criteria met on the test VM, 2026-09-26)
 
