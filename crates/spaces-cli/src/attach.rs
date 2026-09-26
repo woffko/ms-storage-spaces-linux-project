@@ -163,6 +163,11 @@ fn run(program: &str, args: &[&str], stdin: Option<&str>) -> Result<String> {
 }
 
 fn dm_create(name: &str, table: &str) -> Result<()> {
+    if Path::new("/dev/mapper").join(name).exists() {
+        bail!(
+            "device-mapper device {name} already exists (left over from an interrupted run?); remove it with `dmsetup remove {name}`"
+        );
+    }
     run("dmsetup", &["create", "--readonly", name], Some(table))?;
     run("udevadm", &["settle"], None).ok();
     Ok(())
