@@ -74,8 +74,17 @@ then `length` bytes of body.
 ## Records
 
 ### Type 1: pool
-`vint, vint, guid[16], name`. Strings are `u16 BE` length in UTF-16 code units
-(including the terminating NUL) followed by UTF-16BE text.
+`vint, vint, guid[16], name, description, vint, u16 version,
+u8 log2(logical sector size), u8 log2(physical sector size), ...`
+(**verified**: version 29, sectors 512/4096 and 4096/4096). Strings are `u16 BE`
+length in UTF-16 code units (including the terminating NUL) followed by
+UTF-16BE text.
+
+Spaces expose the pool's logical sector size (**verified** against
+`Get-VirtualDisk`); space records carry no sector size of their own. Whether a
+later change of the pool default affects existing spaces is not tested yet.
+Block devices and loop devices for a space must use this sector size: a 4 KiB
+space keeps its GPT at byte 0x1000.
 
 ### Type 2: physical disk
 `vint id, vint, guid[16], name, ...` (then description, manufacturer, model,

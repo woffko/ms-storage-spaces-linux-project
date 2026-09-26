@@ -58,6 +58,19 @@ fn metadata_matches_windows() {
         let pool = open(&dir, &m);
         assert!(pool.warnings.is_empty(), "{}: {:?}", dir.display(), pool.warnings);
         assert_eq!(pool.guid.to_string(), m["pool"]["guid"].as_str().unwrap());
+        assert_eq!(
+            format!("Version {}", pool.version),
+            m["pool"]["version"].as_str().unwrap()
+        );
+        // Spaces inherit the pool's sector size.
+        assert_eq!(
+            Some(pool.logical_sector_size as u64),
+            m["space"]["logical_sector"].as_u64()
+        );
+        assert_eq!(
+            Some(pool.physical_sector_size as u64),
+            m["space"]["physical_sector"].as_u64()
+        );
         let s = &m["space"];
         let space = pool.find_space(s["name"].as_str().unwrap()).expect("space not found");
         // Manifests from the first generator version recorded the pool GUID here.

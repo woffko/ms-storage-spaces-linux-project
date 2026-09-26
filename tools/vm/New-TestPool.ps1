@@ -21,6 +21,9 @@ param(
     [int] $InterleaveKB = 0,
     [ValidateSet('Thin', 'Fixed')] [string] $Provisioning = 'Fixed',
     [int] $SizeMB = 1024,
+    [ValidateSet(0, 512, 4096)] [int] $LogicalSectorSize = 0,
+    [int] $AllocationUnitMB = 0,
+    [int] $WriteCacheMB = -1,
     [switch] $NoPattern,
     [int] $PatternMB = 0,
     [string] $Root = 'C:\sstest'
@@ -91,7 +94,9 @@ $physical = foreach ($f in $images) {
 }
 $subsystem = Get-StorageSubSystem | Where-Object FriendlyName -like 'Windows Storage*' | Select-Object -First 1
 $poolName = "ss-$Name"
-New-StoragePool -FriendlyName $poolName -StorageSubSystemUniqueId $subsystem.UniqueId -PhysicalDisks $physical | Out-Null
+$poolParams = @{ FriendlyName = $poolName; StorageSubSystemUniqueId = $subsystem.UniqueId; PhysicalDisks = $physical }
+if ($LogicalSectorSize -gt 0) { $poolParams.LogicalSectorSizeDefault = $LogicalSectorSize }
+New-StoragePool @poolParams | Out-Null
 
 $vdParams = @{
     StoragePoolFriendlyName = $poolName
@@ -104,6 +109,8 @@ if ($DataCopies -gt 0) { $vdParams.NumberOfDataCopies = $DataCopies }
 if ($Redundancy -ge 0) { $vdParams.PhysicalDiskRedundancy = $Redundancy }
 if ($Columns -gt 0) { $vdParams.NumberOfColumns = $Columns }
 if ($InterleaveKB -gt 0) { $vdParams.Interleave = [int64]$InterleaveKB * 1KB }
+if ($AllocationUnitMB -gt 0) { $vdParams.AllocationUnitSize = [int64]$AllocationUnitMB * 1MB }
+if ($WriteCacheMB -ge 0) { $vdParams.WriteCacheSize = [int64]$WriteCacheMB * 1MB }
 $vd = New-VirtualDisk @vdParams
 $disk = $vd | Get-Disk
 
@@ -137,13 +144,18 @@ $manifest = [ordered]@{
     windows_build = [Environment]::OSVersion.Version.ToString()
     pattern = -not $NoPattern
     pattern_size = if ($NoPattern) { 0 } elseif ($PatternMB -gt 0) { [int64]$PatternMB * 1MB } else { $vd.Size }
-    pool = [ordered]@{ name = $poolName; guid = $poolGuid; version = "$($pool.Version)"; size = $pool.Size; allocated = $pool.AllocatedSize }
+    pool = [ordered]@{
+        name = $poolName; guid = $poolGuid; version = "$($pool.Version)"; size = $pool.Size; allocated = $pool.AllocatedSize
+        logical_sector = $pool.LogicalSectorSize; physical_sector = $pool.PhysicalSectorSize
+    }
     space = [ordered]@{
         name = $Name; guid = $vdGuid; size = $vd.Size; footprint = $vd.FootprintOnPool
         resiliency = $vd.ResiliencySettingName; copies = $vd.NumberOfDataCopies
         redundancy = $vd.PhysicalDiskRedundancy; columns = $vd.NumberOfColumns
         interleave = $vd.Interleave; provisioning = "$($vd.ProvisioningType)"
         logical_sector = $vd.LogicalSectorSize; physical_sector = $vd.PhysicalSectorSize
+        allocation_unit = $vd.AllocationUnitSize; groups = $vd.NumberOfGroups
+        write_cache = $vd.WriteCacheSize; read_cache = $vd.ReadCacheSize
     }
     disks = @($poolDisks)
     extents = @($extents)

@@ -113,6 +113,10 @@ fn size(bytes: u64) -> String {
 
 fn info(pool: &Pool<File>, all: bool) -> Result<()> {
     println!("Pool {:?} {}", pool.name, pool.guid);
+    println!(
+        "  version {}, sectors {} logical / {} physical",
+        pool.version, pool.logical_sector_size, pool.physical_sector_size
+    );
     println!("  database sequence {}", pool.database.sequence);
     println!("Disks:");
     for d in pool.disks.values() {
@@ -210,7 +214,13 @@ fn export(pool: &Pool<File>, space: &Space, output: &PathBuf) -> Result<()> {
         offset += n as u64;
     }
     out.set_len(reader.size())?;
-    println!("exported {} to {}", size(reader.size()), output.display());
+    println!(
+        "exported {} to {} (logical sector size {}; use `losetup -b {}`)",
+        size(reader.size()),
+        output.display(),
+        pool.logical_sector_size,
+        pool.logical_sector_size
+    );
     Ok(())
 }
 

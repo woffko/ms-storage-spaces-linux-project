@@ -64,6 +64,11 @@ pub struct Pool<D> {
     devices: Vec<D>,
     pub guid: Guid,
     pub name: String,
+    /// Pool version ("Version 29" in `Get-StoragePool`).
+    pub version: u16,
+    /// Logical sector size exposed by the spaces of this pool.
+    pub logical_sector_size: u32,
+    pub physical_sector_size: u32,
     pub members: Vec<Member>,
     pub database: DbHeader,
     pub disks: BTreeMap<u64, PhysicalDisk>,
@@ -128,13 +133,13 @@ impl<D: ReadAt> Pool<D> {
             }
         }
 
-        let mut name = String::new();
+        let mut pool_record = None;
         let mut disks = BTreeMap::new();
         let mut spaces = BTreeMap::new();
         let mut extents = Vec::new();
         for raw in &raw_records {
             match Record::decode(raw)? {
-                Record::Pool(p) => name = p.name,
+                Record::Pool(p) => pool_record = Some(p),
                 Record::Disk(d) => {
                     let member = members.iter().position(|m| m.header.disk_guid == d.guid);
                     disks.insert(
@@ -175,10 +180,14 @@ impl<D: ReadAt> Pool<D> {
             warnings.push(format!("disk {} ({}) is missing", d.id, d.guid));
         }
 
+        let pool_record = pool_record.ok_or_else(|| format_err!("pool database has no pool record"))?;
         Ok(Pool {
             devices,
             guid,
-            name,
+            name: pool_record.name,
+            version: pool_record.version,
+            logical_sector_size: pool_record.logical_sector_size,
+            physical_sector_size: pool_record.physical_sector_size,
             members,
             database,
             disks,

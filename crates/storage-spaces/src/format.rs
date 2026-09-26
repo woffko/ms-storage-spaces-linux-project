@@ -156,6 +156,11 @@ fn assemble_records(raw: &[u8], entry_size: usize) -> Result<Vec<RawRecord>> {
 pub struct PoolRecord {
     pub guid: Guid,
     pub name: String,
+    /// Pool version as shown by `Get-StoragePool` ("Version 29").
+    pub version: u16,
+    /// Logical sector size of the pool; spaces inherit it.
+    pub logical_sector_size: u32,
+    pub physical_sector_size: u32,
 }
 
 /// Record type 2: a physical disk.
@@ -256,13 +261,7 @@ impl Record {
         let ctx = |e: crate::Error| format_err!("record {} (type {}): {e}", raw.id, raw.kind);
         let mut c = Cursor::new(&raw.body);
         match raw.kind {
-            1 => {
-                c.varint().map_err(ctx)?;
-                c.varint().map_err(ctx)?;
-                let guid = c.guid().map_err(ctx)?;
-                let name = c.string().map_err(ctx)?;
-                Ok(Record::Pool(PoolRecord { guid, name }))
-            }
+            1 => decode_pool(&mut c).map(Record::Pool).map_err(ctx),
             2 => {
                 let id = c.varint().map_err(ctx)?;
                 c.varint().map_err(ctx)?;
@@ -275,6 +274,31 @@ impl Record {
             kind => Ok(Record::Other { kind }),
         }
     }
+}
+
+fn decode_pool(c: &mut Cursor) -> Result<PoolRecord> {
+    c.varint()?;
+    c.varint()?;
+    let guid = c.guid()?;
+    let name = c.string()?;
+    let _description = c.string()?;
+    c.varint()?;
+    let version = c.u16()?;
+    let mut sector = || -> Result<u32> {
+        match c.u8()? {
+            log2 @ 9..=16 => Ok(1 << log2),
+            other => Err(format_err!("sector size 2^{other}")),
+        }
+    };
+    let logical_sector_size = sector()?;
+    let physical_sector_size = sector()?;
+    Ok(PoolRecord {
+        guid,
+        name,
+        version,
+        logical_sector_size,
+        physical_sector_size,
+    })
 }
 
 /// Marker preceding the placement policy inside space records.
@@ -465,6 +489,24 @@ mod tests {
             version: 0,
             body: hex(body),
         }
+    }
+
+    #[test]
+    fn decodes_pool() {
+        // Pool "ss-sect512": version 29, 512-byte logical and 4 KiB physical sectors.
+        let r = raw(
+            1,
+            "00 01 01 75 4b e5 85 b8 7c 43 e9 8c 59 99 77 1f d2 b4 fe 00 0b 00 73 00 73 00 2d 00 73 00 65 00 63 00 74 \
+             00 35 00 31 00 32 00 00 00 00 00 00 1d 09 0c 46 01 01 00",
+        );
+        let Record::Pool(p) = Record::decode(&r).unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.name, "ss-sect512");
+        assert_eq!(
+            (p.version, p.logical_sector_size, p.physical_sector_size),
+            (29, 512, 4096)
+        );
     }
 
     #[test]
