@@ -119,7 +119,8 @@ impl<D: ReadAt> Pool<D> {
         for (i, member) in members.iter_mut().enumerate() {
             let dev = &devices[member.device];
             match read_database(dev, member.partition.offset + POOL_DB_OFFSET) {
-                Ok((header, records)) => {
+                Ok(None) => {} // this member carries no copy
+                Ok(Some((header, records))) => {
                     if header.owner_guid != guid {
                         warnings.push(format!(
                             "device {}: database belongs to {}",

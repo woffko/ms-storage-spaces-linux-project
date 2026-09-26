@@ -20,7 +20,7 @@ partition start.
 | Offset | Content |
 |---|---|
 | `0x0` | Disk header "SPACEDB " |
-| `0x1000` | Pool database (SDBC header + SDBB entries), a copy on every member |
+| `0x1000` | Pool database (SDBC header + SDBB entries); in larger pools only some members carry a copy, the others are zero here (**verified**: `dual7`, 5 of 7) |
 | `0x2000_0000` | Data area: physical slab `n` at `0x2000_0000 + n * 0x1000_0000` (**verified**) |
 
 Slabs are 256 MiB.
@@ -139,7 +139,15 @@ Column offset `o` is in row `o / 256 MiB` of the column.
 * Single parity (`redundancy 1`): `D = columns - 1`, left-symmetric RAID-5:
   parity of stripe `s` in column `C - 1 - s % C`, data unit `i` of the stripe
   in column `(parity + 1 + i) % C`. Parity = XOR of the data units.
-* Dual parity: not analysed yet.
+* Dual parity (`redundancy 2`): `D = columns - 2`; the two parity units of
+  stripe `s` are in columns `P = (C - 2 - 2s) mod C` and `P + 1`, data unit
+  `i` in column `(P + 2 + i) % C` (**verified**: pool `dual7`, 7 columns).
+  The general rule for `r` parity units is `P = (C - r - r*s) mod C`.
+  P is the XOR of the data units (**verified**); the second unit (Q) is not a
+  byte-wise GF(2^8) Reed-Solomon syndrome nor any word-local GF(2)-linear
+  function of the data (tested for 8..128-bit words), so it is not decoded
+  yet: reads and single-disk rebuilds work, rebuilding two lost data columns
+  does not.
 * Thin spaces: rows without an extent are unallocated and read as zeros.
 
 ## Write-back cache (SPCACHE, LE) (**verified** for thin spaces)
@@ -204,5 +212,6 @@ allocation unit (**verified**: pool `au1g`).
 * Remaining record fields (provisioning type, sizes, disk attributes, tiers).
 * Per-space databases (type 7 record lists member disks).
 * Role 6 / 0x0a children; slot type 1; cache head/tail and destaging.
-* Dual parity, storage tiers, enclosure awareness, older pool versions
+* The second parity code of dual parity.
+* Storage tiers, enclosure awareness, older pool versions
   (Windows 8/Server 2012 layout differs, see StorageSpaceReconstructor).

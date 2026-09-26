@@ -95,9 +95,14 @@ pub struct RawRecord {
     pub body: Vec<u8>,
 }
 
-/// Reads a database whose SDBC header starts at `offset`.
-pub fn read_database<D: ReadAt + ?Sized>(dev: &D, offset: u64) -> Result<(DbHeader, Vec<RawRecord>)> {
+/// Reads a database whose SDBC header starts at `offset`. Returns `None`
+/// if the location is empty: in larger pools only some members carry a copy
+/// of the pool database.
+pub fn read_database<D: ReadAt + ?Sized>(dev: &D, offset: u64) -> Result<Option<(DbHeader, Vec<RawRecord>)>> {
     let h = read_vec(dev, offset, 0x200)?;
+    if h.iter().all(|&b| b == 0) {
+        return Ok(None);
+    }
     if &h[0..8] != SDBC_SIGNATURE {
         return Err(format_err!("missing SDBC signature at {offset:#x}"));
     }
@@ -120,7 +125,7 @@ pub fn read_database<D: ReadAt + ?Sized>(dev: &D, offset: u64) -> Result<(DbHead
     }
     let raw = read_vec(dev, offset, header.entry_count as usize * entry_size)?;
     let records = assemble_records(&raw, entry_size)?;
-    Ok((header, records))
+    Ok(Some((header, records)))
 }
 
 /// Groups SDBB entries by record id and concatenates their fragments.

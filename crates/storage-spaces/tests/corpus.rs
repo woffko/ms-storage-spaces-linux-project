@@ -249,8 +249,10 @@ impl ReadAt for Flaky {
 
 #[test]
 fn reads_fail_over_when_a_disk_disappears() {
-    for name in ["mirror2", "mirror3", "parity3", "parity4"] {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/pools").join(name);
+    for name in ["mirror2", "mirror3", "parity3", "parity4", "parity5", "dual7"] {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/pools")
+            .join(name);
         if !is_complete_pool(&dir) {
             continue;
         }
@@ -260,7 +262,11 @@ fn reads_fail_over_when_a_disk_disappears() {
             let devices: Vec<Flaky> = (0..m["disks"].as_array().unwrap().len())
                 .map(|i| Flaky {
                     file: File::open(dir.join(format!("disk{i}.img"))).unwrap(),
-                    broken: if i == victim { broken.clone() } else { Default::default() },
+                    broken: if i == victim {
+                        broken.clone()
+                    } else {
+                        Default::default()
+                    },
                 })
                 .collect();
             let pool = Pool::open(devices).unwrap();
@@ -270,7 +276,11 @@ fn reads_fail_over_when_a_disk_disappears() {
             for offset in (0..reader.size()).step_by(0x40000 + 0x1000) {
                 let offset = offset / 4096 * 4096;
                 reader.read_exact_at(&mut block, offset).unwrap();
-                assert_eq!(testpattern::verify(&block, offset, name), None, "{name} without disk {victim}");
+                assert_eq!(
+                    testpattern::verify(&block, offset, name),
+                    None,
+                    "{name} without disk {victim}"
+                );
             }
         }
     }

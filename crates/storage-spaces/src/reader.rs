@@ -65,11 +65,16 @@ impl<D: ReadAt> Mapped<'_, D> {
         Ok(n)
     }
 
-    /// Rebuilds a unit of a missing column from the other columns of its stripe.
+    /// Rebuilds a unit of a missing column from the XOR parity and the other
+    /// data units of its stripe.
     fn reconstruct(&self, loc: &Location, buf: &mut [u8]) -> Result<()> {
+        let l = &self.layout;
+        let p = l.parity_column(l.stripe_of(loc));
+        // The second parity unit of dual parity is not part of the XOR.
+        let q = (l.parity_units == 2).then(|| (p + 1) % l.columns);
         buf.fill(0);
         let mut other = vec![0u8; buf.len()];
-        for column in (0..self.layout.columns).filter(|&c| c != loc.column) {
+        for column in (0..l.columns).filter(|&c| c != loc.column && Some(c) != q) {
             let (disk, slab) = self
                 .layout
                 .physical(column, 0, loc.row)

@@ -29,14 +29,19 @@ pub struct Location {
 /// written round-robin across the columns; each column is a sequence of slab
 /// rows, each backed by one physical slab per copy.
 ///
-/// Single parity uses the left-symmetric RAID-5 layout: in stripe `s` the
-/// parity unit is in column `C - 1 - s % C` and the data units follow it,
-/// wrapping around. Parity is the XOR of the data units.
+/// Parity spaces keep `r` parity units per stripe (r = redundancy, 1 or 2)
+/// in consecutive columns starting at `(C - r - r * s) mod C` for stripe
+/// `s`; the data units follow them, wrapping around. For r = 1 this is the
+/// left-symmetric RAID-5 layout. The first parity unit (P) is the XOR of
+/// the data units; the second one (Q, dual parity) uses a code that is not
+/// decoded yet.
 #[derive(Debug, Clone)]
 pub struct Layout {
     pub resiliency: Resiliency,
     pub columns: u64,
     pub data_columns: u64,
+    /// Parity units per stripe (0 for simple and mirror).
+    pub parity_units: u64,
     pub copies: u64,
     pub interleave: u64,
     runs: BTreeMap<(u64, u64), Vec<Run>>,
@@ -46,7 +51,9 @@ impl Layout {
     pub fn new(policy: &Policy, extents: &[ExtentRecord]) -> Result<Self> {
         let data_columns = match policy.resiliency {
             Resiliency::Simple | Resiliency::Mirror => policy.columns,
-            Resiliency::Parity if policy.redundancy == 1 && policy.columns >= 3 => policy.columns - 1,
+            Resiliency::Parity if (1..=2).contains(&policy.redundancy) && policy.columns >= policy.redundancy + 2 => {
+                policy.columns - policy.redundancy
+            }
             Resiliency::Parity => {
                 return Err(Error::Unsupported(format!(
                     "parity with {} columns and redundancy {}",
@@ -92,6 +99,7 @@ impl Layout {
             resiliency: policy.resiliency,
             columns: policy.columns,
             data_columns,
+            parity_units: policy.columns - data_columns,
             copies: policy.copies.max(1),
             interleave: policy.interleave,
             runs,
@@ -105,7 +113,7 @@ impl Layout {
         let stripe = unit / self.data_columns;
         let index = unit % self.data_columns;
         let column = match self.resiliency {
-            Resiliency::Parity => (self.parity_column(stripe) + 1 + index) % self.columns,
+            Resiliency::Parity => (self.parity_column(stripe) + self.parity_units + index) % self.columns,
             _ => index,
         };
         let column_offset = stripe * self.interleave + within;
@@ -117,9 +125,17 @@ impl Layout {
         }
     }
 
-    /// Column holding the parity unit of a stripe (parity layouts only).
+    /// Column holding the first (XOR) parity unit of a stripe; a second
+    /// parity unit follows it.
     pub fn parity_column(&self, stripe: u64) -> u64 {
-        self.columns - 1 - stripe % self.columns
+        let c = self.columns;
+        let r = self.parity_units;
+        (c - r + c * r - (r * stripe) % c) % c
+    }
+
+    /// Stripe number of a location (parity layouts).
+    pub fn stripe_of(&self, loc: &Location) -> u64 {
+        (loc.row * SLAB_SIZE + loc.offset_in_slab) / self.interleave
     }
 
     /// Physical slab backing a row of a column copy, if allocated.
@@ -179,6 +195,28 @@ mod tests {
         assert_eq!(l.locate(2 * 0x10000).column, 2);
         assert_eq!((0..3).map(|s| l.parity_column(s)).collect::<Vec<_>>(), [2, 1, 0]);
         assert_eq!(l.locate(5 * 0x10000).offset_in_slab, 2 * 0x10000);
+    }
+
+    #[test]
+    fn rotates_dual_parity() {
+        // Seven columns, two parity units per stripe, as Windows lays them out.
+        let p = Policy {
+            resiliency: Resiliency::Parity,
+            redundancy: 2,
+            copies: 1,
+            groups: 1,
+            columns: 7,
+            interleave: 0x10000,
+        };
+        let l = Layout::new(&p, &[]).unwrap();
+        assert_eq!(l.data_columns, 5);
+        assert_eq!(
+            (0..8).map(|s| l.parity_column(s)).collect::<Vec<_>>(),
+            [5, 3, 1, 6, 4, 2, 0, 5]
+        );
+        // Stripe 1: P in 3, Q in 4, data units 5..9 in columns 5, 6, 0, 1, 2.
+        let cols: Vec<u64> = (5..10).map(|u| l.locate(u * 0x10000).column).collect();
+        assert_eq!(cols, [5, 6, 0, 1, 2]);
     }
 
     #[test]
