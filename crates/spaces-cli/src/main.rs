@@ -3,6 +3,8 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+
+mod nbd;
 use clap::{Parser, Subcommand};
 use storage_spaces::format::{SLAB_SIZE, SpaceRole};
 use storage_spaces::io::ReadAt;
@@ -45,6 +47,17 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Serve a space read-only over NBD on a Unix socket (foreground).
+    ///
+    /// Attach it with `nbd-client -unix SOCKET /dev/nbdN -b SECTOR -readonly`.
+    ServeNbd {
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+        #[arg(short, long)]
+        space: String,
+        #[arg(long)]
+        socket: PathBuf,
+    },
     /// Print a device-mapper table for the space (simple and mirror spaces).
     DmTable {
         #[arg(required = true)]
@@ -85,6 +98,10 @@ fn main() -> Result<()> {
         Command::Export { devices, space, output } => {
             let pool = open_pool(&devices)?;
             export(&pool, find_space(&pool, &space)?, &output)
+        }
+        Command::ServeNbd { devices, space, socket } => {
+            let pool = open_pool(&devices)?;
+            serve_nbd(&pool, find_space(&pool, &space)?, &socket)
         }
         Command::DmTable { devices, space } => {
             let pool = open_pool(&devices)?;
@@ -312,4 +329,34 @@ fn verify_pattern(path: &PathBuf, tag: &str, length: Option<u64>) -> Result<()> 
     }
     println!("pattern OK over {}", size(total));
     Ok(())
+}
+
+fn serve_nbd(pool: &Pool<File>, space: &Space, socket: &PathBuf) -> Result<()> {
+    let reader = pool.open_space(space.id())?;
+    let listener = std::os::unix::net::UnixListener::bind(socket)
+        .with_context(|| format!("cannot listen on {}", socket.display()))?;
+    let export = nbd::Export {
+        name: space.name(),
+        source: &reader,
+        size: reader.size(),
+        block_size: pool.logical_sector_size,
+    };
+    eprintln!(
+        "serving {:?} ({}) on {}",
+        space.name(),
+        size(reader.size()),
+        socket.display()
+    );
+    std::thread::scope(|scope| {
+        for conn in listener.incoming() {
+            let conn = conn?;
+            let export = &export;
+            scope.spawn(move || {
+                if let Err(e) = nbd::serve(export, conn) {
+                    eprintln!("connection failed: {e}");
+                }
+            });
+        }
+        Ok(())
+    })
 }
