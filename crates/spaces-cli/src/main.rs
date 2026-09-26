@@ -4,9 +4,13 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
+#[cfg(target_os = "linux")]
+mod attach;
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 mod fuse;
 mod nbd;
+#[cfg(target_os = "linux")]
+mod scan;
 #[cfg(all(target_os = "linux", feature = "ublk"))]
 mod ublk;
 use clap::{Parser, Subcommand};
@@ -25,6 +29,36 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Find Storage Spaces pool members among the block devices.
+    #[cfg(target_os = "linux")]
+    Scan,
+    /// Expose the spaces of complete pools as read-only block devices
+    /// (/dev/mapper/ss-<pool>-<space> and -p<N> for partitions).
+    #[cfg(target_os = "linux")]
+    Attach {
+        /// Only this pool (name or GUID).
+        #[arg(long)]
+        pool: Option<String>,
+        /// Only this space (name or GUID).
+        #[arg(short, long)]
+        space: Option<String>,
+        #[arg(long, value_enum, default_value = "auto")]
+        backend: attach::Backend,
+        /// Attach pools with missing disks as long as every space is readable.
+        #[arg(long)]
+        degraded: bool,
+        /// Use these member devices instead of scanning.
+        devices: Vec<PathBuf>,
+    },
+    /// Remove attached spaces.
+    #[cfg(target_os = "linux")]
+    Detach {
+        /// Space name, GUID or device-mapper name; all spaces if omitted.
+        space: Option<String>,
+    },
+    /// List attached spaces.
+    #[cfg(target_os = "linux")]
+    Status,
     /// Show the pool, its disks and spaces.
     Info {
         /// Pool member disks, partitions or images.
@@ -61,6 +95,9 @@ enum Command {
         space: String,
         #[arg(long)]
         socket: PathBuf,
+        /// Write the socket path here once listening.
+        #[arg(long)]
+        ready_file: Option<PathBuf>,
     },
     /// Expose a space read-only as a ublk block device (foreground; stop with
     /// SIGINT/SIGTERM). Needs root and the ublk_drv kernel module.
@@ -70,6 +107,9 @@ enum Command {
         devices: Vec<PathBuf>,
         #[arg(short, long)]
         space: String,
+        /// Write the block device path here once it exists.
+        #[arg(long)]
+        ready_file: Option<PathBuf>,
     },
     /// Expose a space as the read-only file MOUNTPOINT/space.img through FUSE
     /// (foreground; stop by unmounting). Attach it with `losetup -r -b SECTOR`.
@@ -81,6 +121,9 @@ enum Command {
         space: String,
         #[arg(long)]
         mountpoint: PathBuf,
+        /// Write the image file path here once mounted.
+        #[arg(long)]
+        ready_file: Option<PathBuf>,
     },
     /// Print a device-mapper table for the space (simple and mirror spaces).
     DmTable {
@@ -123,26 +166,57 @@ fn main() -> Result<()> {
             let pool = open_pool(&devices)?;
             export(&pool, find_space(&pool, &space)?, &output)
         }
-        Command::ServeNbd { devices, space, socket } => {
-            let pool = open_pool(&devices)?;
-            serve_nbd(&pool, find_space(&pool, &space)?, &socket)
+        Command::ServeNbd {
+            devices,
+            space,
+            socket,
+            ready_file,
+        } => {
+            let pool = open_pool_exclusive(&devices)?;
+            serve_nbd(&pool, find_space(&pool, &space)?, &socket, ready_file.as_deref())
         }
         #[cfg(all(target_os = "linux", feature = "ublk"))]
-        Command::ServeUblk { devices, space } => {
-            let pool: &'static Pool<File> = Box::leak(Box::new(open_pool(&devices)?));
+        Command::ServeUblk {
+            devices,
+            space,
+            ready_file,
+        } => {
+            let pool: &'static Pool<File> = Box::leak(Box::new(open_pool_exclusive(&devices)?));
             let reader = Box::leak(Box::new(pool.open_space(find_space(pool, &space)?.id())?));
-            ublk::serve(pool, reader, |dev| println!("{dev}"))
+            ublk::serve(pool, reader, move |dev| {
+                println!("{dev}");
+                if let Some(path) = &ready_file
+                    && let Err(e) = std::fs::write(path, dev)
+                {
+                    eprintln!("cannot write {}: {e}", path.display());
+                }
+            })
         }
         #[cfg(all(target_os = "linux", feature = "fuse"))]
         Command::ServeFuse {
             devices,
             space,
             mountpoint,
+            ready_file,
         } => {
-            let pool: &'static Pool<File> = Box::leak(Box::new(open_pool(&devices)?));
+            let pool: &'static Pool<File> = Box::leak(Box::new(open_pool_exclusive(&devices)?));
             let reader = Box::leak(Box::new(pool.open_space(find_space(pool, &space)?.id())?));
-            fuse::serve(reader, pool.logical_sector_size, &mountpoint)
+            fuse::serve(reader, pool.logical_sector_size, &mountpoint, ready_file.as_deref())
         }
+        #[cfg(target_os = "linux")]
+        Command::Scan => cmd_scan(),
+        #[cfg(target_os = "linux")]
+        Command::Attach {
+            pool,
+            space,
+            backend,
+            degraded,
+            devices,
+        } => cmd_attach(pool.as_deref(), space.as_deref(), backend, degraded, &devices),
+        #[cfg(target_os = "linux")]
+        Command::Detach { space } => cmd_detach(space.as_deref()),
+        #[cfg(target_os = "linux")]
+        Command::Status => cmd_status(),
         Command::DmTable { devices, space } => {
             let pool = open_pool(&devices)?;
             dm_table(&pool, find_space(&pool, &space)?, &devices)
@@ -156,9 +230,31 @@ fn main() -> Result<()> {
 }
 
 fn open_pool(paths: &[PathBuf]) -> Result<Pool<File>> {
+    open_pool_with(paths, false)
+}
+
+/// Opens the members exclusively (O_EXCL on block devices), so that nothing
+/// else can mount or assemble them while a serving process uses them.
+fn open_pool_exclusive(paths: &[PathBuf]) -> Result<Pool<File>> {
+    open_pool_with(paths, true)
+}
+
+fn open_pool_with(paths: &[PathBuf], exclusive: bool) -> Result<Pool<File>> {
     let files = paths
         .iter()
-        .map(|p| File::open(p).with_context(|| format!("cannot open {}", p.display())))
+        .map(|p| {
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(target_os = "linux")]
+            if exclusive && p.starts_with("/dev") {
+                use std::os::unix::fs::OpenOptionsExt;
+                const O_EXCL: i32 = 0o200;
+                options.custom_flags(O_EXCL);
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = exclusive;
+            options.open(p).with_context(|| format!("cannot open {}", p.display()))
+        })
         .collect::<Result<Vec<_>>>()?;
     let pool = Pool::open(files)?;
     for w in &pool.warnings {
@@ -371,7 +467,7 @@ fn verify_pattern(path: &PathBuf, tag: &str, length: Option<u64>) -> Result<()> 
     Ok(())
 }
 
-fn serve_nbd(pool: &Pool<File>, space: &Space, socket: &PathBuf) -> Result<()> {
+fn serve_nbd(pool: &Pool<File>, space: &Space, socket: &PathBuf, ready_file: Option<&std::path::Path>) -> Result<()> {
     let reader = pool.open_space(space.id())?;
     let listener = std::os::unix::net::UnixListener::bind(socket)
         .with_context(|| format!("cannot listen on {}", socket.display()))?;
@@ -387,6 +483,9 @@ fn serve_nbd(pool: &Pool<File>, space: &Space, socket: &PathBuf) -> Result<()> {
         size(reader.size()),
         socket.display()
     );
+    if let Some(path) = ready_file {
+        std::fs::write(path, socket.display().to_string())?;
+    }
     std::thread::scope(|scope| {
         for conn in listener.incoming() {
             let conn = conn?;
@@ -399,4 +498,143 @@ fn serve_nbd(pool: &Pool<File>, space: &Space, socket: &PathBuf) -> Result<()> {
         }
         Ok(())
     })
+}
+
+#[cfg(target_os = "linux")]
+fn cmd_scan() -> Result<()> {
+    let pools = scan::scan();
+    if pools.is_empty() {
+        println!("no Storage Spaces pool members found");
+    }
+    for (guid, members) in pools {
+        let paths: Vec<PathBuf> = members.iter().map(|m| m.path.clone()).collect();
+        match open_pool(&paths) {
+            Ok(pool) => {
+                let present = pool.disks.values().filter(|d| d.member.is_some()).count();
+                println!("pool {:?} {guid}: {present} of {} disks", pool.name, pool.disks.len());
+                for m in &members {
+                    println!("  {}", m.path.display());
+                }
+                for s in pool.user_spaces() {
+                    println!(
+                        "  space {:?} {} ({})",
+                        s.name(),
+                        s.info.guid,
+                        size(s.info.size.unwrap_or(0))
+                    );
+                }
+            }
+            Err(e) => println!("pool {guid}: cannot open: {e}"),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn cmd_attach(
+    pool_sel: Option<&str>,
+    space_sel: Option<&str>,
+    backend: attach::Backend,
+    degraded: bool,
+    devices: &[PathBuf],
+) -> Result<()> {
+    let groups: Vec<Vec<PathBuf>> = if devices.is_empty() {
+        scan::scan()
+            .into_values()
+            .map(|m| m.into_iter().map(|c| c.path).collect())
+            .collect()
+    } else {
+        vec![devices.to_vec()]
+    };
+    let mut failures = 0;
+    for paths in groups {
+        let pool = open_pool(&paths)?;
+        if pool_sel.is_some_and(|p| p != pool.name && !p.eq_ignore_ascii_case(&pool.guid.to_string())) {
+            continue;
+        }
+        let missing = pool.disks.values().filter(|d| d.member.is_none()).count();
+        if missing > 0 && !degraded {
+            eprintln!(
+                "pool {:?}: {missing} disk(s) missing, skipping (use --degraded)",
+                pool.name
+            );
+            failures += 1;
+            continue;
+        }
+        for space in pool.user_spaces() {
+            if space_sel.is_some_and(|s| s != space.name() && !s.eq_ignore_ascii_case(&space.info.guid.to_string())) {
+                continue;
+            }
+            if attach::is_attached(space) {
+                println!("{:?} is already attached", space.name());
+                continue;
+            }
+            match attach::attach_space(&pool, space, &paths, backend) {
+                Ok(state) => {
+                    println!("attached {:?} with {}:", space.name(), state.backend);
+                    for d in &state.dm {
+                        println!("  /dev/mapper/{d}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("cannot attach {:?}: {e:#}", space.name());
+                    failures += 1;
+                }
+            }
+        }
+    }
+    if failures > 0 {
+        bail!("{failures} space(s) or pool(s) not attached");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn cmd_detach(sel: Option<&str>) -> Result<()> {
+    let mut failures = 0;
+    for state in attach::State::load_all() {
+        let matches = sel.is_none_or(|s| {
+            s.eq_ignore_ascii_case(&state.space_guid)
+                || state
+                    .dm
+                    .first()
+                    .is_some_and(|d| d == s || d.ends_with(&format!("-{s}")))
+        });
+        if !matches {
+            continue;
+        }
+        match attach::teardown(&state) {
+            Ok(()) => println!("detached {}", state.dm.first().map_or(state.space_guid.as_str(), |d| d)),
+            Err(e) => {
+                eprintln!("cannot fully detach {}: {e:#}", state.space_guid);
+                failures += 1;
+            }
+        }
+    }
+    if failures > 0 {
+        bail!("{failures} space(s) not fully detached");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn cmd_status() -> Result<()> {
+    let states = attach::State::load_all();
+    if states.is_empty() {
+        println!("no spaces attached");
+    }
+    for s in states {
+        let main = s.dm.first().cloned().unwrap_or_default();
+        println!("/dev/mapper/{main}  space {}  backend {}", s.space_guid, s.backend);
+        if let Some(d) = &s.device {
+            println!("  backend device {d}");
+        }
+        if let Some(u) = &s.unit {
+            println!("  unit {u}");
+        }
+        for p in s.dm.iter().skip(1) {
+            println!("  partition /dev/mapper/{p}");
+        }
+    }
+    Ok(())
 }

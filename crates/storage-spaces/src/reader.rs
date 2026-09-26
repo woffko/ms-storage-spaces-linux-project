@@ -34,17 +34,26 @@ impl<D: ReadAt> Mapped<'_, D> {
         let n = buf.len().min(loc.contiguous as usize);
         let buf = &mut buf[..n];
         let mut allocated = false;
+        let mut last_error = None;
         for copy in 0..l.copies {
             if let Some((disk, slab)) = l.physical(loc.column, copy, loc.row) {
                 allocated = true;
-                if self.pool.read_slab(disk, slab, loc.offset_in_slab, buf)? {
-                    return Ok(n);
+                // A read error (a disk that went away) falls through to the
+                // next copy or to parity reconstruction.
+                match self.pool.read_slab(disk, slab, loc.offset_in_slab, buf) {
+                    Ok(true) => return Ok(n),
+                    Ok(false) => {}
+                    Err(Error::Io(e)) => last_error = Some(e),
+                    Err(e) => return Err(e),
                 }
             }
         }
         if allocated && l.resiliency == Resiliency::Parity {
             self.reconstruct(&loc, buf)?;
             return Ok(n);
+        }
+        if let Some(e) = last_error {
+            return Err(Error::Io(e));
         }
         if allocated {
             return Err(Error::Pool(format!(
@@ -65,8 +74,11 @@ impl<D: ReadAt> Mapped<'_, D> {
                 .layout
                 .physical(column, 0, loc.row)
                 .ok_or_else(|| format_err!("parity stripe with an unallocated column {column}"))?;
-            if !self.pool.read_slab(disk, slab, loc.offset_in_slab, &mut other)? {
-                return Err(Error::Pool(format!("row {} lost two or more columns", loc.row)));
+            let lost = || Error::Pool(format!("row {} lost two or more columns", loc.row));
+            match self.pool.read_slab(disk, slab, loc.offset_in_slab, &mut other) {
+                Ok(true) => {}
+                Ok(false) | Err(Error::Io(_)) => return Err(lost()),
+                Err(e) => return Err(e),
             }
             buf.iter_mut().zip(&other).for_each(|(b, o)| *b ^= o);
         }

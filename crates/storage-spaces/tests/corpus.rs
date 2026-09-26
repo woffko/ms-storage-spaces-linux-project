@@ -226,3 +226,52 @@ fn segments_match_pattern() {
         }
     }
 }
+
+/// A member device that starts failing all reads once `broken` is set,
+/// like a disk that disappears while the pool is in use.
+struct Flaky {
+    file: File,
+    broken: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ReadAt for Flaky {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        if self.broken.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(std::io::Error::other("device gone"));
+        }
+        self.file.read_exact_at(buf, offset)
+    }
+
+    fn size(&self) -> std::io::Result<u64> {
+        self.file.size()
+    }
+}
+
+#[test]
+fn reads_fail_over_when_a_disk_disappears() {
+    for name in ["mirror2", "mirror3", "parity3", "parity4"] {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/pools").join(name);
+        if !is_complete_pool(&dir) {
+            continue;
+        }
+        let m = manifest(&dir);
+        for victim in 0..m["disks"].as_array().unwrap().len() {
+            let broken = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let devices: Vec<Flaky> = (0..m["disks"].as_array().unwrap().len())
+                .map(|i| Flaky {
+                    file: File::open(dir.join(format!("disk{i}.img"))).unwrap(),
+                    broken: if i == victim { broken.clone() } else { Default::default() },
+                })
+                .collect();
+            let pool = Pool::open(devices).unwrap();
+            let reader = pool.open_space(pool.find_space(name).unwrap().id()).unwrap();
+            broken.store(true, std::sync::atomic::Ordering::Relaxed);
+            let mut block = vec![0u8; testpattern::BLOCK];
+            for offset in (0..reader.size()).step_by(0x40000 + 0x1000) {
+                let offset = offset / 4096 * 4096;
+                reader.read_exact_at(&mut block, offset).unwrap();
+                assert_eq!(testpattern::verify(&block, offset, name), None, "{name} without disk {victim}");
+            }
+        }
+    }
+}

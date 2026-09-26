@@ -123,7 +123,12 @@ impl Filesystem for SpaceFs {
 }
 
 /// Mounts the space at `mountpoint` and serves it until unmounted.
-pub fn serve(reader: &'static SpaceReader<'static, File>, block_size: u32, mountpoint: &Path) -> Result<()> {
+pub fn serve(
+    reader: &'static SpaceReader<'static, File>,
+    block_size: u32,
+    mountpoint: &Path,
+    ready_file: Option<&Path>,
+) -> Result<()> {
     let mut config = Config::default();
     config.mount_options.extend([
         MountOption::RO,
@@ -132,6 +137,11 @@ pub fn serve(reader: &'static SpaceReader<'static, File>, block_size: u32, mount
         MountOption::DefaultPermissions,
     ]);
     config.n_threads = Some(4);
-    fuser::mount(SpaceFs { reader, block_size }, mountpoint, &config)
-        .with_context(|| format!("cannot mount on {}", mountpoint.display()))
+    let session = fuser::spawn_mount(SpaceFs { reader, block_size }, mountpoint, &config)
+        .with_context(|| format!("cannot mount on {}", mountpoint.display()))?;
+    if let Some(path) = ready_file {
+        std::fs::write(path, mountpoint.join(FILE_NAME).display().to_string())?;
+    }
+    session.join().context("FUSE session failed")?;
+    Ok(())
 }
