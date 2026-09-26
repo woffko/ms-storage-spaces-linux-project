@@ -1,0 +1,103 @@
+﻿{
+    "name":  "wc64",
+    "windows_build":  "10.0.26340.0",
+    "pattern":  true,
+    "pattern_size":  805306368,
+    "pool":  {
+                 "name":  "ss-wc64",
+                 "guid":  "acdf8051-3a26-403f-b233-7c261621418e",
+                 "version":  "Version 29",
+                 "size":  16070475776,
+                 "allocated":  2147483648,
+                 "logical_sector":  512,
+                 "physical_sector":  4096
+             },
+    "space":  {
+                  "name":  "wc64",
+                  "guid":  "15567423-e7f6-4e96-b538-cb693f1f4b31",
+                  "size":  8589934592,
+                  "footprint":  1610612736,
+                  "resiliency":  "Simple",
+                  "copies":  1,
+                  "redundancy":  0,
+                  "columns":  2,
+                  "interleave":  262144,
+                  "provisioning":  "Thin",
+                  "logical_sector":  512,
+                  "physical_sector":  4096,
+                  "allocation_unit":  268435456,
+                  "groups":  1,
+                  "write_cache":  536870912,
+                  "read_cache":  0
+              },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "60022480ACD013216B8EC585566B6327",
+                      "spaces_guid":  "b2e1dfdc-122f-eabe-a8bb-ca2c4285d637",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "60022480E406D7231BADE17A337DCB44",
+                      "spaces_guid":  "7bcc21f1-28f3-12df-13c5-3ca8d2cce0e5",
+                      "size":  8589934592
+                  }
+              ],
+    "extents":  [
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  536870912,
+                        "disk_unique_id":  "60022480E406D7231BADE17A337DCB44",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  1,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  536870912,
+                        "disk_unique_id":  "60022480ACD013216B8EC585566B6327",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  536870912,
+                        "physical_offset":  805306368,
+                        "disk_unique_id":  "60022480E406D7231BADE17A337DCB44",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  1,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  536870912,
+                        "physical_offset":  805306368,
+                        "disk_unique_id":  "60022480ACD013216B8EC585566B6327",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "60022480ACD013216B8EC585566B6327",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  1,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "60022480E406D7231BADE17A337DCB44",
+                        "status":  "Active"
+                    }
+                ]
+}

@@ -1,0 +1,103 @@
+﻿{
+    "name":  "sect512",
+    "windows_build":  "10.0.26340.0",
+    "pattern":  true,
+    "pattern_size":  2147483648,
+    "pool":  {
+                 "name":  "ss-sect512",
+                 "guid":  "754be585-b87c-43e9-8c59-99771fd2b4fe",
+                 "version":  "Version 29",
+                 "size":  16070475776,
+                 "allocated":  3758096384,
+                 "logical_sector":  512,
+                 "physical_sector":  4096
+             },
+    "space":  {
+                  "name":  "sect512",
+                  "guid":  "6240e63c-0cc7-41b8-a9a3-14169afa7a7c",
+                  "size":  2147483648,
+                  "footprint":  3221225472,
+                  "resiliency":  "Simple",
+                  "copies":  1,
+                  "redundancy":  0,
+                  "columns":  2,
+                  "interleave":  65536,
+                  "provisioning":  "Fixed",
+                  "logical_sector":  512,
+                  "physical_sector":  4096,
+                  "allocation_unit":  1073741824,
+                  "groups":  1,
+                  "write_cache":  1073741824,
+                  "read_cache":  0
+              },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "6002248068E2F7E1A0050FF68FDE141A",
+                      "spaces_guid":  "93f12210-b29d-a3fb-589b-0ace99e58939",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "60022480C9F1CD3188EB0FE331FF5665",
+                      "spaces_guid":  "6e028ca9-ce13-7d42-ec4f-4d85d403c076",
+                      "size":  8589934592
+                  }
+              ],
+    "extents":  [
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  1073741824,
+                        "virtual_offset":  0,
+                        "physical_offset":  805306368,
+                        "disk_unique_id":  "60022480C9F1CD3188EB0FE331FF5665",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  1,
+                        "copy":  0,
+                        "size":  1073741824,
+                        "virtual_offset":  0,
+                        "physical_offset":  805306368,
+                        "disk_unique_id":  "6002248068E2F7E1A0050FF68FDE141A",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "60022480C9F1CD3188EB0FE331FF5665",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  1,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "6002248068E2F7E1A0050FF68FDE141A",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  536870912,
+                        "physical_offset":  536870912,
+                        "disk_unique_id":  "60022480C9F1CD3188EB0FE331FF5665",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  1,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  536870912,
+                        "physical_offset":  536870912,
+                        "disk_unique_id":  "6002248068E2F7E1A0050FF68FDE141A",
+                        "status":  "Active"
+                    }
+                ]
+}

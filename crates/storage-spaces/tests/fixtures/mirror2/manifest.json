@@ -1,0 +1,151 @@
+﻿{
+    "name":  "mirror2",
+    "windows_build":  "10.0.26340.0",
+    "pattern":  true,
+    "pattern_size":  1073741824,
+    "pool":  {
+                 "name":  "ss-mirror2",
+                 "guid":  "b0b2e63a-06d6-4f36-9e01-613cbec142b1",
+                 "version":  "Version 29",
+                 "size":  16070475776,
+                 "allocated":  5368709120
+             },
+    "space":  {
+                  "name":  "mirror2",
+                  "guid":  "b0b2e63a-06d6-4f36-9e01-613cbec142b1",
+                  "size":  1073741824,
+                  "footprint":  4831838208,
+                  "resiliency":  "Mirror",
+                  "copies":  2,
+                  "redundancy":  1,
+                  "columns":  1,
+                  "interleave":  262144,
+                  "provisioning":  "Fixed",
+                  "logical_sector":  512,
+                  "physical_sector":  4096
+              },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "60022480D44563B14717E8BB41A476A2",
+                      "spaces_guid":  "339408c8-05c4-8bb9-8fef-e9867d60194a",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "6002248081329352DD86951B27614D33",
+                      "spaces_guid":  "f017d5b5-3596-bf12-3303-29362f97e1cc",
+                      "size":  8589934592
+                  }
+              ],
+    "extents":  [
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  1073741824,
+                        "virtual_offset":  0,
+                        "physical_offset":  1610612736,
+                        "disk_unique_id":  "60022480D44563B14717E8BB41A476A2",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  1,
+                        "size":  1073741824,
+                        "virtual_offset":  0,
+                        "physical_offset":  1610612736,
+                        "disk_unique_id":  "6002248081329352DD86951B27614D33",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "6002248081329352DD86951B27614D33",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  1,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "60022480D44563B14717E8BB41A476A2",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  536870912,
+                        "disk_unique_id":  "6002248081329352DD86951B27614D33",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  1,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  536870912,
+                        "disk_unique_id":  "60022480D44563B14717E8BB41A476A2",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  268435456,
+                        "physical_offset":  805306368,
+                        "disk_unique_id":  "6002248081329352DD86951B27614D33",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  1,
+                        "size":  268435456,
+                        "virtual_offset":  268435456,
+                        "physical_offset":  805306368,
+                        "disk_unique_id":  "60022480D44563B14717E8BB41A476A2",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  536870912,
+                        "physical_offset":  1073741824,
+                        "disk_unique_id":  "6002248081329352DD86951B27614D33",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  1,
+                        "size":  268435456,
+                        "virtual_offset":  536870912,
+                        "physical_offset":  1073741824,
+                        "disk_unique_id":  "60022480D44563B14717E8BB41A476A2",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  805306368,
+                        "physical_offset":  1342177280,
+                        "disk_unique_id":  "60022480D44563B14717E8BB41A476A2",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  1,
+                        "size":  268435456,
+                        "virtual_offset":  805306368,
+                        "physical_offset":  1342177280,
+                        "disk_unique_id":  "6002248081329352DD86951B27614D33",
+                        "status":  "Active"
+                    }
+                ]
+}

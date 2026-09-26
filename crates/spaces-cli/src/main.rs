@@ -142,6 +142,14 @@ enum Command {
         #[arg(long)]
         length: Option<u64>,
     },
+    /// Capture the metadata a test pool needs into small fixture files.
+    #[command(hide = true)]
+    Fixture {
+        /// Pool directory with disk<N>.img and manifest.json.
+        pool_dir: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Verify the test pattern written by tools/vm/New-TestPool.ps1.
     #[command(hide = true)]
     CheckPattern {
@@ -222,6 +230,7 @@ fn main() -> Result<()> {
             dm_table(&pool, find_space(&pool, &space)?, &devices)
         }
         Command::VerifyPattern { path, tag, length } => verify_pattern(&path, &tag, length),
+        Command::Fixture { pool_dir, output } => fixture(&pool_dir, &output),
         Command::CheckPattern { devices, space, length } => {
             let pool = open_pool(&devices)?;
             check_pattern(&pool, find_space(&pool, &space)?, length)
@@ -636,5 +645,43 @@ fn cmd_status() -> Result<()> {
             println!("  partition /dev/mapper/{p}");
         }
     }
+    Ok(())
+}
+
+fn fixture(dir: &std::path::Path, out: &std::path::Path) -> Result<()> {
+    use storage_spaces::io::{Recording, SparseImage};
+    let mut paths = Vec::new();
+    while dir.join(format!("disk{}.img", paths.len())).exists() {
+        paths.push(dir.join(format!("disk{}.img", paths.len())));
+    }
+    let devices: Vec<Recording<File>> = paths
+        .iter()
+        .map(|p| File::open(p).map(Recording::new))
+        .collect::<std::io::Result<_>>()?;
+    let pool = Pool::open(devices.iter().collect::<Vec<_>>())?;
+    for s in pool.user_spaces() {
+        pool.open_space(s.id())?;
+    }
+    std::fs::create_dir_all(out)?;
+    let mut total = 0;
+    for (i, dev) in devices.iter().enumerate() {
+        let mut image = SparseImage::new(dev.size()?);
+        for (offset, len) in dev.reads() {
+            // Keep only non-zero 4 KiB pages of what was read.
+            let mut buf = vec![0u8; len];
+            dev.inner().read_exact_at(&mut buf, offset)?;
+            for (k, page) in buf.chunks(4096).enumerate() {
+                if page.iter().any(|&b| b != 0) {
+                    image.insert(offset + (k * 4096) as u64, page);
+                }
+            }
+        }
+        total += image.stored();
+        image.write_to(std::io::BufWriter::new(File::create(
+            out.join(format!("disk{i}.fixture")),
+        )?))?;
+    }
+    std::fs::copy(dir.join("manifest.json"), out.join("manifest.json"))?;
+    println!("{}: {} disks, {} bytes of metadata", out.display(), paths.len(), total);
     Ok(())
 }

@@ -1,0 +1,82 @@
+﻿{
+    "name":  "simple1c",
+    "windows_build":  "10.0.26340.0",
+    "pattern":  true,
+    "pattern_size":  1073741824,
+    "pool":  {
+                 "name":  "ss-simple1c",
+                 "guid":  "a9c6cd1e-bb1a-4768-85fd-871c282482fc",
+                 "version":  "Version 29",
+                 "size":  8035237888,
+                 "allocated":  2415919104
+             },
+    "space":  {
+                  "name":  "simple1c",
+                  "guid":  "a9c6cd1e-bb1a-4768-85fd-871c282482fc",
+                  "size":  1073741824,
+                  "footprint":  2147483648,
+                  "resiliency":  "Simple",
+                  "copies":  1,
+                  "redundancy":  0,
+                  "columns":  1,
+                  "interleave":  262144,
+                  "provisioning":  "Fixed",
+                  "logical_sector":  512,
+                  "physical_sector":  4096
+              },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "60022480B81C0F6325D248CBC1C06074",
+                      "spaces_guid":  "2902ee36-a70a-74fc-5b4d-992e91e56379",
+                      "size":  8589934592
+                  }
+              ],
+    "extents":  [
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  1073741824,
+                        "virtual_offset":  0,
+                        "physical_offset":  1342177280,
+                        "disk_unique_id":  "60022480B81C0F6325D248CBC1C06074",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "60022480B81C0F6325D248CBC1C06074",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  268435456,
+                        "physical_offset":  536870912,
+                        "disk_unique_id":  "60022480B81C0F6325D248CBC1C06074",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  536870912,
+                        "physical_offset":  805306368,
+                        "disk_unique_id":  "60022480B81C0F6325D248CBC1C06074",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  805306368,
+                        "physical_offset":  1073741824,
+                        "disk_unique_id":  "60022480B81C0F6325D248CBC1C06074",
+                        "status":  "Active"
+                    }
+                ]
+}
