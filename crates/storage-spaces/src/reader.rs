@@ -112,7 +112,7 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
                 rows * SLAB_SIZE * base.layout.data_columns
             }
         };
-        let cache = Self::open_cache(pool, space, &base.layout)?;
+        let cache = Self::open_cache(pool, space)?;
         Ok(SpaceReader {
             space,
             size,
@@ -121,7 +121,7 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
         })
     }
 
-    fn open_cache(pool: &'p Pool<D>, space: &Space, layout: &Layout) -> Result<Option<(Mapped<'p, D>, CacheIndex)>> {
+    fn open_cache(pool: &'p Pool<D>, space: &Space) -> Result<Option<(Mapped<'p, D>, CacheIndex)>> {
         let containers: Vec<_> = pool
             .children(space.id())
             .filter(|c| c.info.role == SpaceRole::Cache)
@@ -149,7 +149,7 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
                 header.owner_guid
             ));
         }
-        let index = CacheIndex::load(header, layout.interleave, |off, buf| mapped.read_exact(off, buf))?;
+        let index = CacheIndex::load(header, |off, buf| mapped.read_exact(off, buf))?;
         Ok(Some((mapped, index)))
     }
 
@@ -195,6 +195,26 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
             buf = &mut buf[n..];
         }
         Ok(())
+    }
+
+    /// Reads the space's own extents only, ignoring the write-back cache
+    /// (diagnostics and recovery; this is not the current content).
+    pub fn read_uncached_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
+        self.base.read_exact(offset, buf)
+    }
+
+    /// Reads what the write-back cache holds for `offset`, if anything.
+    pub fn read_cached_at(&self, buf: &mut [u8], offset: u64) -> Result<bool> {
+        let Some((mapped, index)) = &self.cache else {
+            return Ok(false);
+        };
+        match index.lookup(offset) {
+            Lookup::Hit { cache_offset, len } if len as usize >= buf.len() => {
+                mapped.read_exact(cache_offset, buf)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// Wraps the reader into a `Read + Seek` stream.

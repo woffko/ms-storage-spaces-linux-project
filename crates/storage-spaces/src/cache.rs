@@ -26,6 +26,33 @@ use crate::guid::Guid;
 pub const SPCACHE_SIGNATURE: &[u8; 8] = b"SPCACHE\0";
 pub const SPSLOT_SIGNATURE: &[u8; 8] = b"SPSLOT\0\0";
 const SLOT_TYPE_MAPPING: u32 = 0;
+/// Flag in the offset field of some entries (meaning unknown; such entries
+/// were always superseded by the next slot in the samples).
+const ENTRY_OFFSET_FLAG: u64 = 1 << 63;
+/// Entry states: nothing valid yet, valid runs listed after the entry, whole chunk valid.
+const STATE_EMPTY: u16 = 0;
+const STATE_PARTIAL: u16 = 2;
+const STATE_FULL: u16 = 3;
+
+/// Parses the run list of a partially valid chunk: 16-bit little-endian
+/// words, bit 15 = valid, low 15 bits = length in 512-byte sectors; a zero
+/// word ends the list.
+fn parse_runs(words: &[u8], chunk: u64) -> Result<Vec<(bool, u64)>> {
+    let mut runs = Vec::new();
+    let mut total = 0;
+    for w in words.chunks_exact(2).map(|w| u16::from_le_bytes([w[0], w[1]])) {
+        if w == 0 {
+            break;
+        }
+        let sectors = (w & 0x7fff) as u64;
+        total += sectors * 512;
+        runs.push((w & 0x8000 != 0, sectors));
+    }
+    if total > chunk {
+        return Err(format_err!("cache runs cover {total:#x} bytes of a {chunk:#x} chunk"));
+    }
+    Ok(runs)
+}
 /// Block number of an entry that removes a chunk from the cache (destaged).
 const NO_BLOCK: u32 = u32::MAX;
 
@@ -78,35 +105,39 @@ pub enum Lookup {
     Miss { len: u64 },
 }
 
+/// Which part of a cached chunk holds valid data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Validity {
+    Full,
+    /// Runs of 512-byte sectors from the chunk start: (valid, sectors).
+    Runs(Vec<(bool, u64)>),
+}
+
 /// Mapping of cached chunks of the owner space.
 #[derive(Debug, Clone)]
 pub struct CacheIndex {
     pub header: CacheHeader,
-    /// Granularity of the per-chunk validity bitmap.
-    unit: u64,
-    /// Owner chunk number -> (cache block, validity bitmap).
-    chunks: HashMap<u64, (u64, u64)>,
+    /// Owner chunk number -> (cache block, valid part).
+    chunks: HashMap<u64, (u64, Validity)>,
 }
 
 impl CacheIndex {
     /// Builds the index from the cache header and slot area. `read` reads
     /// from the cache space; `unit` is the owner space interleave.
-    pub fn load(header: CacheHeader, unit: u64, mut read: impl FnMut(u64, &mut [u8]) -> Result<()>) -> Result<Self> {
+    pub fn load(header: CacheHeader, mut read: impl FnMut(u64, &mut [u8]) -> Result<()>) -> Result<Self> {
         let chunk = header.chunk_size as u64;
-        if unit == 0 || chunk % unit != 0 || chunk / unit > 64 {
-            return Err(format_err!("cache chunk {chunk:#x} does not fit interleave {unit:#x}"));
-        }
         let slot_size = header.slot_size as usize;
-        let max_entries = (slot_size - 0x38) / 16;
         let mut area = vec![0u8; slot_size * header.slot_count as usize];
         read(header.slot_offset, &mut area)?;
 
         // A mapping is current if it is the newest entry for its owner chunk
         // (a newer entry may be a tombstone written when the chunk was
         // destaged) and the newest assignment of its cache block (blocks are
-        // reused for other chunks).
-        let mut newest_for_chunk: HashMap<u64, (u64, Option<(u64, u64)>)> = HashMap::new();
-        let mut newest_for_block: HashMap<u64, u64> = HashMap::new();
+        // reused for other chunks). Entries are ordered by (slot sequence,
+        // position in the slot).
+        type Version = (u64, usize);
+        let mut newest_for_chunk: HashMap<u64, (Version, Option<(u64, Validity)>)> = HashMap::new();
+        let mut newest_for_block: HashMap<u64, Version> = HashMap::new();
         for slot in area.chunks_exact(slot_size) {
             if &slot[0..8] != SPSLOT_SIGNATURE
                 || Guid::from_mixed_endian(slot[8..24].try_into().unwrap()) != header.owner_guid
@@ -120,40 +151,54 @@ impl CacheIndex {
             }
             let sequence = le_u64(&slot[0x28..]);
             let count = le_u32(&slot[0x30..]) as usize;
-            if count > max_entries {
-                return Err(format_err!("cache slot with {count} entries"));
-            }
-            for e in slot[0x38..0x38 + count * 16].chunks_exact(16) {
-                let offset = le_u64(e);
+            let mut pos = 0x38;
+            for index in 0..count {
+                let e = slot
+                    .get(pos..pos + 16)
+                    .ok_or_else(|| format_err!("cache slot with {count} entries overflows"))?;
+                let offset = le_u64(e) & !ENTRY_OFFSET_FLAG;
                 let block = le_u32(&e[8..]);
-                let valid = le_u32(&e[12..]) as u64;
+                let state = u16::from_le_bytes([e[12], e[13]]);
+                // The high half counts extra 16-bit words that follow the entry.
+                let words = u16::from_le_bytes([e[14], e[15]]) as usize;
+                let extra = slot
+                    .get(pos + 16..pos + 16 + words * 2)
+                    .ok_or_else(|| format_err!("cache entry overflows its slot"))?;
+                pos += 16 + words * 2;
                 if offset % chunk != 0 {
                     return Err(format_err!("bad cache entry: offset {offset:#x}"));
                 }
+                let validity = match state {
+                    STATE_EMPTY => Validity::Runs(Vec::new()),
+                    STATE_PARTIAL => Validity::Runs(parse_runs(extra, chunk)?),
+                    STATE_FULL => Validity::Full,
+                    other => return Err(crate::Error::Unsupported(format!("cache entry state {other}"))),
+                };
                 let target = match block {
                     NO_BLOCK => None,
-                    b if (b as u64) < header.chunk_count as u64 => Some((b as u64, valid)),
+                    b if (b as u64) < header.chunk_count as u64 => Some((b as u64, validity)),
                     b => return Err(format_err!("bad cache entry: block {b}")),
                 };
+                let version = (sequence, index);
                 let key = offset / chunk;
-                if newest_for_chunk.get(&key).is_none_or(|&(s, _)| sequence > s) {
-                    newest_for_chunk.insert(key, (sequence, target));
-                }
-                if let Some((b, _)) = target
-                    && newest_for_block.get(&b).is_none_or(|&s| sequence > s)
+                if let Some((b, _)) = &target
+                    && newest_for_block.get(b).is_none_or(|&v| version > v)
                 {
-                    newest_for_block.insert(b, sequence);
+                    newest_for_block.insert(*b, version);
+                }
+                if newest_for_chunk.get(&key).is_none_or(|(v, _)| version > *v) {
+                    newest_for_chunk.insert(key, (version, target));
                 }
             }
         }
         let chunks = newest_for_chunk
             .into_iter()
-            .filter_map(|(key, (sequence, target))| {
+            .filter_map(|(key, (version, target))| {
                 let (block, valid) = target?;
-                (newest_for_block.get(&block) == Some(&sequence)).then_some((key, (block, valid)))
+                (newest_for_block.get(&block) == Some(&version)).then_some((key, (block, valid)))
             })
             .collect();
-        Ok(CacheIndex { header, unit, chunks })
+        Ok(CacheIndex { header, chunks })
     }
 
     /// Number of chunks currently held in the cache.
@@ -164,13 +209,28 @@ impl CacheIndex {
     pub fn lookup(&self, offset: u64) -> Lookup {
         let chunk = self.header.chunk_size as u64;
         let within = offset % chunk;
-        let len = self.unit - within % self.unit;
+        let hit = |block: u64, len: u64| Lookup::Hit {
+            cache_offset: self.header.data_offset + block * chunk + within,
+            len,
+        };
         match self.chunks.get(&(offset / chunk)) {
-            Some(&(block, valid)) if valid >> (within / self.unit) & 1 == 1 => Lookup::Hit {
-                cache_offset: self.header.data_offset + block * chunk + within,
-                len,
-            },
-            _ => Lookup::Miss { len },
+            None => Lookup::Miss { len: chunk - within },
+            Some((block, Validity::Full)) => hit(*block, chunk - within),
+            Some((block, Validity::Runs(runs))) => {
+                let mut start = 0;
+                for &(valid, sectors) in runs {
+                    let end = start + sectors * 512;
+                    if within < end {
+                        return if valid {
+                            hit(*block, end - within)
+                        } else {
+                            Lookup::Miss { len: end - within }
+                        };
+                    }
+                    start = end;
+                }
+                Lookup::Miss { len: chunk - within }
+            }
         }
     }
 }
@@ -205,6 +265,11 @@ mod tests {
     }
 
     fn slot(sequence: u64, entries: &[(u64, u32)]) -> Vec<u8> {
+        let full: Vec<(u64, u32, u16, Vec<u16>)> = entries.iter().map(|&(o, b)| (o, b, STATE_FULL, vec![])).collect();
+        slot_with(sequence, &full)
+    }
+
+    fn slot_with(sequence: u64, entries: &[(u64, u32, u16, Vec<u16>)]) -> Vec<u8> {
         let mut s = vec![0u8; 0x1000];
         s[0..8].copy_from_slice(SPSLOT_SIGNATURE);
         s[8..24].copy_from_slice(&GUID);
@@ -212,11 +277,17 @@ mod tests {
         s[0x1c..0x20].copy_from_slice(&0x1000u32.to_le_bytes());
         s[0x28..0x30].copy_from_slice(&sequence.to_le_bytes());
         s[0x30..0x34].copy_from_slice(&(entries.len() as u32).to_le_bytes());
-        for (i, &(offset, block)) in entries.iter().enumerate() {
-            let e = &mut s[0x38 + i * 16..0x48 + i * 16];
-            e[0..8].copy_from_slice(&offset.to_le_bytes());
-            e[8..12].copy_from_slice(&block.to_le_bytes());
-            e[12..16].copy_from_slice(&3u32.to_le_bytes());
+        let mut pos = 0x38;
+        for (offset, block, state, words) in entries {
+            s[pos..pos + 8].copy_from_slice(&offset.to_le_bytes());
+            s[pos + 8..pos + 12].copy_from_slice(&block.to_le_bytes());
+            s[pos + 12..pos + 14].copy_from_slice(&state.to_le_bytes());
+            s[pos + 14..pos + 16].copy_from_slice(&(words.len() as u16).to_le_bytes());
+            pos += 16;
+            for w in words {
+                s[pos..pos + 2].copy_from_slice(&w.to_le_bytes());
+                pos += 2;
+            }
         }
         let crc = crc32(&s);
         s[0x24..0x28].copy_from_slice(&crc.to_le_bytes());
@@ -226,7 +297,7 @@ mod tests {
     fn index(slots: &[Vec<u8>]) -> CacheIndex {
         let mut area = slots.concat();
         area.resize(4 * 0x1000, 0);
-        CacheIndex::load(header(), CHUNK / 2, |off, buf| {
+        CacheIndex::load(header(), |off, buf| {
             buf.copy_from_slice(&area[off as usize..off as usize + buf.len()]);
             Ok(())
         })
@@ -257,6 +328,31 @@ mod tests {
         ]);
         assert_eq!(hit(&i, 0), None);
         assert_eq!(hit(&i, CHUNK), None);
+    }
+
+    #[test]
+    fn partial_chunks_follow_their_runs() {
+        // Chunk 0: the first 32 KiB valid, then 96 KiB not (as a 1 MiB-split
+        // write leaves it); the flagged offset form is used for chunk 2.
+        let partial = vec![0x8000 | 64, 192, 0, 0];
+        let i = index(&[slot_with(
+            1,
+            &[
+                (0, 2, STATE_PARTIAL, partial),
+                ((2 * CHUNK) | ENTRY_OFFSET_FLAG, 4, STATE_FULL, vec![]),
+                (CHUNK, 3, STATE_EMPTY, vec![]),
+            ],
+        )]);
+        assert_eq!(
+            i.lookup(0x100),
+            Lookup::Hit {
+                cache_offset: 0x10_0000 + 2 * CHUNK + 0x100,
+                len: 0x8000 - 0x100
+            }
+        );
+        assert_eq!(i.lookup(0x8000), Lookup::Miss { len: CHUNK - 0x8000 });
+        assert_eq!(hit(&i, CHUNK + 5), None);
+        assert_eq!(hit(&i, 2 * CHUNK), Some(0x10_0000 + 4 * CHUNK));
     }
 
     #[test]

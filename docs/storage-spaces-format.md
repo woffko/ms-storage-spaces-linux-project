@@ -164,13 +164,23 @@ The cache space starts with a header:
 
 Slots ("SPSLOT\0\0"): same GUID, size and CRC fields as the header, `u32 type`
 at 0x20 (0 = mapping; 1 seen on mirror caches, not decoded), `u64 sequence` at
-0x28, `u32 count` at 0x30, then `count` 16-byte entries at 0x38:
-`u64 owner offset, u32 chunk index, u32 validity bitmap`. The bitmap has one bit
-per interleave unit of the chunk (hypothesis; only full chunks observed).
+0x28, `u32 count` at 0x30, then `count` variable-length entries at 0x38:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0x00 | 8 | owner offset (multiple of the chunk size); bit 63 is a flag of unknown meaning, seen only on entries superseded by the next slot |
+| 0x08 | 4 | cache chunk index, `0xffffffff` = chunk removed from the cache |
+| 0x0c | 2 | state: 0 = block assigned, nothing valid; 2 = partially valid; 3 = whole chunk valid |
+| 0x0e | 2 | number of extra 16-bit words that follow the entry |
+| 0x10 | 2*n | for state 2: runs from the chunk start, u16 LE each, bit 15 = valid, bits 0-14 = length in 512-byte sectors, 0 ends the list |
+
+(**verified**: pool `parity4`, whose 1 MiB-split writes leave chunks of three
+256 KiB units valid for 256 KiB or 512 KiB; the log had wrapped around its
+1024 slots.) Entries are ordered by slot sequence and then by position within
+the slot.
 
 Data of owner offset `X` held in the cache is at cache offset
-`data_offset + chunk_index * chunk_size + (X % chunk_size)`. The newest slot
-wins per owner chunk and per cache block.
+`data_offset + chunk_index * chunk_size + (X % chunk_size)`.
 
 An entry with chunk index `0xffffffff` removes the owner chunk from the cache;
 Windows writes it when it destages the chunk (**verified**: pools `au1g`,

@@ -23,6 +23,7 @@ for name in "$@"; do
   mv "$out" "$final"
   echo "$name: $n disks, $(du -sh "$final" | cut -f1)"
   if ((remove)); then
-    tools/vm.sh "\$ErrorActionPreference='Stop'; \$d='C:\\sstest\\$name'; if (Get-ChildItem \$d -Filter *.vhdx | Where-Object { (Get-DiskImage -ImagePath \$_.FullName).Attached }) { throw 'attached' }; Remove-Item -Recurse -Force \$d; 'removed on VM: $name'"
+    tools/vm.sh "\$ErrorActionPreference='Stop'; \$d='C:\\sstest\\$name'; if (Get-ChildItem \$d -Filter *.vhdx | Where-Object { (Get-DiskImage -ImagePath \$_.FullName).Attached }) { throw 'attached' }; Remove-Item -Recurse -Force \$d; 'removed on VM: $name'" \
+      || echo "warning: could not remove $name on the VM" >&2
   fi
 done
