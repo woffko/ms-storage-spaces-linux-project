@@ -49,6 +49,8 @@ pub struct Layout {
     pub copies: u64,
     pub interleave: u64,
     runs: BTreeMap<(u64, u64), Vec<Run>>,
+    /// Out-of-date copies per column.
+    stale: BTreeMap<u64, Vec<Run>>,
 }
 
 impl Layout {
@@ -79,8 +81,18 @@ impl Layout {
             return Err(Error::Unsupported(format!("interleave {:#x}", policy.interleave)));
         }
         let mut runs: BTreeMap<(u64, u64), Vec<Run>> = BTreeMap::new();
+        // Out-of-date copies and copies being rebuilt are not read, but
+        // remembered so that a row without a current copy is an error.
+        let mut stale: BTreeMap<u64, Vec<Run>> = BTreeMap::new();
+        // Copy numbers can exceed the policy while a copy is regenerated.
+        let copies = extents
+            .iter()
+            .map(|e| e.copy + 1)
+            .max()
+            .unwrap_or(1)
+            .max(policy.copies.max(1));
         for e in extents {
-            if e.column >= policy.columns || e.copy >= policy.copies.max(1) {
+            if e.column >= policy.columns || e.copy >= copies.max(policy.copies + 1) {
                 return Err(format_err!(
                     "extent column {} copy {} outside a {}x{} layout",
                     e.column,
@@ -99,12 +111,17 @@ impl Layout {
                     e.virtual_slab
                 ));
             }
-            runs.entry((e.column, e.copy)).or_default().push(Run {
+            let run = Run {
                 first_row: slab / data_columns,
                 rows: e.slab_count,
                 disk_id: e.disk_id,
                 physical_slab: e.physical_slab,
-            });
+            };
+            if e.is_current() {
+                runs.entry((e.column, e.copy)).or_default().push(run);
+            } else {
+                stale.entry(e.column).or_default().push(run);
+            }
         }
         for list in runs.values_mut() {
             list.sort_by_key(|r| r.first_row);
@@ -118,9 +135,10 @@ impl Layout {
             data_columns,
             parity_units: policy.columns - data_columns,
             base,
-            copies: policy.copies.max(1),
+            copies,
             interleave: policy.interleave,
             runs,
+            stale,
         })
     }
 
@@ -187,6 +205,13 @@ impl Layout {
         let i = runs.partition_point(|r| r.first_row + r.rows <= row);
         let run = runs.get(i).filter(|r| r.first_row <= row)?;
         Some((run.disk_id, run.physical_slab + (row - run.first_row)))
+    }
+
+    /// Whether the row of a column has an out-of-date copy only.
+    pub fn has_stale_copy(&self, column: u64, row: u64) -> bool {
+        self.stale
+            .get(&column)
+            .is_some_and(|runs| runs.iter().any(|r| r.first_row <= row && row < r.first_row + r.rows))
     }
 
     /// All runs, keyed by (column, copy).
@@ -265,6 +290,8 @@ mod tests {
     #[test]
     fn finds_runs() {
         let e = |virtual_slab, slab_count, physical_slab| ExtentRecord {
+            flags: 0,
+            stale_marker: 0xffff_ffff,
             space_id: 5,
             virtual_slab,
             column: 0,

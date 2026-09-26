@@ -1,6 +1,6 @@
 #!/bin/bash
 # Copy test pools from the VM into testdata/pools/<name>/ as sparse raw images.
-# Usage: tools/fetch-corpus.sh [--crash] [--remove-remote] name...
+# Usage: tools/fetch-corpus.sh [--crash|--stale] [--remove-remote] name...
 #   --crash          fetch the crashed disks of a New-CrashPool.ps1 pool into testdata/crash/
 #   --remove-remote  delete the pool's VHDX files on the VM after a complete copy
 set -euo pipefail
@@ -12,6 +12,7 @@ while [[ ${1:-} == --* ]]; do
   case $1 in
     --remove-remote) remove=1 ;;
     --crash) kind=crash; src_sub=crash/ ;;
+    --stale) kind=stale ;;
   esac
   shift
 done

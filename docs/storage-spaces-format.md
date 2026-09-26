@@ -131,10 +131,18 @@ of a tier count from the tier's start. Tier templates created with
 
 ### Type 4: extent
 ```
-vint, vint (format), vint, u8 flags (0x04 for cache extents),
-vint slab_count, vint space_id, vint virtual_slab, vint column, vint copy,
-vint (0xffffffff), vint disk_id, vint physical_slab
+vint, vint (record format: 1 metadata space, 2, 3 after a state change),
+vint, u8 flags, vint slab_count, vint space_id, vint virtual_slab,
+vint column, vint copy, vint stale marker, vint disk_id, vint physical_slab
 ```
+`flags`: 0x04 on cache extents, 0x01 on a copy that is being regenerated.
+The stale marker is `0xffffffff` for a current copy; when a disk drops out
+and the space is written, Windows keeps that disk's copy in the database with
+a different value (2 in the sample) and allocates a replacement copy with a
+copy number beyond the policy's copy count and flag 0x01 (**verified**: pool
+`stale3`, 2-way mirror on 3 disks; only the copy that stayed current holds the
+data written while the disk was away). Readers must use current copies only;
+a row with out-of-date copies only is lost.
 A run of `slab_count` consecutive physical slabs backs column `column`, copy
 `copy`, rows `virtual_slab / data_columns ...` (**verified**).
 

@@ -94,6 +94,12 @@ impl<D: ReadAt> Mapped<'_, D> {
         if let Some(e) = last_error {
             return Err(Error::Io(e));
         }
+        if !allocated && l.has_stale_copy(loc.column, loc.row) {
+            return Err(Error::Pool(format!(
+                "column {} row {} has only an out-of-date copy (its disk missed writes)",
+                loc.column, loc.row
+            )));
+        }
         if allocated {
             return Err(Error::Pool(format!(
                 "no copy of column {} row {} is on a present disk",

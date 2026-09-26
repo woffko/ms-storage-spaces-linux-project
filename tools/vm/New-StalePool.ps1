@@ -13,7 +13,8 @@ param(
     [int] $DiskSizeMB = 8192,
     [int] $SizeMB = 1024,
     [int] $RewriteMB = 256,
-    [int] $RemoveDisk = 0,
+    # -1: the disk holding copy 0 of the space's first extent.
+    [int] $RemoveDisk = -1,
     [string] $Root = 'C:\sstest'
 )
 $ErrorActionPreference = 'Stop'
@@ -95,6 +96,11 @@ $poolDisks = foreach ($f in $images) {
     [ordered]@{ image = Split-Path $f -Leaf; unique_id = $pd.UniqueId; spaces_guid = $guid; size = $pd.Size }
 }
 
+if ($RemoveDisk -lt 0) {
+    $first = $vd | Get-PhysicalExtent | Where-Object { $_.VirtualDiskOffset -eq 0 -and $_.CopyNumber -eq 0 } | Sort-Object Size -Descending | Select-Object -First 1
+    for ($i = 0; $i -lt $DiskCount; $i++) { if ($poolDisks[$i].unique_id -eq $first.PhysicalDiskUniqueId) { $RemoveDisk = $i } }
+    if ($RemoveDisk -lt 0) { throw 'cannot find the disk holding copy 0' }
+}
 # Take one disk away and rewrite the start of the space.
 Dismount-DiskImage -ImagePath $images[$RemoveDisk] | Out-Null
 Start-Sleep -Seconds 5

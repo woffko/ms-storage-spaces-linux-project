@@ -276,6 +276,22 @@ pub struct ExtentRecord {
     pub disk_id: u64,
     /// Physical slab number on the disk.
     pub physical_slab: u64,
+    /// 0x04 on cache extents; 0x01 on a copy being regenerated.
+    pub flags: u8,
+    /// `0xffffffff` for a current copy; otherwise the copy is out of date
+    /// (it missed writes while its disk was away).
+    pub stale_marker: u64,
+}
+
+impl ExtentRecord {
+    /// Flag of a copy that Windows is still rebuilding.
+    pub const FLAG_REGENERATING: u8 = 0x01;
+    const CURRENT: u64 = 0xffff_ffff;
+
+    /// Whether the copy holds current data.
+    pub fn is_current(&self) -> bool {
+        self.stale_marker == Self::CURRENT && self.flags & Self::FLAG_REGENERATING == 0
+    }
 }
 
 /// A decoded database record.
@@ -425,16 +441,18 @@ fn decode_extent(c: &mut Cursor) -> Result<ExtentRecord> {
     c.varint()?;
     c.varint()?;
     c.varint()?;
-    c.u8()?; // flags: 0x04 for extents of cache spaces
+    let flags = c.u8()?;
     let slab_count = c.varint()?;
     let space_id = c.varint()?;
     let virtual_slab = c.varint()?;
     let column = c.varint()?;
     let copy = c.varint()?;
-    c.varint()?;
+    let stale_marker = c.varint()?;
     let disk_id = c.varint()?;
     let physical_slab = c.varint()?;
     Ok(ExtentRecord {
+        flags,
+        stale_marker,
         space_id,
         virtual_slab,
         column,
@@ -585,6 +603,8 @@ mod tests {
         assert_eq!(
             e,
             ExtentRecord {
+                flags: 4,
+                stale_marker: 0xffff_ffff,
                 space_id: 0x1e,
                 virtual_slab: 2,
                 column: 1,

@@ -76,8 +76,11 @@ in this repository.
   stripe the parity journal marks unknown and whose parity mismatches, which
   is refused by default (`--unclean-parity data` reads the disk as is)
   (`cargo test --test crash`).
-* Open: the Q code of dual parity (two-column rebuild), extent/disk health
-  states, quorum rules.
+* Out-of-date mirror copies: a disk pulled while the space was written keeps
+  copies Windows marks stale, plus a replacement copy being regenerated; the
+  reader uses current copies only and fails reads that have no current copy
+  (`cargo test --test stale`, pool `stale3`).
+* Open: the Q code of dual parity (two-column rebuild), quorum rules.
 
 ### M2 (exit criteria met on the test VM, 2026-09-26)
 
