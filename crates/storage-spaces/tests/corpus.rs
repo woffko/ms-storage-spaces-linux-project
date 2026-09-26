@@ -19,7 +19,7 @@ fn corpus() -> Vec<PathBuf> {
         .map(|it| {
             it.filter_map(|e| e.ok())
                 .map(|e| e.path())
-                .filter(|p| p.join("manifest.json").exists())
+                .filter(|p| is_complete_pool(p))
                 .collect()
         })
         .unwrap_or_default();
@@ -28,6 +28,15 @@ fn corpus() -> Vec<PathBuf> {
         eprintln!("no test pools in {}, skipping", root.display());
     }
     dirs
+}
+
+/// Pool directories being downloaded are hidden (".name.partial").
+fn is_complete_pool(dir: &Path) -> bool {
+    let hidden = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_none_or(|n| n.starts_with('.'));
+    !hidden && dir.join("manifest.json").exists()
 }
 
 fn manifest(dir: &Path) -> Value {
