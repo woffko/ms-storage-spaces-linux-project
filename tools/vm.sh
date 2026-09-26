@@ -2,6 +2,10 @@
 # Run PowerShell on the Windows test VM over SSH.
 #   tools/vm.sh 'Get-StoragePool'             run an inline script
 #   tools/vm.sh -f script.ps1 [args...]       upload script to C:\sstest and run it
+#   tools/vm.sh -bg LOG script.ps1 [args...]  upload and start the script detached from
+#                                             the SSH session (survives network drops);
+#                                             output goes to C:\sstest\logs\LOG.log, and a
+#                                             final "EXIT <code>" line marks completion
 #   tools/vm.sh -get REMOTE_PATH LOCAL_PATH   copy a file from the VM
 set -euo pipefail
 host=root@192.168.189.129
@@ -28,8 +32,29 @@ case "${1:-}" in
     done
     run_ps "\$ErrorActionPreference='Stop'; & 'C:\\sstest\\$name'$args"
     ;;
+  -bg)
+    log=$2; script=$3; shift 3
+    [[ $log =~ ^[A-Za-z0-9_-]+$ ]] || { echo "bad log name" >&2; exit 1; }
+    name=$(basename "$script")
+    scp -q "${ssh_opts[@]}" "$script" "$host:C:/sstest/$name"
+    args=""
+    for a in "$@"; do
+      if [[ $a =~ ^-[A-Za-z]+$ ]]; then args+=" $a"; else args+=" '${a//\'/\'\'}'"; fi
+    done
+    # The inner script runs in a process created by WMI, outside the job
+    # object of the SSH session, so it survives disconnects.
+    inner="\$ErrorActionPreference='Stop'; try { & 'C:\\sstest\\$name'$args *>&1 | Out-String -Stream -Width 250; \$c=0 } catch { 'ERROR: ' + \$_; \$c=1 }; \"EXIT \$c\""
+    enc=$(printf '%s' "$inner" | iconv -t UTF-16LE | base64 -w0)
+    run_ps "New-Item -ItemType Directory -Force C:\\sstest\\logs | Out-Null; if (Test-Path C:\\sstest\\logs\\$log.log) { 'already started'; return }; \$cmd = 'cmd.exe /c powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $enc > C:\\sstest\\logs\\$log.log 2>&1'; \$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = \$cmd }; if (\$r.ReturnValue -ne 0) { throw \"start failed: \$(\$r.ReturnValue)\" }; \"started pid \$(\$r.ProcessId)\""
+    ;;
   -get)
-    scp -q "${ssh_opts[@]}" "$host:$2" "$3"
+    # The VM drops connections under load; retry a few times.
+    for attempt in 1 2 3 4 5 6; do
+      if scp -q "${ssh_opts[@]}" -o ServerAliveInterval=15 "$host:$2" "$3"; then exit 0; fi
+      echo "scp attempt $attempt failed, retrying" >&2
+      sleep 10
+    done
+    exit 1
     ;;
   *)
     run_ps "$1"

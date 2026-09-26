@@ -24,6 +24,7 @@ pub mod io;
 pub mod layout;
 mod pool;
 mod reader;
+pub mod segments;
 #[doc(hidden)]
 pub mod testpattern;
 

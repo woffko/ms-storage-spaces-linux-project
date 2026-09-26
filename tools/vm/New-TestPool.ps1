@@ -57,9 +57,10 @@ public static class SsPattern {
     }
     public static void Fill(string device, long size, string tag) {
         byte[] t = System.Text.Encoding.ASCII.GetBytes(tag);
-        const int chunk = 1 << 20;
+        // 4 MiB writes are whole stripes for every layout we generate.
+        const int chunk = 4 << 20;
         byte[] buf = new byte[chunk];
-        using (var fs = new FileStream(device, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, 4096, FileOptions.WriteThrough)) {
+        using (var fs = new FileStream(device, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, 4096, FileOptions.None)) {
             for (long pos = 0; pos < size; pos += chunk) {
                 int n = (int)Math.Min(chunk, size - pos);
                 for (int b = 0; b < n; b += 4096) FillBlock(buf, b, (ulong)(pos + b), t);

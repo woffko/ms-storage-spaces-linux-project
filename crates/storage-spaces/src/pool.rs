@@ -229,23 +229,32 @@ impl<D: ReadAt> Pool<D> {
         SpaceReader::new(self, id)
     }
 
-    /// Reads from a physical slab. Returns `false` if the disk is not present.
-    pub(crate) fn read_slab(&self, disk_id: u64, slab: u64, offset: u64, buf: &mut [u8]) -> Result<bool> {
+    /// Device index and byte offset of a physical slab, or `None` if its
+    /// disk is not present.
+    pub fn slab_location(&self, disk_id: u64, slab: u64) -> Result<Option<(usize, u64)>> {
         let disk = self
             .disks
             .get(&disk_id)
             .ok_or_else(|| format_err!("extent refers to unknown disk {disk_id}"))?;
         let Some(member) = disk.member.map(|m| &self.members[m]) else {
-            return Ok(false);
+            return Ok(None);
         };
-        debug_assert!(offset + buf.len() as u64 <= SLAB_SIZE);
-        let pos = DATA_AREA_OFFSET + slab * SLAB_SIZE + offset;
-        if pos + buf.len() as u64 > member.partition.length {
+        let pos = DATA_AREA_OFFSET + slab * SLAB_SIZE;
+        if pos + SLAB_SIZE > member.partition.length {
             return Err(format_err!(
                 "slab {slab} of disk {disk_id} lies beyond the partition end"
             ));
         }
-        self.devices[member.device].read_exact_at(buf, member.partition.offset + pos)?;
+        Ok(Some((member.device, member.partition.offset + pos)))
+    }
+
+    /// Reads from a physical slab. Returns `false` if the disk is not present.
+    pub(crate) fn read_slab(&self, disk_id: u64, slab: u64, offset: u64, buf: &mut [u8]) -> Result<bool> {
+        debug_assert!(offset + buf.len() as u64 <= SLAB_SIZE);
+        let Some((device, start)) = self.slab_location(disk_id, slab)? else {
+            return Ok(false);
+        };
+        self.devices[device].read_exact_at(buf, start + offset)?;
         Ok(true)
     }
 }

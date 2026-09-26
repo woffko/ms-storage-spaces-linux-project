@@ -153,6 +153,10 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
         Ok(Some((mapped, index)))
     }
 
+    pub fn pool(&self) -> &'p Pool<D> {
+        self.base.pool
+    }
+
     /// Size of the space in bytes.
     pub fn size(&self) -> u64 {
         self.size

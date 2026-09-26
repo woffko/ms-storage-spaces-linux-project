@@ -10,8 +10,25 @@ while read -r name args; do
   [[ -z $name || $name == \#* ]] && continue
   [[ $# -gt 0 && $wanted != *" $name "* ]] && continue
   echo "=== $name"
-  # shellcheck disable=SC2086
-  tools/vm.sh -f tools/vm/New-TestPool.ps1 -Name "$name" $args || status=1
+  # The generator runs detached on the VM: heavy I/O there can stall the
+  # guest network for a minute, which would kill an attached SSH session.
+  # Starting twice is harmless (the generator refuses an existing pool).
+  started=0
+  for attempt in 1 2 3; do
+    # shellcheck disable=SC2086
+    if tools/vm.sh -bg "gen-$name" tools/vm/New-TestPool.ps1 -Name "$name" $args </dev/null; then started=1; break; fi
+    sleep 30
+  done
+  if ((!started)); then status=1; continue; fi
+  while :; do
+    sleep 20
+    out=$(timeout 60 tools/vm.sh "Get-Content C:\\sstest\\logs\\gen-$name.log -Tail 20" </dev/null 2>/dev/null) || continue
+    if grep -q '^EXIT ' <<<"$out"; then
+      grep -v '^\s*$' <<<"$out" | tail -4
+      grep -q '^EXIT 0' <<<"$out" || status=1
+      break
+    fi
+  done
 done <<'LIST'
 # Batch 1: basic layouts (2026-09-26)
 simple1c   -DiskCount 1 -Resiliency Simple -Columns 1 -SizeMB 1024

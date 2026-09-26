@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use storage_spaces::format::{Resiliency, SLAB_SIZE};
+use storage_spaces::io::ReadAt;
+use storage_spaces::segments::SegmentKind;
 use storage_spaces::{Pool, Space, testpattern};
 
 fn corpus() -> Vec<PathBuf> {
@@ -164,6 +166,53 @@ fn contents_match_pattern() {
                     "{}: data beyond the pattern at {offset:#x}",
                     dir.display()
                 );
+            }
+        }
+    }
+}
+
+/// Reads the space the way a device-mapper table built from its segments
+/// would, straight from the member images.
+#[test]
+fn segments_match_pattern() {
+    for dir in corpus() {
+        let m = manifest(&dir);
+        let pool = open(&dir, &m);
+        let name = m["space"]["name"].as_str().unwrap();
+        let reader = pool.open_space(pool.find_space(name).unwrap().id()).unwrap();
+        let Ok(segments) = reader.segments() else {
+            continue; // parity, or data in the cache
+        };
+        let files: Vec<File> = (0..m["disks"].as_array().unwrap().len())
+            .map(|i| File::open(dir.join(format!("disk{i}.img"))).unwrap())
+            .collect();
+        let pattern = m["pattern_size"].as_u64().unwrap_or(reader.size());
+        assert_eq!(segments.last().map(|s| s.start + s.length), Some(reader.size()));
+        let mut block = vec![0u8; testpattern::BLOCK];
+        for seg in &segments {
+            for offset in (seg.start..seg.start + seg.length).step_by(0x10000) {
+                match &seg.kind {
+                    SegmentKind::Zero => block.fill(0),
+                    SegmentKind::Striped { chunk, stripes } => {
+                        let rel = offset - seg.start;
+                        let unit = rel / chunk;
+                        let n = stripes.len() as u64;
+                        let s = stripes[(unit % n) as usize];
+                        files[s.device]
+                            .read_exact_at(&mut block, s.offset + unit / n * chunk + rel % chunk)
+                            .unwrap();
+                    }
+                }
+                if offset < pattern {
+                    assert_eq!(
+                        testpattern::verify(&block, offset, name),
+                        None,
+                        "{} at {offset:#x}",
+                        dir.display()
+                    );
+                } else {
+                    assert!(block.iter().all(|&b| b == 0), "{} at {offset:#x}", dir.display());
+                }
             }
         }
     }

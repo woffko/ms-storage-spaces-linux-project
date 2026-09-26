@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use storage_spaces::format::{SLAB_SIZE, SpaceRole};
+use storage_spaces::io::ReadAt;
+use storage_spaces::segments::SegmentKind;
 use storage_spaces::{Pool, Space, testpattern};
 
 /// Inspect and read Microsoft Storage Spaces pools.
@@ -43,6 +45,23 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Print a device-mapper table for the space (simple and mirror spaces).
+    DmTable {
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+        #[arg(short, long)]
+        space: String,
+    },
+    /// Verify the test pattern on any file or block device holding a space.
+    #[command(hide = true)]
+    VerifyPattern {
+        path: PathBuf,
+        /// Pattern tag (the space name).
+        #[arg(long)]
+        tag: String,
+        #[arg(long)]
+        length: Option<u64>,
+    },
     /// Verify the test pattern written by tools/vm/New-TestPool.ps1.
     #[command(hide = true)]
     CheckPattern {
@@ -67,6 +86,11 @@ fn main() -> Result<()> {
             let pool = open_pool(&devices)?;
             export(&pool, find_space(&pool, &space)?, &output)
         }
+        Command::DmTable { devices, space } => {
+            let pool = open_pool(&devices)?;
+            dm_table(&pool, find_space(&pool, &space)?, &devices)
+        }
+        Command::VerifyPattern { path, tag, length } => verify_pattern(&path, &tag, length),
         Command::CheckPattern { devices, space, length } => {
             let pool = open_pool(&devices)?;
             check_pattern(&pool, find_space(&pool, &space)?, length)
@@ -234,6 +258,54 @@ fn check_pattern(pool: &Pool<File>, space: &Space, length: Option<u64>) -> Resul
         let n = CHUNK.min((total - offset) as usize);
         reader.read_exact_at(&mut buf[..n], offset)?;
         if let Some(bad) = testpattern::verify(&buf[..n], offset, space.name()) {
+            bail!("pattern mismatch at offset {bad:#x}");
+        }
+        offset += n as u64;
+    }
+    println!("pattern OK over {}", size(total));
+    Ok(())
+}
+
+fn dm_table(pool: &Pool<File>, space: &Space, paths: &[PathBuf]) -> Result<()> {
+    let reader = pool.open_space(space.id())?;
+    for seg in reader.segments()? {
+        let (start, length) = (seg.start / 512, seg.length / 512);
+        match seg.kind {
+            SegmentKind::Zero => println!("{start} {length} zero"),
+            SegmentKind::Striped { stripes, .. } if stripes.len() == 1 => {
+                println!(
+                    "{start} {length} linear {} {}",
+                    paths[stripes[0].device].display(),
+                    stripes[0].offset / 512
+                )
+            }
+            SegmentKind::Striped { chunk, stripes } => {
+                let devs: Vec<String> = stripes
+                    .iter()
+                    .map(|s| format!("{} {}", paths[s.device].display(), s.offset / 512))
+                    .collect();
+                println!(
+                    "{start} {length} striped {} {} {}",
+                    stripes.len(),
+                    chunk / 512,
+                    devs.join(" ")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_pattern(path: &PathBuf, tag: &str, length: Option<u64>) -> Result<()> {
+    let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let total = length.map_or_else(|| file.size(), Ok)?;
+    const CHUNK: usize = 1 << 20;
+    let mut buf = vec![0u8; CHUNK];
+    let mut offset = 0;
+    while offset < total {
+        let n = CHUNK.min((total - offset) as usize);
+        file.read_exact_at(&mut buf[..n], offset)?;
+        if let Some(bad) = testpattern::verify(&buf[..n], offset, tag) {
             bail!("pattern mismatch at offset {bad:#x}");
         }
         offset += n as u64;
