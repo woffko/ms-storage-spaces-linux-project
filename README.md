@@ -47,6 +47,7 @@ Everything is read-only; the tools never write to the pool members.
 * `crates/storage-spaces` - library: metadata parsing, space layout, reader.
 * `crates/spaces-cli` - the `spaces` command.
 * `docs/storage-spaces-format.md` - the on-disk format as understood so far.
+* `docs/user-guide.md` - installing, attaching, degraded and crashed pools.
 * `docs/plan.md` - project plan (stages, milestones, exit criteria).
 * `docs/research.md` - prior art.
 * `tools/` - scripts that create test pools on a Windows VM and fetch them.
