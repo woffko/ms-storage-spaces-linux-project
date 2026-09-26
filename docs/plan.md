@@ -80,7 +80,10 @@ in this repository.
   copies Windows marks stale, plus a replacement copy being regenerated; the
   reader uses current copies only and fails reads that have no current copy
   (`cargo test --test stale`, pool `stale3`).
-* Open: the Q code of dual parity (two-column rebuild), quorum rules.
+* Quorum: pools with fewer than half of their disks present are refused by
+  attach unless `--force` (the lone removed disk of `stale3` otherwise reads
+  the old state).
+* Open: the Q code of dual parity (two-column rebuild).
 
 ### M2 (exit criteria met on the test VM, 2026-09-26)
 
@@ -240,8 +243,8 @@ Progress (2026-09-26): manual page, user guide (`docs/user-guide.md`),
 `contrib/install.sh`, Debian package script (`contrib/deb/build-deb.sh`),
 CI workflow on metadata fixtures, mutation test of the metadata parser
 (200 000 corrupted variants of the fixtures, no panic; corrupt headers can
-no longer request large allocations). Pending: static musl build, crates.io
-metadata, release tag (needs approval).
+no longer request large allocations). Static musl build in CI. Pending:
+crates.io metadata, release tag (needs approval).
 
 
 1. Packaging: `cargo install`, Debian/Ubuntu and Arch packages, static

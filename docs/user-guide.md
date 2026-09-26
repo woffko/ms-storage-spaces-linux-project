@@ -83,7 +83,14 @@ sudo spaces attach --degraded
 ```
 
 Reads that need a missing disk fail with an I/O error instead of returning
-wrong data.
+wrong data. Copies that missed writes while their disk was away are never
+used.
+
+If fewer than half of the pool's disks are present, `attach` refuses even
+with `--degraded`: the disks at hand may all be disks that dropped out
+earlier, and their metadata would describe an old state of the pool
+(`spaces info` prints a warning). Use `--force` only when you know these
+disks were the last ones written.
 
 ## After a crash or power loss
 
