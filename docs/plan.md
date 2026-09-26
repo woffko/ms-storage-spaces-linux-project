@@ -137,7 +137,7 @@ T3. **Configuration matrix** to cover: columns 1-8, interleave 16 KiB-1 MiB,
     replaced disks, 512e and 4Kn member disks, pools upgraded from older
     versions, full and nearly-full pools.
 
-T4. **Linux test VM.** Ubuntu 22.04 VM `codex@192.168.189.144` (kernel 6.8,
+T4. **Linux test VM.** Ubuntu 22.04 VM `codex@192.168.189.142` (kernel 6.8,
     shared with the LinuxReflect project; `tools/linux-vm.sh`). It has the
     `ublk_drv`, `nbd`, `dm-raid` and `ntfs3` modules, `dmsetup`, `nbd-client`,
     `ntfs-3g` and cargo; `fio` still has to be installed. The corpus lives on

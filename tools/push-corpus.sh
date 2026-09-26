@@ -5,8 +5,9 @@
 set -uo pipefail
 tools=$(cd "$(dirname "$0")" && pwd)
 cd "$tools/../testdata/pools"
+vm=${LINUX_VM_HOST:-192.168.189.142}
 ssh_cmd=(ssh -o BatchMode=yes -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20
-  -i "$HOME/.ssh/rustadmin_vm_ed25519" codex@192.168.189.144)
+  -o HostKeyAlias=192.168.189.144 -i "$HOME/.ssh/rustadmin_vm_ed25519" codex@$vm)
 names=("$@")
 [[ ${#names[@]} -eq 0 ]] && names=($(ls))
 status=0
@@ -18,7 +19,7 @@ for name in "${names[@]}"; do
   ok=0
   for attempt in $(seq 1 15); do
     if rsync -a -z --sparse --partial --append-verify --bwlimit="${BWLIMIT:-8000}" -e "${ssh_cmd[*]:0:${#ssh_cmd[@]}-1}" \
-        "$name/" "codex@192.168.189.144:/srv/spaces/pools/.$name.partial/" &&
+        "$name/" "codex@$vm:/srv/spaces/pools/.$name.partial/" &&
        "${ssh_cmd[@]}" "mv /srv/spaces/pools/.$name.partial /srv/spaces/pools/$name"; then
       ok=1; echo "pushed $name"; break
     fi

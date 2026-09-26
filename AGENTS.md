@@ -18,7 +18,7 @@
 
 ## Linux test VM
 
-- Ubuntu 22.04 VM `codex@192.168.189.144` (kernel 6.8, NOPASSWD sudo for testing only), shared with
+- Ubuntu 22.04 VM `codex@192.168.189.142` (kernel 6.8, NOPASSWD sudo for testing only), shared with
   `/home/w0w/linuxreflect`; do not touch that project's files there. `tools/linux-vm.sh 'command'` runs a
   command, `tools/linux-vm.sh -sync` copies this repository (without `target/` and `testdata/`) to
   `~/Linux_Storage_Spaces`. Use it for ublk, NBD, dm and mount tests. The corpus lives on the
