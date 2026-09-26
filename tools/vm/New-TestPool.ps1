@@ -24,6 +24,8 @@ param(
     [ValidateSet(0, 512, 4096)] [int] $LogicalSectorSize = 0,
     [int] $AllocationUnitMB = 0,
     [int] $WriteCacheMB = -1,
+    # Steady write rate for the pattern (MB/s, 0 = unthrottled).
+    [int] $ThrottleMBps = 15,
     # Tiered spaces: the first SsdDisks disks get media type SSD, the rest HDD;
     # Tiers lists "media,resiliency,sizeMB[,columns]" separated by ';'.
     [int] $SsdDisks = 0,
@@ -59,17 +61,27 @@ public static class SsPattern {
             Buffer.BlockCopy(BitConverter.GetBytes(SplitMix(ref s)), 0, buf, at + i, 8);
         }
     }
-    public static void Fill(string device, long size, string tag) {
+    public static void Fill(string device, long size, string tag) { FillThrottled(device, size, tag, 0); }
+    // maxBytesPerSecond > 0 writes through at a steady rate, so that a slow
+    // host disk never builds up a long backlog (long stalls of the VM's
+    // virtual NVMe controller crash Windows with 0x124).
+    public static void FillThrottled(string device, long size, string tag, long maxBytesPerSecond) {
         byte[] t = System.Text.Encoding.ASCII.GetBytes(tag);
         // 4 MiB writes are whole stripes for every layout we generate.
         const int chunk = 4 << 20;
         byte[] buf = new byte[chunk];
-        using (var fs = new FileStream(device, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, 4096, FileOptions.None)) {
+        var options = maxBytesPerSecond > 0 ? FileOptions.WriteThrough : FileOptions.None;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        using (var fs = new FileStream(device, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, 4096, options)) {
             for (long pos = 0; pos < size; pos += chunk) {
                 int n = (int)Math.Min(chunk, size - pos);
                 for (int b = 0; b < n; b += 4096) FillBlock(buf, b, (ulong)(pos + b), t);
                 fs.Position = pos;
                 fs.Write(buf, 0, n);
+                if (maxBytesPerSecond > 0) {
+                    long due = (pos + n) * 1000 / maxBytesPerSecond - clock.ElapsedMilliseconds;
+                    if (due > 0) System.Threading.Thread.Sleep((int)due);
+                }
             }
             fs.Flush(true);
         }
@@ -145,7 +157,7 @@ if (-not $NoPattern) {
     if ($disk.IsOffline) { $disk | Set-Disk -IsOffline $false }
     if ($disk.IsReadOnly) { $disk | Set-Disk -IsReadOnly $false }
     $patternSize = if ($PatternMB -gt 0) { [int64]$PatternMB * 1MB } else { $vd.Size }
-    [SsPattern]::Fill("\\.\PhysicalDrive$($disk.Number)", $patternSize, $Name)
+    [SsPattern]::FillThrottled("\\.\PhysicalDrive$($disk.Number)", $patternSize, $Name, [int64]$ThrottleMBps * 1MB)
 }
 
 $poolDisks = foreach ($f in $images) {
