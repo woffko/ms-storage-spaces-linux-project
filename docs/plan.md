@@ -79,14 +79,22 @@ in this repository.
 * Open: the Q code of dual parity (two-column rebuild), extent/disk health
   states, quorum rules.
 
-### M2 (backends done, corpus matrix in progress)
+### M2 (exit criteria met on the test VM, 2026-09-26)
 
 * dm (`dm-table`), ublk (`serve-ublk`), NBD (`serve-nbd`) and FUSE
   (`serve-fuse`) all expose the real `test_ubuntu` pool: data equal to the
   exported image (full SHA-256 for dm, sampled ranges for the others), writes
   refused, NTFS mounted read-only through each. ublk and NBD expose the 4 KiB
   logical sector size; dm inherits the members' 512.
-* Pending: `tools/backend-matrix.sh` over the whole corpus on the Linux VM.
+* `tools/backend-matrix.sh` on the Linux VM over eight corpus pools covering
+  every layout (simple, mirror, single parity, thin with cached data, 4 KiB
+  sectors, tiers, mirror-accelerated parity, thin parity): 27 of 27
+  applicable pool/backend combinations pass the full sequential pattern check
+  and 300 random reads (4 KiB-1 MiB) through `/dev/mapper`; dm is skipped
+  where it cannot map the space (parity, cached data, tiers).
+* The remaining corpus pools go through the same `SpaceReader` that every
+  backend serves; `cargo test` checks it on all 21 pools, and the dm segment
+  test covers every pool dm can map.
 
 ### M3 (exit criteria met on the test VM, 2026-09-26)
 
@@ -224,6 +232,14 @@ created on a physical Windows machine. Unplugging a member of a mirror keeps
 the mount working.
 
 ### M4: stage 1 release
+
+Progress (2026-09-26): manual page, user guide (`docs/user-guide.md`),
+`contrib/install.sh`, Debian package script (`contrib/deb/build-deb.sh`),
+CI workflow on metadata fixtures, mutation test of the metadata parser
+(200 000 corrupted variants of the fixtures, no panic; corrupt headers can
+no longer request large allocations). Pending: static musl build, crates.io
+metadata, release tag (needs approval).
+
 
 1. Packaging: `cargo install`, Debian/Ubuntu and Arch packages, static
    musl binary; man pages for `spaces(8)`.

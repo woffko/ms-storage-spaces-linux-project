@@ -28,16 +28,16 @@ for dir in "$corpus"/*/; do
       if [[ $b == dm && $out == *"cannot map"* ]]; then
         echo "SKIP $name/$b (no linear mapping)"; skip=$((skip + 1)); continue
       fi
-      echo "FAIL $name/$b attach: $out"; fail=$((fail + 1)); spaces detach >/dev/null 2>&1; continue
+      echo "FAIL $name/$b attach: $out"; fail=$((fail + 1)); continue
     fi
-    dev=$(spaces status | awk '/^\/dev\/mapper/{print $1; exit}')
+    dev=$(awk '/^  \/dev\/mapper/{print $1; exit}' <<<"$out")
     if spaces verify-pattern "$dev" --tag "$space" --length "$plen" >/dev/null &&
        spaces verify-pattern "$dev" --tag "$space" --length "$plen" --random 300 >/dev/null; then
       echo "PASS $name/$b ($dev, $(blockdev --getss "$dev")-byte sectors)"; pass=$((pass + 1))
     else
       echo "FAIL $name/$b verify"; fail=$((fail + 1))
     fi
-    spaces detach >/dev/null || echo "WARN detach failed for $name/$b"
+    spaces detach "$(basename "$dev")" >/dev/null || echo "WARN detach failed for $name/$b"
   done
   for ((i = 0; i < k; i++)); do dmsetup remove "matrix-$i"; done
   for l in "${loops[@]}"; do losetup -d "$l"; done
