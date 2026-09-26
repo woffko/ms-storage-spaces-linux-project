@@ -207,6 +207,14 @@ impl<D: ReadAt> Pool<D> {
         })
     }
 
+    /// Whether at least half of the pool's disks are present. Without that,
+    /// the members at hand may all be disks that dropped out earlier, and
+    /// their database would describe an old state of the pool.
+    pub fn has_quorum(&self) -> bool {
+        let present = self.disks.values().filter(|d| d.member.is_some()).count();
+        present * 2 >= self.disks.len()
+    }
+
     /// Virtual disks visible to the user.
     pub fn user_spaces(&self) -> impl Iterator<Item = &Space> {
         self.spaces.values().filter(|s| s.is_user())

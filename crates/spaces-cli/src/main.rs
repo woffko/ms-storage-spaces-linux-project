@@ -72,6 +72,10 @@ enum Command {
         /// Attach pools with missing disks as long as every space is readable.
         #[arg(long)]
         degraded: bool,
+        /// Attach even when fewer than half of the pool's disks are present
+        /// (their metadata may describe an old state of the pool).
+        #[arg(long)]
+        force: bool,
         /// Use these member devices instead of scanning.
         devices: Vec<PathBuf>,
     },
@@ -254,8 +258,16 @@ fn main() -> Result<()> {
             space,
             backend,
             degraded,
+            force,
             devices,
-        } => cmd_attach(pool.as_deref(), space.as_deref(), backend, degraded, &devices),
+        } => cmd_attach(
+            pool.as_deref(),
+            space.as_deref(),
+            backend,
+            degraded || force,
+            force,
+            &devices,
+        ),
         #[cfg(target_os = "linux")]
         Command::Detach { space } => cmd_detach(space.as_deref()),
         #[cfg(target_os = "linux")]
@@ -344,6 +356,9 @@ fn info(pool: &Pool<File>, all: bool) -> Result<()> {
         pool.version, pool.logical_sector_size, pool.physical_sector_size
     );
     println!("  database sequence {}", pool.database.sequence);
+    if !pool.has_quorum() {
+        println!("  WARNING: fewer than half of the disks are present; the metadata may be out of date");
+    }
     println!("Disks:");
     for d in pool.disks.values() {
         let state = match d.member {
@@ -624,6 +639,7 @@ fn cmd_attach(
     space_sel: Option<&str>,
     backend: attach::Backend,
     degraded: bool,
+    force: bool,
     devices: &[PathBuf],
 ) -> Result<()> {
     let _lock = attach::lock()?;
@@ -639,6 +655,14 @@ fn cmd_attach(
     for paths in groups {
         let pool = open_pool(&paths)?;
         if pool_sel.is_some_and(|p| p != pool.name && !p.eq_ignore_ascii_case(&pool.guid.to_string())) {
+            continue;
+        }
+        if !pool.has_quorum() && !force {
+            eprintln!(
+                "pool {:?}: fewer than half of its disks are present; their metadata may be out of date (use --force)",
+                pool.name
+            );
+            failures += 1;
             continue;
         }
         let missing = pool.disks.values().filter(|d| d.member.is_none()).count();

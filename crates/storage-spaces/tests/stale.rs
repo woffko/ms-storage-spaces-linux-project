@@ -16,7 +16,10 @@ fn out_of_date_copies_are_never_read() {
         eprintln!("no stale pools in {}, skipping", root.display());
         return;
     };
-    for dir in entries.map(|e| e.unwrap().path()).filter(|p| p.join("manifest.json").exists()) {
+    for dir in entries
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.join("manifest.json").exists())
+    {
         let m = common::manifest(&dir);
         let name = m["space"]["name"].as_str().unwrap();
         let n = m["disks"].as_array().unwrap().len();
@@ -31,7 +34,13 @@ fn out_of_date_copies_are_never_read() {
             .as_array()
             .unwrap()
             .iter()
-            .map(|p| (p["tag"].as_str().unwrap().to_string(), p["start"].as_u64().unwrap(), p["length"].as_u64().unwrap()))
+            .map(|p| {
+                (
+                    p["tag"].as_str().unwrap().to_string(),
+                    p["start"].as_u64().unwrap(),
+                    p["length"].as_u64().unwrap(),
+                )
+            })
             .collect();
 
         // All disks: every range holds its newest pattern.
@@ -48,9 +57,19 @@ fn out_of_date_copies_are_never_read() {
 
         // Without the disk holding the current copies, the rewritten range
         // has only out-of-date copies left: reads must fail.
-        let current_disk = space.extents.iter().find(|e| e.is_current() && e.virtual_slab == 0).unwrap().disk_id;
+        let current_disk = space
+            .extents
+            .iter()
+            .find(|e| e.is_current() && e.virtual_slab == 0)
+            .unwrap()
+            .disk_id;
         let guid = pool.disks[&current_disk].guid.to_string();
-        let device = m["disks"].as_array().unwrap().iter().position(|d| d["spaces_guid"] == guid.as_str()).unwrap();
+        let device = m["disks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|d| d["spaces_guid"] == guid.as_str())
+            .unwrap();
         let degraded = open(Some(device));
         let reader = degraded.open_space(degraded.find_space(name).unwrap().id()).unwrap();
         let (tag, start, _) = &patterns[0];
@@ -62,4 +81,18 @@ fn out_of_date_copies_are_never_read() {
             ),
         }
     }
+}
+
+#[test]
+fn a_lone_dropped_out_disk_has_no_quorum() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/stale/stale3");
+    if !dir.join("manifest.json").exists() {
+        return;
+    }
+    let m = common::manifest(&dir);
+    let removed = m["removed_disk"].as_u64().unwrap();
+    let pool = Pool::open(vec![File::open(dir.join(format!("disk{removed}.img"))).unwrap()]).unwrap();
+    assert!(!pool.has_quorum());
+    let full = Pool::open((0..3).map(|i| File::open(dir.join(format!("disk{i}.img"))).unwrap()).collect()).unwrap();
+    assert!(full.has_quorum());
 }
