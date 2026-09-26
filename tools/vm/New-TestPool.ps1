@@ -24,6 +24,10 @@ param(
     [ValidateSet(0, 512, 4096)] [int] $LogicalSectorSize = 0,
     [int] $AllocationUnitMB = 0,
     [int] $WriteCacheMB = -1,
+    # Tiered spaces: the first SsdDisks disks get media type SSD, the rest HDD;
+    # Tiers lists "media,resiliency,sizeMB[,columns]" separated by ';'.
+    [int] $SsdDisks = 0,
+    [string] $Tiers = '',
     [switch] $NoPattern,
     [int] $PatternMB = 0,
     [string] $Root = 'C:\sstest'
@@ -102,9 +106,31 @@ New-StoragePool @poolParams | Out-Null
 $vdParams = @{
     StoragePoolFriendlyName = $poolName
     FriendlyName            = $Name
-    ResiliencySettingName   = $Resiliency
     ProvisioningType        = $Provisioning
-    Size                    = [int64]$SizeMB * 1MB
+}
+if ($Tiers) {
+    $i = 0
+    foreach ($pd in $physical) {
+        $media = if ($i -lt $SsdDisks) { 'SSD' } else { 'HDD' }
+        Get-PhysicalDisk -UniqueId $pd.UniqueId | Set-PhysicalDisk -MediaType $media
+        $i++
+    }
+    $tierObjects = @(); $tierSizes = @()
+    foreach ($spec in $Tiers.Split(';')) {
+        $f = $spec.Split(',')
+        $tp = @{
+            StoragePoolFriendlyName = $poolName; FriendlyName = "$Name-$($f[0])"
+            MediaType = $f[0]; ResiliencySettingName = $f[1]
+        }
+        if ($f.Count -gt 3) { $tp.NumberOfColumns = [int]$f[3] }
+        $tierObjects += New-StorageTier @tp
+        $tierSizes += [int64]$f[2] * 1MB
+    }
+    $vdParams.StorageTiers = $tierObjects
+    $vdParams.StorageTierSizes = $tierSizes
+} else {
+    $vdParams.ResiliencySettingName = $Resiliency
+    $vdParams.Size = [int64]$SizeMB * 1MB
 }
 if ($DataCopies -gt 0) { $vdParams.NumberOfDataCopies = $DataCopies }
 if ($Redundancy -ge 0) { $vdParams.PhysicalDiskRedundancy = $Redundancy }

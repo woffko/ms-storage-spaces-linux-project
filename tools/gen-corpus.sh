@@ -50,5 +50,8 @@ parity5    -DiskCount 5 -Resiliency Parity -Redundancy 1 -Columns 5 -InterleaveK
 dual7      -DiskCount 7 -Resiliency Parity -Redundancy 2 -Columns 7 -InterleaveKB 64 -SizeMB 2560
 mirrorthin -DiskCount 2 -Resiliency Mirror -DataCopies 2 -Columns 1 -Provisioning Thin -SizeMB 8192 -PatternMB 768
 paritythin -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -Provisioning Thin -SizeMB 8192 -PatternMB 768
+# Batch 3: storage tiers
+tiered     -DiskCount 4 -SsdDisks 2 -Tiers SSD,Mirror,1024;HDD,Simple,1024,2 -Provisioning Fixed
+mapar      -DiskCount 5 -SsdDisks 2 -Tiers SSD,Mirror,1024;HDD,Parity,2048,3 -Provisioning Fixed
 LIST
 exit $status
