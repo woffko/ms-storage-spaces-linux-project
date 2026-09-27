@@ -1,6 +1,7 @@
 //! Development aid: shows the write-back cache of a space and optionally
 //! copies the header and slot area of the cache space into a file (and the
-//! start of the parity journal into FILE.journal).
+//! start of the parity journal or dirty region tracking into FILE.journal
+//! or FILE.drt).
 //! Usage: cargo run --example dump_cache -- SPACE [--out FILE] DEVICE...
 use std::fs::File;
 use std::io::Write;
@@ -28,18 +29,14 @@ fn main() {
                 container.info.role,
                 child.extents.len()
             );
-            if container.info.role == SpaceRole::Other(0x0a)
-                && let Some(path) = &out
-            {
-                // The start of the parity journal (header and the first slots).
+            if let (SpaceRole::Other(role @ (0x06 | 0x0a)), Some(path)) = (container.info.role, &out) {
+                let ext = if role == 0x06 { "drt" } else { "journal" };
+                // The whole parity journal or dirty region tracking space.
                 let r = pool.open_space(child.id()).unwrap();
-                let mut buf = vec![0u8; 16 << 20];
+                let mut buf = vec![0u8; r.size() as usize];
                 r.read_exact_at(&mut buf, 0).unwrap();
-                File::create(format!("{path}.journal"))
-                    .unwrap()
-                    .write_all(&buf)
-                    .unwrap();
-                println!("wrote the parity journal to {path}.journal");
+                File::create(format!("{path}.{ext}")).unwrap().write_all(&buf).unwrap();
+                println!("wrote {path}.{ext}");
             }
             if container.info.role != SpaceRole::Cache || child.extents.is_empty() {
                 continue;

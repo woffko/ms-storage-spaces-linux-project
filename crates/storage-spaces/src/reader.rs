@@ -2,7 +2,8 @@
 
 use std::io::{self, Read, Seek, SeekFrom};
 
-use crate::cache::{CacheHeader, CacheIndex, Lookup};
+use crate::cache::{CacheHeader, CacheIndex, Lookup, SlotSource};
+use crate::drt::DirtyRegions;
 use crate::error::{Error, Result, format_err};
 use crate::format::{Resiliency, SLAB_SIZE, SpaceRole};
 use crate::gf16;
@@ -34,6 +35,8 @@ struct Mapped<'p, D> {
     pool: &'p Pool<D>,
     layout: Layout,
     journal: Option<Arc<ParityJournal>>,
+    /// Dirty region tracking of mirror spaces.
+    drt: Option<Arc<DirtyRegions>>,
     unclean: UncleanParity,
 }
 
@@ -52,6 +55,7 @@ impl<D: ReadAt> Mapped<'_, D> {
             pool,
             layout: Layout::with_base(&policy, &space.extents, base)?,
             journal: None,
+            drt: None,
             unclean: UncleanParity::default(),
         })
     }
@@ -76,6 +80,13 @@ impl<D: ReadAt> Mapped<'_, D> {
             return Err(Error::Pool(format!(
                 "parity stripe at {offset:#x} does not match its data after an unclean shutdown"
             )));
+        }
+        if l.resiliency == Resiliency::Mirror
+            && let Some(drt) = &self.drt
+            && drt.is_dirty(l.run_start_offset(loc.row) / SLAB_SIZE)
+            && self.read_unclean_mirror(offset, &loc, buf)?
+        {
+            return Ok((n, true));
         }
         let mut allocated = false;
         let mut last_error = None;
@@ -112,6 +123,38 @@ impl<D: ReadAt> Mapped<'_, D> {
             )));
         }
         Ok((n, false)) // not allocated (thin provisioning, or another tier)
+    }
+
+    /// Reads a mirror row that had writes in flight at an unclean shutdown:
+    /// every present copy is read, and copies that differ are refused (or,
+    /// with [`UncleanParity::PreferData`], the highest copy number wins, which
+    /// is what Windows kept in the crash experiment `crashmirrorwc`).
+    /// Returns false when fewer than two copies can be read.
+    fn read_unclean_mirror(&self, offset: u64, loc: &Location, buf: &mut [u8]) -> Result<bool> {
+        let l = &self.layout;
+        let mut copies: Vec<Vec<u8>> = Vec::new();
+        for copy in 0..l.copies {
+            let Some((disk, slab)) = l.physical(loc.column, copy, loc.row) else {
+                continue;
+            };
+            let mut data = vec![0u8; buf.len()];
+            match self.pool.read_slab(disk, slab, loc.offset_in_slab, &mut data) {
+                Ok(true) => copies.push(data),
+                Ok(false) | Err(Error::Io(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let Some(last) = copies.last() else { return Ok(false) };
+        if copies.len() < 2 {
+            return Ok(false);
+        }
+        if copies.iter().any(|c| c != last) && self.unclean == UncleanParity::Refuse {
+            return Err(Error::Pool(format!(
+                "mirror copies differ at {offset:#x} after an unclean shutdown"
+            )));
+        }
+        buf.copy_from_slice(last);
+        Ok(true)
     }
 
     /// Whether the XOR parity of the stripe holding `loc` matches its data
@@ -263,6 +306,60 @@ impl<D: ReadAt> Mapped<'_, D> {
         }
         Ok(())
     }
+
+    /// Reads one copy of a simple or mirror layout; false when that copy is
+    /// not complete on the disks at hand.
+    fn read_copy(&self, copy: u64, mut offset: u64, mut buf: &mut [u8]) -> Result<bool> {
+        let l = &self.layout;
+        while !buf.is_empty() {
+            let loc = l.locate(offset);
+            let n = buf.len().min(loc.contiguous as usize);
+            let Some((disk, slab)) = l.physical(loc.column, copy, loc.row) else {
+                return Ok(false);
+            };
+            match self.pool.read_slab(disk, slab, loc.offset_in_slab, &mut buf[..n]) {
+                Ok(true) => {}
+                Ok(false) | Err(Error::Io(_)) => return Ok(false),
+                Err(e) => return Err(e),
+            }
+            offset += n as u64;
+            buf = &mut buf[n..];
+        }
+        Ok(true)
+    }
+
+    /// Reads a slot area (write-back cache or parity journal) from every
+    /// copy that is complete on the disks at hand.
+    fn read_slot_copies(&self, offset: u64, len: usize) -> Result<Vec<Vec<u8>>> {
+        let mut copies = Vec::new();
+        if self.layout.resiliency == Resiliency::Mirror {
+            for copy in 0..self.layout.copies {
+                let mut area = vec![0u8; len];
+                if self.read_copy(copy, offset, &mut area)? {
+                    copies.push(area);
+                }
+            }
+        }
+        if copies.is_empty() {
+            let mut area = vec![0u8; len];
+            self.read_exact(offset, &mut area)?;
+            copies.push(area);
+        }
+        Ok(copies)
+    }
+}
+
+/// Reads a cache or journal space, merging the slot areas of its copies.
+struct Slots<'a, 'p, D>(&'a Mapped<'p, D>);
+
+impl<D: ReadAt> SlotSource for Slots<'_, '_, D> {
+    fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        self.0.read_exact(offset, buf)
+    }
+
+    fn read_slot_copies(&mut self, offset: u64, len: usize) -> Result<Vec<Vec<u8>>> {
+        self.0.read_slot_copies(offset, len)
+    }
 }
 
 /// Random-access reader for a space, including its write-back cache.
@@ -303,8 +400,10 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
             .map(|c| Mapped::new(pool, c))
             .collect::<Result<Vec<_>>>()?;
         let journal = Self::open_journal(pool, space)?.map(Arc::new);
+        let drt = Self::open_drt(pool, space)?.map(Arc::new);
         for m in std::iter::once(&mut base).chain(tiers.iter_mut()) {
             m.journal = journal.clone();
+            m.drt = drt.clone();
             m.unclean = options.unclean_parity;
         }
         Ok(SpaceReader {
@@ -344,7 +443,7 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
                 header.owner_guid
             ));
         }
-        let index = CacheIndex::load(header, |off, buf| mapped.read_exact(off, buf))?;
+        let index = CacheIndex::load(header, Slots(&mapped))?;
         Ok(Some((mapped, index)))
     }
 
@@ -360,10 +459,29 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
         for container in containers {
             if let Some(child) = pool.children(container.id()).find(|c| !c.extents.is_empty()) {
                 let mapped = Mapped::new(pool, child)?;
-                return ParityJournal::load(space.info.guid, |off, buf| mapped.read_exact(off, buf));
+                return ParityJournal::load(space.info.guid, Slots(&mapped));
             }
         }
         Ok(None)
+    }
+
+    fn open_drt(pool: &'p Pool<D>, space: &Space) -> Result<Option<DirtyRegions>> {
+        let containers = pool
+            .children(space.id())
+            .filter(|c| c.info.role == SpaceRole::Other(0x06));
+        for container in containers {
+            if let Some(child) = pool.children(container.id()).find(|c| !c.extents.is_empty()) {
+                let reader = SpaceReader::new(pool, child.id(), OpenOptions::default())?;
+                return DirtyRegions::load(reader.size(), |off, buf| reader.read_exact_at(buf, off));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Number of mirror extent runs that had writes in flight when the pool
+    /// was last detached (0 after a clean shutdown).
+    pub fn unclean_mirror_runs(&self) -> usize {
+        self.base.drt.as_ref().map_or(0, |d| d.dirty_runs())
     }
 
     /// Number of extent runs whose parity journal marks stripes that may be
@@ -406,6 +524,14 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
             return Err(Error::Io(io::ErrorKind::UnexpectedEof.into()));
         }
         while !buf.is_empty() {
+            if let Some((_, index)) = &self.cache
+                && index.is_ambiguous(offset)
+                && self.base.unclean == UncleanParity::Refuse
+            {
+                return Err(Error::Pool(format!(
+                    "the copies of the write-back cache disagree about offset {offset:#x} after an unclean shutdown"
+                )));
+            }
             let n = match &self.cache {
                 Some((mapped, index)) => match index.lookup(offset) {
                     Lookup::Hit { cache_offset, len } => {

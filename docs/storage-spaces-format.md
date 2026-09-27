@@ -255,7 +255,7 @@ at 0x20 (0 = mapping, 1 = initialisation record, see below), `u64 sequence` at
 
 | Offset | Size | Field |
 |---|---|---|
-| 0x00 | 8 | owner offset (multiple of the chunk size); bit 63 is a flag of unknown meaning, seen only on entries superseded by the next slot |
+| 0x00 | 8 | owner offset (multiple of the chunk size); bit 63 marks a provisional entry, see below |
 | 0x08 | 4 | cache chunk index, `0xffffffff` = chunk removed from the cache |
 | 0x0c | 2 | state: 0 = block assigned, nothing valid; 2 = partially valid; 3 = whole chunk valid |
 | 0x0e | 2 | length in bytes of the data that follows the entry; the next entry starts at the next multiple of 8 |
@@ -268,6 +268,25 @@ at 0x20 (0 = mapping, 1 = initialisation record, see below), `u64 sequence` at
 runs summing to the chunk; with only 4-byte run lists, as in `parity4`,
 bytes plus padding and 16-bit words cannot be told apart.) Entries are ordered by slot sequence and then by position within
 the slot.
+
+Provisional entries (bit 63 of the offset) are logged before their data is
+written to the cache and committed by a later entry for the chunk without
+the flag. A provisional entry that was never committed describes data that
+may not exist and is ignored (**verified**: crash pool `crashparitywc`,
+where the newest entry of a chunk was provisional, its cache block held
+unrelated bytes, and Windows showed the chunk as the previous committed
+entry describes; in the other pools every provisional entry was committed).
+
+The cache and parity journal spaces are two-way mirrors. After an unclean
+shutdown their copies can differ: a slot written last may have reached only
+one copy (`crashparitywc`: slot 359 held sequence 1385 in one copy and 360
+in the other; `crashparity`: a journal slot existed in one copy only).
+Windows kept the newer slot in one experiment and the older in the other,
+so `spaces` reads the slot areas of all copies, uses the newest valid slot
+per position, and treats what the versions disagree about as unknown: cache
+chunks mapped differently are refused, and parity stripes that any version
+leaves inconsistent are checked against their parity (`--unclean-parity
+data` reads the newest version instead).
 
 Log order (**verified** as far as reads go: the newest-entry rule reproduces
 the pattern of every corpus pool, including fully wrapped logs in `parity4`
@@ -300,6 +319,29 @@ every read.
 
 Extent `slab_count` is always in 256 MiB units, also for spaces with a 1 GiB
 allocation unit (**verified**: pool `au1g`).
+
+## Dirty region tracking (SPACEDRT, LE)
+
+Mirror spaces have a hidden role 6 child holding "SPACEDRT". Its space
+starts with a header, and a second copy of it sits 8 KiB before the end:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0x00 | 8 | "SPACEDRT" |
+| 0x08 | 8 | generation (the copy with the higher one is current) |
+| 0x10 | 4 | number of entries |
+| 0x14 | 4 | CRC-32 (zlib) of the first `0x18 + 8 * count` bytes with this field zeroed |
+| 0x18 | 8 each | virtual slab where an extent run with writes in flight starts |
+
+(**verified**: clean pools have no entries; `crashmirrorwc`, whose disks were
+pulled during small writes, lists both of its extent runs, 0 and 4, in
+generation 2 and run 0 in generation 1.) The copies of a mirror may differ
+inside a listed run, and Windows resynchronises them when it mounts the
+pool. Which copy it keeps is not recorded and not predictable: in
+`crashmirrorwc` it kept copy 1 in 8 of the 9 differing MiB and copy 0 in
+the other, in `crashmirror` copy 0 in both. `spaces` reads every copy in a
+listed run and refuses rows whose copies differ (`--unclean-parity data`
+returns the highest copy).
 
 ## Parity journal (SPVDT, LE)
 
@@ -341,7 +383,8 @@ recovered space.
   torn entries is unknown (whether it compares copies like `spaces`).
 * Remaining record fields (provisioning type, sizes, disk attributes, tiers).
 * Per-space databases (type 7 record lists member disks).
-* SPACEDRT contents when regions are dirty; the meaning of the constant entry
+* How Windows chooses between differing mirror copies after an unclean
+  shutdown; the meaning of the constant entry
   of the cache's type 1 slot; why the cache log restarts mid-area.
 * Which side Windows trusts for an inconsistent parity stripe.
 * Group sizes of grouped dual parity for 13-16 columns (not generated yet;

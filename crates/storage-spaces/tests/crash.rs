@@ -1,7 +1,7 @@
 //! Pools whose disks were pulled while Windows was writing (see
 //! tools/vm/New-CrashPool.ps1). Every MiB we read from the crashed disks must
-//! either equal what Windows shows after recovering the pool, or be refused;
-//! silently different data is a failure.
+//! either equal what Windows shows after recovering the pool, or be refused
+//! (at most 1 % of the space); silently different data is a failure.
 
 mod common;
 
@@ -77,6 +77,8 @@ fn crashed_pools_read_like_windows_recovers_them() {
             "{name}: {} MiB, refused {refused}, differing when preferring data {lenient_diff}",
             want.len()
         );
-        assert!(refused <= 4, "{name}: {refused} MiB refused");
+        // Parity pools refuse a few stripes; mirrors that were written with
+        // small random writes refuse the rows whose copies differ.
+        assert!(refused * 100 <= want.len(), "{name}: {refused} MiB refused");
     }
 }

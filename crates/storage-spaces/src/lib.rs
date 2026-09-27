@@ -16,6 +16,7 @@
 
 pub mod cache;
 mod crc;
+pub mod drt;
 mod error;
 pub mod format;
 pub mod gf16;

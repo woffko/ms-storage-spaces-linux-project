@@ -1,8 +1,9 @@
 # User guide
 
-`spaces` reads Microsoft Storage Spaces pools created by Windows 11 and
-exposes their virtual disks ("spaces") as read-only Linux block devices. It
-never writes to the pool disks.
+`spaces` reads Microsoft Storage Spaces pools created by Windows 11 (24H2:
+pool version 28; Insider builds: pool version 29) and exposes their virtual
+disks ("spaces") as read-only Linux block devices. It never writes to the
+pool disks.
 
 ## Supported configurations
 
@@ -18,6 +19,9 @@ never writes to the pool disks.
 | Storage tiers, mirror-accelerated parity | read |
 | 512-byte and 4 KiB logical sectors | read |
 | Pools after a crash or power loss | read; parity stripes with unresolved writes are refused (see below) |
+| Several spaces per pool, fragmented and extended spaces | read |
+| Member disks with 512-byte, 512e and 4Kn sectors | read |
+| Pools after a disk was retired, replaced or removed | read |
 | Pools created by Windows 8/10/Server | not supported |
 | Writing, pool management | not supported |
 
@@ -96,8 +100,8 @@ disks were the last ones written.
 
 ## After a crash or power loss
 
-Windows records in the parity journal which parity stripes had writes in
-flight. For such stripes whose parity does not match the data, it is not
+Windows records which mirror extent runs (dirty region tracking) and which
+parity stripes (parity journal) had writes in flight. For such stripes whose parity does not match the data, it is not
 known which side Windows would keep, so reads of them fail by default and
 `spaces info` reports:
 
@@ -116,7 +120,14 @@ Options:
   sudo spaces --unclean-parity data attach
   ```
 
-Mirror and simple spaces need nothing special after a crash.
+In mirror runs with writes in flight the copies are compared on every
+read; rows whose copies differ are refused the same way (`spaces info`
+reports `dirty region tracking: ... not cleanly shut down`), because which
+copy Windows keeps when it resynchronises them is not predictable. The
+write-back cache and the parity journal are mirrored too; what their copies
+disagree about is treated the same way. `--unclean-parity data` reads the
+highest mirror copy and the newest cache and journal slots. Simple spaces
+need nothing special after a crash.
 
 ## Copying a space out
 
@@ -127,6 +138,21 @@ sudo losetup -r -P -b <sector size> -f --show data.img
 
 `spaces info` prints the sector size; 4 KiB spaces need `-b 4096`, or the
 partition table will not be found.
+
+## Checking a pool
+
+`spaces info <disks...>` prints the pool, its disks and every space with its
+state:
+
+* `healthy`: every copy and column is on a disk at hand.
+* `degraded`: some copies or columns are on missing or out-of-date disks,
+  but all data can still be read or rebuilt; attach with `--degraded`.
+* `failed`: some data is only on missing disks; reads of it fail.
+
+Warnings about the pool database: a `stale` copy belongs to a disk that was
+away while the pool changed (normal); a `torn` copy was cut short by an
+interrupted update and is ignored in favour of the copy most disks hold; an
+`unusable` newer copy could not be decoded, so an older one is used.
 
 ## Troubleshooting
 

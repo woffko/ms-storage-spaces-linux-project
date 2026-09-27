@@ -17,7 +17,7 @@
 //! over the size stored at `0x1c`.
 //! * data area: `chunk_count` blocks of `chunk_size` bytes (one full stripe).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::crc::crc32_excluding;
 use crate::error::{Result, format_err};
@@ -26,8 +26,11 @@ use crate::guid::Guid;
 pub const SPCACHE_SIGNATURE: &[u8; 8] = b"SPCACHE\0";
 pub const SPSLOT_SIGNATURE: &[u8; 8] = b"SPSLOT\0\0";
 const SLOT_TYPE_MAPPING: u32 = 0;
-/// Flag in the offset field of some entries (meaning unknown; such entries
-/// were always superseded by the next slot in the samples).
+/// Flag in the offset field of an entry logged before its data was written
+/// to the cache; a later entry without the flag commits it. A flagged entry
+/// that was never committed (the pool stopped in between) describes data
+/// that may not exist, and Windows ignores it (crash experiment
+/// `crashparitywc`).
 const ENTRY_OFFSET_FLAG: u64 = 1 << 63;
 /// Entry states: nothing valid yet, valid runs listed after the entry, whole chunk valid.
 const STATE_EMPTY: u16 = 0;
@@ -53,6 +56,50 @@ fn parse_runs(words: &[u8], chunk: u64) -> Result<Vec<(bool, u64)>> {
     }
     Ok(runs)
 }
+/// Where the cache and journal loaders read from. A plain closure reads
+/// the space; a mirrored space can also merge the slot areas of its copies.
+pub trait SlotSource {
+    fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<()>;
+
+    /// Reads a slot area of `len` bytes from every copy of a mirrored
+    /// space that can be read completely (copies can differ after an
+    /// unclean shutdown, when a slot reached only some of them).
+    fn read_slot_copies(&mut self, offset: u64, len: usize) -> Result<Vec<Vec<u8>>> {
+        let mut area = vec![0u8; len];
+        self.read(offset, &mut area)?;
+        Ok(vec![area])
+    }
+}
+
+/// The newest version of a slot area over its copies: each position takes
+/// the valid slot with the highest sequence (slots validate themselves).
+pub(crate) fn merge_slot_copies(copies: &[Vec<u8>], slot_size: usize) -> Vec<u8> {
+    let mut merged = copies[0].clone();
+    for other in &copies[1..] {
+        for (mine, theirs) in merged.chunks_exact_mut(slot_size).zip(other.chunks_exact(slot_size)) {
+            if slot_sequence(theirs) > slot_sequence(mine) {
+                mine.copy_from_slice(theirs);
+            }
+        }
+    }
+    merged
+}
+
+impl<F: FnMut(u64, &mut [u8]) -> Result<()>> SlotSource for F {
+    fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        self(offset, buf)
+    }
+}
+
+/// Sequence of a slot whose signature and CRC are valid.
+pub(crate) fn slot_sequence(slot: &[u8]) -> Option<u64> {
+    (slot.len() >= 0x38
+        && &slot[0..8] == SPSLOT_SIGNATURE
+        && le_u32(&slot[0x1c..]) as usize == slot.len()
+        && crc32_excluding(slot, 0x24) == le_u32(&slot[0x24..]))
+    .then(|| le_u64(&slot[0x28..]))
+}
+
 /// Block number of an entry that removes a chunk from the cache (destaged).
 const NO_BLOCK: u32 = u32::MAX;
 
@@ -121,22 +168,47 @@ enum Validity {
     Runs(Vec<(bool, u64)>),
 }
 
+/// Owner chunk number -> (cache block, valid part).
+type ChunkMap = HashMap<u64, (u64, Validity)>;
+
 /// Mapping of cached chunks of the owner space.
 #[derive(Debug, Clone)]
 pub struct CacheIndex {
     pub header: CacheHeader,
-    /// Owner chunk number -> (cache block, valid part).
-    chunks: HashMap<u64, (u64, Validity)>,
+    chunks: ChunkMap,
+    /// Chunks mapped differently by the copies of the slot area (after an
+    /// unclean shutdown): which one Windows keeps is not known.
+    conflicts: HashSet<u64>,
 }
 
 impl CacheIndex {
     /// Builds the index from the cache header and slot area. `read` reads
     /// from the cache space; `unit` is the owner space interleave.
-    pub fn load(header: CacheHeader, mut read: impl FnMut(u64, &mut [u8]) -> Result<()>) -> Result<Self> {
+    pub fn load(header: CacheHeader, mut read: impl SlotSource) -> Result<Self> {
+        let slot_size = header.slot_size as usize;
+        let copies = read.read_slot_copies(header.slot_offset, slot_size * header.slot_count as usize)?;
+        let merged = merge_slot_copies(&copies, slot_size);
+        let chunks = Self::map(&header, &merged)?;
+        let mut conflicts = HashSet::new();
+        for copy in copies.iter().filter(|c| **c != merged) {
+            let other = Self::map(&header, copy)?;
+            for key in chunks.keys().chain(other.keys()) {
+                if chunks.get(key) != other.get(key) {
+                    conflicts.insert(*key);
+                }
+            }
+        }
+        Ok(CacheIndex {
+            header,
+            chunks,
+            conflicts,
+        })
+    }
+
+    /// The chunk mapping one version of the slot area describes.
+    fn map(header: &CacheHeader, area: &[u8]) -> Result<ChunkMap> {
         let chunk = header.chunk_size as u64;
         let slot_size = header.slot_size as usize;
-        let mut area = vec![0u8; slot_size * header.slot_count as usize];
-        read(header.slot_offset, &mut area)?;
 
         // A mapping is current if it is the newest entry for its owner chunk
         // (a newer entry may be a tombstone written when the chunk was
@@ -164,6 +236,7 @@ impl CacheIndex {
                 let e = slot
                     .get(pos..pos + 16)
                     .ok_or_else(|| format_err!("cache slot with {count} entries overflows"))?;
+                let provisional = le_u64(e) & ENTRY_OFFSET_FLAG != 0;
                 let offset = le_u64(e) & !ENTRY_OFFSET_FLAG;
                 let block = le_u32(&e[8..]);
                 let state = u16::from_le_bytes([e[12], e[13]]);
@@ -188,6 +261,9 @@ impl CacheIndex {
                     b if (b as u64) < header.chunk_count as u64 => Some((b as u64, validity)),
                     b => return Err(format_err!("bad cache entry: block {b}")),
                 };
+                if provisional {
+                    continue;
+                }
                 let version = (sequence, index);
                 let key = offset / chunk;
                 if let Some((b, _)) = &target
@@ -200,14 +276,24 @@ impl CacheIndex {
                 }
             }
         }
-        let chunks = newest_for_chunk
+        Ok(newest_for_chunk
             .into_iter()
             .filter_map(|(key, (version, target))| {
                 let (block, valid) = target?;
                 (newest_for_block.get(&block) == Some(&version)).then_some((key, (block, valid)))
             })
-            .collect();
-        Ok(CacheIndex { header, chunks })
+            .collect())
+    }
+
+    /// Whether the copies of the cache disagree about the chunk holding
+    /// owner offset `offset`.
+    pub fn is_ambiguous(&self, offset: u64) -> bool {
+        self.conflicts.contains(&(offset / self.header.chunk_size as u64))
+    }
+
+    /// Number of chunks the copies of the cache disagree about.
+    pub fn conflicting_chunks(&self) -> usize {
+        self.conflicts.len()
     }
 
     /// Number of chunks currently held in the cache.
@@ -332,7 +418,7 @@ mod tests {
     fn index(slots: &[Vec<u8>]) -> CacheIndex {
         let mut area = slots.concat();
         area.resize(4 * 0x1000, 0);
-        CacheIndex::load(header(), |off, buf| {
+        CacheIndex::load(header(), |off: u64, buf: &mut [u8]| {
             buf.copy_from_slice(&area[off as usize..off as usize + buf.len()]);
             Ok(())
         })
@@ -411,7 +497,7 @@ mod tests {
     #[test]
     fn partial_chunks_follow_their_runs() {
         // Chunk 0: the first 32 KiB valid, then 96 KiB not (as a 1 MiB-split
-        // write leaves it); the flagged offset form is used for chunk 2.
+        // write leaves it); chunk 2 has a provisional entry only.
         let partial = vec![0x8000 | 64, 192, 0, 0];
         let i = index(&[slot_with(
             1,
@@ -430,7 +516,21 @@ mod tests {
         );
         assert_eq!(i.lookup(0x8000), Lookup::Miss { len: CHUNK - 0x8000 });
         assert_eq!(hit(&i, CHUNK + 5), None);
+        assert_eq!(hit(&i, 2 * CHUNK), None);
+    }
+
+    #[test]
+    fn provisional_entries_count_once_committed() {
+        let provisional = ((2 * CHUNK) | ENTRY_OFFSET_FLAG, 4, STATE_FULL, vec![]);
+        // Committed by the next slot: the chunk is cached.
+        let i = index(&[
+            slot_with(1, std::slice::from_ref(&provisional)),
+            slot(2, &[(2 * CHUNK, 4)]),
+        ]);
         assert_eq!(hit(&i, 2 * CHUNK), Some(0x10_0000 + 4 * CHUNK));
+        // Not committed: an older committed mapping of the chunk stays.
+        let i = index(&[slot(1, &[(2 * CHUNK, 1)]), slot_with(2, &[provisional])]);
+        assert_eq!(hit(&i, 2 * CHUNK), Some(0x10_0000 + CHUNK));
     }
 
     #[test]

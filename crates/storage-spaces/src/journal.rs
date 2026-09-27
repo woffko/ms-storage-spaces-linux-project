@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use crate::cache::{SlotSource, merge_slot_copies};
 use crate::crc::crc32_excluding;
 use crate::error::{Result, format_err};
 use crate::guid::Guid;
@@ -32,17 +33,21 @@ enum Consistency {
     Bitmap(Vec<u8>),
 }
 
-/// Consistency of parity stripes, per extent run.
+/// Consistency of parity stripes, per extent run. After an unclean
+/// shutdown the copies of the journal space can differ (a slot that reached
+/// only some copies); a stripe counts as possibly inconsistent if any
+/// version of the journal says so, since which one Windows keeps is not
+/// known.
 #[derive(Debug, Clone, Default)]
 pub struct ParityJournal {
-    runs: HashMap<u64, Consistency>,
+    runs: HashMap<u64, Vec<Consistency>>,
 }
 
 impl ParityJournal {
     /// Parses the journal. `read` reads from the journal space.
-    pub fn load(owner: Guid, mut read: impl FnMut(u64, &mut [u8]) -> Result<()>) -> Result<Option<Self>> {
+    pub fn load(owner: Guid, mut read: impl SlotSource) -> Result<Option<Self>> {
         let mut head = [0u8; 0x60];
-        read(0, &mut head)?;
+        read.read(0, &mut head)?;
         if &head[0..8] != SPVDT_SIGNATURE {
             return Ok(None);
         }
@@ -58,9 +63,23 @@ impl ParityJournal {
         if !(0x40..=0x10000).contains(&slot_size) || slot_count > 1 << 16 || slot_size * slot_count > 64 << 20 {
             return Err(format_err!("implausible parity journal geometry"));
         }
-        let mut area = vec![0u8; slot_size * slot_count];
-        read(slot_offset, &mut area)?;
+        let copies = read.read_slot_copies(slot_offset, slot_size * slot_count)?;
+        let merged = merge_slot_copies(&copies, slot_size);
+        let mut runs: HashMap<u64, Vec<Consistency>> = HashMap::new();
+        for area in std::iter::once(&merged).chain(copies.iter().filter(|c| **c != merged)) {
+            for (offset, c) in Self::parse(area, slot_size)? {
+                let versions = runs.entry(offset).or_default();
+                if !versions.contains(&c) {
+                    versions.push(c);
+                }
+            }
+        }
+        Ok(Some(ParityJournal { runs }))
+    }
 
+    /// The consistency per extent run that one version of the slot area
+    /// describes: the newest entry per run.
+    fn parse(area: &[u8], slot_size: usize) -> Result<HashMap<u64, Consistency>> {
         let mut newest: HashMap<u64, ((u64, usize), Consistency)> = HashMap::new();
         for slot in area.chunks_exact(slot_size) {
             if &slot[0..8] != SPSLOT_SIGNATURE
@@ -110,20 +129,34 @@ impl ParityJournal {
                 }
             }
         }
-        Ok(Some(ParityJournal {
-            runs: newest.into_iter().map(|(k, (_, c))| (k, c)).collect(),
-        }))
+        Ok(newest.into_iter().map(|(k, (_, c))| (k, c)).collect())
     }
 
     /// Whether stripe `stripe` (counted from the start of the extent run that
     /// begins at owner offset `run_start`) may have stale parity.
     pub fn is_dirty(&self, run_start: u64, stripe: u64) -> bool {
-        match self.runs.get(&run_start) {
-            None | Some(Consistency::All) => false,
-            Some(Consistency::Bitmap(bits)) => bits
+        self.runs
+            .get(&run_start)
+            .is_some_and(|versions| versions.iter().any(|c| c.is_dirty(stripe)))
+    }
+
+    /// Number of extent runs with possibly inconsistent stripes.
+    pub fn dirty_runs(&self) -> usize {
+        self.runs
+            .values()
+            .filter(|v| v.iter().any(|c| *c != Consistency::All))
+            .count()
+    }
+}
+
+impl Consistency {
+    fn is_dirty(&self, stripe: u64) -> bool {
+        match self {
+            Consistency::All => false,
+            Consistency::Bitmap(bits) => bits
                 .get((stripe / 8) as usize)
                 .is_none_or(|b| b >> (stripe % 8) & 1 == 0),
-            Some(Consistency::Runs(runs)) => {
+            Consistency::Runs(runs) => {
                 let mut start = 0;
                 for &(consistent, len) in runs {
                     if stripe < start + len {
@@ -134,11 +167,6 @@ impl ParityJournal {
                 true
             }
         }
-    }
-
-    /// Number of extent runs with possibly inconsistent stripes.
-    pub fn dirty_runs(&self) -> usize {
-        self.runs.values().filter(|c| **c != Consistency::All).count()
     }
 }
 
@@ -189,7 +217,7 @@ mod tests {
 
     fn load(j: &[u8]) -> ParityJournal {
         let owner = Guid::from_mixed_endian(&OWNER);
-        ParityJournal::load(owner, |off, buf| {
+        ParityJournal::load(owner, |off: u64, buf: &mut [u8]| {
             buf.copy_from_slice(&j[off as usize..off as usize + buf.len()]);
             Ok(())
         })

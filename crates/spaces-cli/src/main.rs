@@ -23,8 +23,9 @@ use storage_spaces::{Condition, Pool, Space, UncleanParity, testpattern};
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
-    /// What to return for parity stripes whose parity does not match their
-    /// data after an unclean shutdown: fail the read, or the on-disk data.
+    /// What to return after an unclean shutdown for parity stripes whose
+    /// parity does not match their data and for mirror copies that differ:
+    /// fail the read, or the on-disk data (the highest mirror copy).
     #[arg(long, global = true, value_enum, default_value = "refuse")]
     unclean_parity: UncleanArg,
     #[command(subcommand)]
@@ -444,6 +445,20 @@ fn info(pool: &Pool<File>, all: bool) -> Result<()> {
                             }
                         );
                     }
+                    if r.unclean_mirror_runs() > 0 {
+                        println!(
+                            "       dirty region tracking: {} extent run(s) not cleanly shut down; differing mirror copies are {}",
+                            r.unclean_mirror_runs(),
+                            if OPEN_OPTIONS
+                                .get()
+                                .is_some_and(|o| o.unclean_parity == UncleanParity::PreferData)
+                            {
+                                "read from the highest copy"
+                            } else {
+                                "refused (--unclean-parity data reads the highest copy)"
+                            }
+                        );
+                    }
                     if let Some(cache) = r.cache() {
                         println!(
                             "       write-back cache: {} of {} chunks of {} in use",
@@ -451,6 +466,20 @@ fn info(pool: &Pool<File>, all: bool) -> Result<()> {
                             cache.header.chunk_count,
                             size(cache.header.chunk_size as u64)
                         );
+                        if cache.conflicting_chunks() > 0 {
+                            println!(
+                                "       write-back cache: its copies disagree about {} chunk(s) after an unclean shutdown; those are {}",
+                                cache.conflicting_chunks(),
+                                if OPEN_OPTIONS
+                                    .get()
+                                    .is_some_and(|o| o.unclean_parity == UncleanParity::PreferData)
+                                {
+                                    "read from the newest copy"
+                                } else {
+                                    "refused (--unclean-parity data reads the newest)"
+                                }
+                            );
+                        }
                     }
                 }
                 Err(e) => println!("       cannot open: {e}"),
