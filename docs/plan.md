@@ -162,9 +162,19 @@ in this repository.
 * Throughput on the VM (warm host cache, 1 GiB direct reads): dm 337-342
   MB/s, ublk 307-317 MB/s (91-93 % of dm; better than dm for 64 KiB reads),
   NBD 287 MB/s. dm maps the members directly, so it runs at member speed.
-* Not applicable: the corpus pools hold the verification pattern rather than
-  NTFS, and no physical Windows machine is part of the test setup (Windows 11
-  VM only, see the scope decision).
+* NTFS pools (2026-09-27): five pools created by Windows 11 24H2 with NTFS
+  and real files (System32 DLLs and random files of awkward sizes, 1252
+  files, 593 MiB, SHA-256 recorded on Windows) with single parity, dual
+  parity (7 columns), grouped dual parity (12 columns), tiers and
+  mirror-accelerated parity. `tools/ntfs-check.sh` on the Linux VM attaches
+  their images as partition-scanned loop devices: udev and
+  `storage-spaces-attach.service` assembled every pool on their own (ublk),
+  the NTFS partitions mounted read-only with ntfs3, and all 1252 files of
+  each pool matched (5 of 5 pass). They also exposed and now cover two
+  cache and journal decoding errors (entry lengths in bytes, 8-byte
+  alignment; the parity pool carries its default 1 GiB write-back cache).
+* Not applicable: a pool created on a physical Windows machine (the test
+  setup has Windows 11 VMs only, see the scope decision).
 
 ## Test infrastructure (continuous, feeds every stage)
 
