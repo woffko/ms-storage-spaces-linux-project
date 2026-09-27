@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use crate::error::{Error, Result, format_err};
 use crate::format::{
-    DATA_AREA_OFFSET, DbHeader, DiskHeader, ExtentRecord, POOL_DB_OFFSET, Record, SLAB_SIZE, SpaceRecord, SpaceRole,
-    read_database,
+    DATA_AREA_OFFSET, DbHeader, DiskHeader, DiskRecord, ExtentRecord, POOL_DB_OFFSET, PoolRecord, RawRecord, Record,
+    SLAB_SIZE, SpaceRecord, SpaceRole, read_database,
 };
 use crate::gpt::{PartitionLocation, find_spaces_partition};
 use crate::guid::Guid;
@@ -57,6 +57,36 @@ impl Space {
     pub fn allocated(&self) -> u64 {
         self.extents.iter().map(|e| e.slab_count * SLAB_SIZE).sum()
     }
+}
+
+/// The records of one pool database copy.
+struct Decoded {
+    pool_record: PoolRecord,
+    disks: Vec<DiskRecord>,
+    spaces: Vec<SpaceRecord>,
+    extents: Vec<ExtentRecord>,
+}
+
+fn decode_records(raw: &[RawRecord]) -> Result<Decoded> {
+    let mut pool_record = None;
+    let mut disks = Vec::new();
+    let mut spaces = Vec::new();
+    let mut extents = Vec::new();
+    for r in raw {
+        match Record::decode(r)? {
+            Record::Pool(p) => pool_record = Some(p),
+            Record::Disk(d) => disks.push(d),
+            Record::Space(s) => spaces.push(s),
+            Record::Extent(e) => extents.push(e),
+            Record::Other { .. } => {}
+        }
+    }
+    Ok(Decoded {
+        pool_record: pool_record.ok_or_else(|| format_err!("pool database has no pool record"))?,
+        disks,
+        spaces,
+        extents,
+    })
 }
 
 /// An assembled pool.
@@ -114,9 +144,13 @@ impl<D: ReadAt> Pool<D> {
             )));
         }
 
-        // Every member carries a copy of the pool database; use the newest.
-        let mut newest: Option<(usize, DbHeader, Vec<crate::format::RawRecord>)> = None;
-        for (i, member) in members.iter_mut().enumerate() {
+        // Members carry copies of the pool database. Identical copies are
+        // grouped; the newest version that decodes is used, preferring the
+        // one most members agree on. A copy that differs from others of the
+        // same sequence was torn by an interrupted write (SDBB entries carry
+        // no checksum of their own).
+        let mut versions: Vec<(DbHeader, Vec<RawRecord>, Vec<usize>)> = Vec::new();
+        for member in members.iter_mut() {
             let dev = &devices[member.device];
             match read_database(dev, member.partition.offset + POOL_DB_OFFSET) {
                 Ok(None) => {} // this member carries no copy
@@ -129,52 +163,81 @@ impl<D: ReadAt> Pool<D> {
                         continue;
                     }
                     member.db_sequence = Some(header.sequence);
-                    if newest.as_ref().is_none_or(|(_, h, _)| header.sequence > h.sequence) {
-                        newest = Some((i, header, records));
+                    match versions
+                        .iter_mut()
+                        .find(|(h, r, _)| h.sequence == header.sequence && *r == records)
+                    {
+                        Some((_, _, devs)) => devs.push(member.device),
+                        None => versions.push((header, records, vec![member.device])),
                     }
                 }
                 Err(e) => warnings.push(format!("device {}: cannot read pool database: {e}", member.device)),
             }
         }
-        let (_, database, raw_records) =
-            newest.ok_or_else(|| Error::Pool("no readable copy of the pool database".into()))?;
+        versions.sort_by_key(|v| std::cmp::Reverse((v.0.sequence, v.2.len())));
+        let mut chosen = None;
+        let mut failures = Vec::new();
+        for (header, records, devs) in &versions {
+            match decode_records(records) {
+                Ok(decoded) => {
+                    chosen = Some((header.clone(), decoded, devs.clone()));
+                    break;
+                }
+                Err(e) => failures.push(format!(
+                    "pool database copy of sequence {} on device(s) {devs:?} is unusable: {e}",
+                    header.sequence
+                )),
+            }
+        }
+        let Some((database, decoded, used)) = chosen else {
+            return Err(match failures.first() {
+                Some(_) => Error::Pool(failures.join("; ")),
+                None => Error::Pool("no readable copy of the pool database".into()),
+            });
+        };
+        warnings.extend(failures);
+        for (header, _, devs) in &versions {
+            if header.sequence == database.sequence && *devs != used {
+                warnings.push(format!(
+                    "device(s) {devs:?}: pool database copy of sequence {} differs from the one on {used:?} (torn write)",
+                    header.sequence
+                ));
+            }
+        }
         for m in &members {
             if m.db_sequence.is_some_and(|s| s < database.sequence) {
                 warnings.push(format!("device {}: stale pool database copy", m.device));
             }
         }
 
-        let mut pool_record = None;
+        let Decoded {
+            pool_record,
+            disks: disk_records,
+            spaces: space_records,
+            extents,
+        } = decoded;
         let mut disks = BTreeMap::new();
+        for d in disk_records {
+            let member = members.iter().position(|m| m.header.disk_guid == d.guid);
+            disks.insert(
+                d.id,
+                PhysicalDisk {
+                    id: d.id,
+                    guid: d.guid,
+                    name: d.name,
+                    member,
+                },
+            );
+        }
         let mut spaces = BTreeMap::new();
-        let mut extents = Vec::new();
-        for raw in &raw_records {
-            match Record::decode(raw)? {
-                Record::Pool(p) => pool_record = Some(p),
-                Record::Disk(d) => {
-                    let member = members.iter().position(|m| m.header.disk_guid == d.guid);
-                    disks.insert(
-                        d.id,
-                        PhysicalDisk {
-                            id: d.id,
-                            guid: d.guid,
-                            name: d.name,
-                            member,
-                        },
-                    );
-                }
-                Record::Space(s) => {
-                    spaces.insert(
-                        s.id,
-                        Space {
-                            info: s,
-                            extents: Vec::new(),
-                        },
-                    );
-                }
-                Record::Extent(e) => extents.push(e),
-                Record::Other { .. } => {}
-            }
+        for s in space_records {
+            spaces.insert(
+                s.id,
+                Space {
+                    info: s,
+                    extents: Vec::new(),
+                },
+            );
         }
         for e in extents {
             match spaces.get_mut(&e.space_id) {
@@ -191,7 +254,6 @@ impl<D: ReadAt> Pool<D> {
             warnings.push(format!("disk {} ({}) is missing", d.id, d.guid));
         }
 
-        let pool_record = pool_record.ok_or_else(|| format_err!("pool database has no pool record"))?;
         Ok(Pool {
             devices,
             guid,
@@ -270,5 +332,105 @@ impl<D: ReadAt> Pool<D> {
         };
         self.devices[device].read_exact_at(buf, start + offset)?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+    use std::path::Path;
+
+    use super::*;
+    use crate::crc::crc32_excluding;
+    use crate::io::SparseImage;
+
+    fn fixture(name: &str) -> Vec<SparseImage> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
+        (0..)
+            .map_while(|i| File::open(dir.join(format!("disk{i}.fixture"))).ok())
+            .map(|f| SparseImage::read_from(f).unwrap())
+            .collect()
+    }
+
+    /// Byte offset of the pool database of a member.
+    fn database_offset(disk: &SparseImage) -> u64 {
+        find_spaces_partition(disk).unwrap().unwrap().offset + POOL_DB_OFFSET
+    }
+
+    /// Offset of the first payload byte of the SDBB entry holding `(id,
+    /// fragment 0)`.
+    fn entry_of(disk: &SparseImage, id: u32) -> u64 {
+        let db = database_offset(disk);
+        (8..4096)
+            .map(|slot| db + slot * 0x40)
+            .find(|&at| {
+                let e = read_vec(disk, at, 0x10).unwrap();
+                &e[0..4] == b"SDBB" && e[8..12] == id.to_be_bytes() && e[12..14] == [0, 0]
+            })
+            .unwrap()
+            + 0x10
+    }
+
+    fn set_sequence(disk: &mut SparseImage, sequence: u64) {
+        let db = database_offset(disk);
+        let mut h = read_vec(disk, db, 0x200).unwrap();
+        h[0x40..0x48].copy_from_slice(&sequence.to_be_bytes());
+        let crc = crc32_excluding(&h, 0x0c);
+        h[0x0c..0x10].copy_from_slice(&crc.to_be_bytes());
+        disk.insert(db, &h);
+    }
+
+    fn pool_record_id(disks: &[SparseImage]) -> u32 {
+        let (_, records) = read_database(&disks[0], database_offset(&disks[0])).unwrap().unwrap();
+        records.iter().find(|r| r.kind == 1).unwrap().id
+    }
+
+    #[test]
+    fn reports_a_torn_copy_and_uses_the_majority() {
+        let mut disks = fixture("mirror3");
+        let pool = Pool::open(disks.clone()).unwrap();
+        let copies: Vec<usize> = pool
+            .members
+            .iter()
+            .filter(|m| m.db_sequence.is_some())
+            .map(|m| m.device)
+            .collect();
+        assert!(copies.len() >= 3, "{copies:?}");
+        let name = pool.name.clone();
+        // An interrupted update left another name in one copy of the pool
+        // record (same sequence number).
+        let victim = copies[0];
+        let at = entry_of(&disks[victim], pool_record_id(&disks)) + 0x1f;
+        let mut b = read_vec(&disks[victim], at, 1).unwrap();
+        b[0] ^= 0x20;
+        disks[victim].insert(at, &b);
+        let pool = Pool::open(disks).unwrap();
+        assert_eq!(pool.name, name);
+        assert!(
+            pool.warnings
+                .iter()
+                .any(|w| w.contains(&format!("[{victim}]")) && w.contains("torn")),
+            "{:?}",
+            pool.warnings
+        );
+    }
+
+    #[test]
+    fn falls_back_from_an_unusable_newer_copy() {
+        let mut disks = fixture("mirror3");
+        let pool = Pool::open(disks.clone()).unwrap();
+        let sequence = pool.database.sequence;
+        let victim = pool.members.iter().find(|m| m.db_sequence.is_some()).unwrap().device;
+        // A newer copy whose pool record lost its type: it cannot be used.
+        let at = entry_of(&disks[victim], pool_record_id(&disks));
+        disks[victim].insert(at, &[9]);
+        set_sequence(&mut disks[victim], sequence + 1);
+        let pool = Pool::open(disks).unwrap();
+        assert_eq!(pool.database.sequence, sequence);
+        assert!(
+            pool.warnings.iter().any(|w| w.contains("unusable")),
+            "{:?}",
+            pool.warnings
+        );
     }
 }

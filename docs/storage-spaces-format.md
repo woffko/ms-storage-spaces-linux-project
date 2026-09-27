@@ -72,6 +72,15 @@ Entry slot `i` (i >= 8) is at `i * entry_size`:
 Concatenated fragments form a record: `type:u8, version:u8, 2 bytes, length:u32`,
 then `length` bytes of body.
 
+Choosing a copy: members carry copies of the pool database, and the one
+with the highest sequence is current (**verified**: stale copies of `stale3`).
+SDBB entries carry no checksum, so a copy torn by an interrupted update can
+only be recognised by comparison. `spaces` groups identical copies, uses the
+newest version that decodes (the one most members hold when copies of one
+sequence differ) and reports the others: copies of the same sequence with
+different records as torn, newer copies that do not decode as unusable
+(unit tests on `mirror3` with one copy altered).
+
 ## Records
 
 ### Type 1: pool
@@ -299,8 +308,8 @@ recovered space.
 
 ## Open questions
 
-* SDBB entries carry no checksum of their own; how Windows detects torn
-  entries is unknown.
+* SDBB entries carry no checksum of their own; how Windows itself detects
+  torn entries is unknown (whether it compares copies like `spaces`).
 * Remaining record fields (provisioning type, sizes, disk attributes, tiers).
 * Per-space databases (type 7 record lists member disks).
 * SPACEDRT contents when regions are dirty; cache slot type 1; cache head/tail.

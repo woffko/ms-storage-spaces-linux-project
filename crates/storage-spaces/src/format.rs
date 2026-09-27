@@ -87,7 +87,7 @@ pub struct DbHeader {
 }
 
 /// A database record reassembled from its SDBB entries.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawRecord {
     pub id: u32,
     pub kind: u8,
