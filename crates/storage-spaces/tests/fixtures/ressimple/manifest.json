@@ -1,0 +1,145 @@
+﻿{
+    "name":  "ressimple",
+    "windows_build":  "10.0.26100.0",
+    "pattern":  true,
+    "pattern_size":  1610612736,
+    "pool":  {
+                 "name":  "ss-ressimple",
+                 "guid":  "30bfbc24-a2fd-4bd9-8c82-0fec87a10e3d",
+                 "version":  "Windows Server vNext",
+                 "version_number":  28,
+                 "size":  16070475776,
+                 "allocated":  4294967296,
+                 "logical_sector":  512,
+                 "physical_sector":  4096
+             },
+    "space":  {
+                  "name":  "ressimple",
+                  "guid":  "a1d7f01e-2939-4389-a413-008b69d6345f",
+                  "size":  1610612736,
+                  "footprint":  1610612736,
+                  "resiliency":  "Simple",
+                  "copies":  1,
+                  "redundancy":  0,
+                  "columns":  2,
+                  "interleave":  262144,
+                  "provisioning":  "Fixed",
+                  "logical_sector":  512,
+                  "physical_sector":  4096,
+                  "allocation_unit":  268435456,
+                  "groups":  1,
+                  "write_cache":  0,
+                  "read_cache":  0
+              },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "60022480915BC5ECC426B746B32521CF",
+                      "spaces_guid":  "cd10bc08-8de5-e5a3-61a1-931ed6cc2997",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "60022480B1081C7B2CC4DE852FCDCA75",
+                      "spaces_guid":  "3da42641-3d2c-534a-7ce1-0e392a5093b9",
+                      "size":  8589934592
+                  }
+              ],
+    "extents":  [
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "60022480915BC5ECC426B746B32521CF",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  1,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "60022480B1081C7B2CC4DE852FCDCA75",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  536870912,
+                        "physical_offset":  1610612736,
+                        "disk_unique_id":  "60022480B1081C7B2CC4DE852FCDCA75",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  1,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  536870912,
+                        "physical_offset":  1610612736,
+                        "disk_unique_id":  "60022480915BC5ECC426B746B32521CF",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  1073741824,
+                        "physical_offset":  1879048192,
+                        "disk_unique_id":  "60022480915BC5ECC426B746B32521CF",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  1,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  1073741824,
+                        "physical_offset":  1879048192,
+                        "disk_unique_id":  "60022480B1081C7B2CC4DE852FCDCA75",
+                        "status":  "Active"
+                    }
+                ],
+    "files":  [
+
+              ],
+    "extra_spaces":  [
+                         {
+                             "name":  "ressimple-mid",
+                             "guid":  "2e4d0f34-f56c-4341-81cc-8cc9c050f308",
+                             "size":  2147483648,
+                             "resiliency":  "Simple",
+                             "copies":  1,
+                             "redundancy":  0,
+                             "columns":  2,
+                             "interleave":  262144,
+                             "provisioning":  "Fixed",
+                             "allocation_unit":  1073741824,
+                             "pattern_size":  2147483648,
+                             "extents":  [
+                                             {
+                                                 "column":  0,
+                                                 "copy":  0,
+                                                 "size":  1073741824,
+                                                 "virtual_offset":  0,
+                                                 "physical_offset":  536870912,
+                                                 "disk_unique_id":  "60022480B1081C7B2CC4DE852FCDCA75",
+                                                 "status":  "Active"
+                                             },
+                                             {
+                                                 "column":  1,
+                                                 "copy":  0,
+                                                 "size":  1073741824,
+                                                 "virtual_offset":  0,
+                                                 "physical_offset":  536870912,
+                                                 "disk_unique_id":  "60022480915BC5ECC426B746B32521CF",
+                                                 "status":  "Active"
+                                             }
+                                         ]
+                         }
+                     ],
+    "tiers":  [
+
+              ]
+}

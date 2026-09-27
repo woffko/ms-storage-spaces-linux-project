@@ -2,12 +2,15 @@
 
 Read Microsoft Storage Spaces pools (and later ReFS volumes) on Linux, in Rust.
 
-Status: early development. Reading works for simple, mirror (2/3-way),
-single and dual parity spaces (including the local reconstruction code of
-11+ columns), storage tiers, fixed and thin provisioning, including data
-held in the per-space write-back cache and degraded pools with missing or
-failing disks. Spaces can be attached as read-only block devices. Writing
-and pool management are not supported yet.
+Status: read-only support for pools created by Windows 11 (24H2, pool
+version 28, and Insider builds, pool version 29). Reading works for simple,
+mirror (2/3-way), single and dual parity spaces (including the local
+reconstruction code of 11+ columns), storage tiers and mirror-accelerated
+parity, fixed and thin provisioning, pools with several spaces, including
+data held in the per-space write-back cache and degraded pools with missing
+or failing disks. Spaces can be attached as read-only block devices that
+appear at boot like ordinary disks. Writing and pool management are not
+supported yet.
 
 ## Usage
 
@@ -52,10 +55,13 @@ Everything is read-only; the tools never write to the pool members.
 * `docs/plan.md` - project plan (stages, milestones, exit criteria).
 * `docs/research.md` - prior art.
 * `tools/` - scripts that create test pools on a Windows VM and fetch them.
+* `fuzz/` - cargo-fuzz targets for the parsers (`cargo +nightly fuzz run <target>`).
+* `contrib/` - udev rule, systemd unit, man page, Debian and Arch packaging.
 
 ## Tests
 
-Unit tests run with `cargo test`. The corpus tests compare the parser with
+Unit and fixture tests run with `cargo test` (the fixtures are metadata and
+small data samples captured from Windows-created pools). The corpus tests compare the parser with
 Windows' view of pools created by `tools/gen-corpus.sh` and fetched into
 `testdata/pools/` by `tools/fetch-corpus.sh` (not in git); they are skipped when
 the corpus is absent.
