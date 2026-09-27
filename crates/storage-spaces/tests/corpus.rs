@@ -177,9 +177,13 @@ impl ReadAt for Flaky {
 
 #[test]
 fn reads_fail_over_when_a_disk_disappears() {
-    for name in [
+    let base = [
         "mirror2", "mirror3", "parity3", "parity4", "parity5", "dual7", "mapar", "lrc11", "lrc12",
-    ] {
+    ];
+    // The same configurations created by Windows 11 24H2.
+    let names = base.iter().flat_map(|n| [n.to_string(), format!("{n}_26100")]);
+    for name in names {
+        let name = name.as_str();
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/pools")
             .join(name);
@@ -219,7 +223,16 @@ fn reads_fail_over_when_a_disk_disappears() {
 
 #[test]
 fn dual_parity_survives_any_two_failed_disks() {
-    for name in ["dual7", "lrc11", "lrc12"] {
+    for name in [
+        "dual7",
+        "dual7_26100",
+        "lrc11",
+        "lrc12",
+        "lrc13",
+        "lrc14",
+        "lrc15",
+        "lrc16",
+    ] {
         survives_two_failed_disks(name);
     }
 }
