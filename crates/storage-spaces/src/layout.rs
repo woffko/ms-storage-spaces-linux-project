@@ -352,6 +352,19 @@ impl Layout {
         worst
     }
 
+    /// Bytes of the owner space the extents cover, up to the end of the
+    /// last row (the size of spaces whose record gives none).
+    pub fn mapped_size(&self) -> u64 {
+        let rows = self
+            .runs
+            .values()
+            .flatten()
+            .map(|r| r.first_row + r.rows)
+            .max()
+            .unwrap_or(0);
+        rows * SLAB_SIZE * self.data_columns
+    }
+
     /// All runs, keyed by (column, copy).
     pub fn runs(&self) -> &BTreeMap<(u64, u64), Vec<Run>> {
         &self.runs

@@ -80,3 +80,26 @@ fn corrupted_metadata_never_panics() {
         assert!(result.is_ok(), "panic in iteration {iteration} on {}", dir.display());
     }
 }
+
+/// Hidden containers whose parents form a cycle (found by fuzzing
+/// pool_open) must not make opening a space recurse without end.
+#[test]
+fn circular_hidden_spaces_do_not_recurse() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mirror2");
+    let disks: Vec<SparseImage> = (0..)
+        .map_while(|i| File::open(dir.join(format!("disk{i}.fixture"))).ok())
+        .map(|f| SparseImage::read_from(f).unwrap())
+        .collect();
+    let mut pool = Pool::open(disks).unwrap();
+    // The dirty region tracking container (role 6) and its child.
+    let container = pool
+        .spaces
+        .values()
+        .find(|s| s.info.role == storage_spaces::format::SpaceRole::Other(6))
+        .unwrap()
+        .id();
+    let child = pool.children(container).next().unwrap().id();
+    pool.spaces.get_mut(&container).unwrap().info.parent = Some(child);
+    let _ = pool.open_space(child);
+    let _ = pool.open_space(container);
+}

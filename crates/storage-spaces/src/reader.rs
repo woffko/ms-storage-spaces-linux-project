@@ -381,17 +381,7 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
         let mut base = Mapped::new(pool, space)?;
         let size = match space.info.size {
             Some(size) => size,
-            None => {
-                let rows = base
-                    .layout
-                    .runs()
-                    .values()
-                    .flatten()
-                    .map(|r| r.first_row + r.rows)
-                    .max()
-                    .unwrap_or(0);
-                rows * SLAB_SIZE * base.layout.data_columns
-            }
+            None => base.layout.mapped_size(),
         };
         let cache = Self::open_cache(pool, space)?;
         let mut tiers = pool
@@ -471,8 +461,16 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
             .filter(|c| c.info.role == SpaceRole::Other(0x06));
         for container in containers {
             if let Some(child) = pool.children(container.id()).find(|c| !c.extents.is_empty()) {
-                let reader = SpaceReader::new(pool, child.id(), OpenOptions::default())?;
-                return DirtyRegions::load(reader.size(), |off, buf| reader.read_exact_at(buf, off));
+                // Read through the child's own layout: opening it as a
+                // SpaceReader would look for tracking of its own, which
+                // corrupt metadata can make circular.
+                let mapped = Mapped::new(pool, child)?;
+                let base = mapped.layout.base;
+                let size = child
+                    .info
+                    .range
+                    .map_or_else(|| mapped.layout.mapped_size(), |(_, len)| len);
+                return DirtyRegions::load(size, |off, buf| mapped.read_exact(base + off, buf));
             }
         }
         Ok(None)
