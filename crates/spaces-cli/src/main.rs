@@ -174,6 +174,12 @@ enum Command {
         /// length (4 KiB to 1 MiB, 4 KiB aligned).
         #[arg(long)]
         random: Option<u64>,
+        /// Random reads from this many threads at once.
+        #[arg(long, default_value_t = 1, requires = "random")]
+        jobs: u64,
+        /// Read with O_DIRECT, bypassing the page cache.
+        #[arg(long)]
+        direct: bool,
     },
     /// Capture the metadata a test pool needs into small fixture files.
     #[command(hide = true)]
@@ -285,7 +291,9 @@ fn main() -> Result<()> {
             tag,
             length,
             random,
-        } => verify_pattern(&path, &tag, length, random),
+            jobs,
+            direct,
+        } => verify_pattern(&path, &tag, length, random, jobs, direct),
         Command::Fixture {
             pool_dir,
             output,
@@ -535,36 +543,80 @@ fn dm_table(pool: &Pool<File>, space: &Space, paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn verify_pattern(path: &PathBuf, tag: &str, length: Option<u64>, random: Option<u64>) -> Result<()> {
-    let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+fn verify_pattern(
+    path: &PathBuf,
+    tag: &str,
+    length: Option<u64>,
+    random: Option<u64>,
+    jobs: u64,
+    direct: bool,
+) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    if direct {
+        #[cfg(target_os = "linux")]
+        std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, 0o40000); // O_DIRECT
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
     let total = length.map_or_else(|| file.size(), Ok)?;
+    // O_DIRECT needs buffers aligned to the logical block size.
+    const ALIGN: usize = 4096;
+    let aligned = |len: usize| {
+        let v = vec![0u8; len + ALIGN];
+        let skip = v.as_ptr().align_offset(ALIGN);
+        (v, skip)
+    };
     if let Some(count) = random {
-        // xorshift64*, seeded from the clock; failures print the offset.
-        let mut state = std::time::SystemTime::now()
+        let jobs = jobs.max(1);
+        let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos() as u64
-            | 1;
-        let mut next = move || {
-            state ^= state >> 12;
-            state ^= state << 25;
-            state ^= state >> 27;
-            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
-        };
+            .as_nanos() as u64;
         let blocks = total / 4096;
-        let mut buf = vec![0u8; 1 << 20];
-        for _ in 0..count {
-            let len = ((next() % 256 + 1) * 4096).min(total) as usize;
-            let offset = (next() % (blocks - len as u64 / 4096 + 1)) * 4096;
-            file.read_exact_at(&mut buf[..len], offset)?;
-            if let Some(bad) = testpattern::verify(&buf[..len], offset, tag) {
-                bail!("pattern mismatch at offset {bad:#x}");
+        std::thread::scope(|scope| -> Result<()> {
+            let workers: Vec<_> = (0..jobs)
+                .map(|job| {
+                    let file = &file;
+                    scope.spawn(move || -> Result<()> {
+                        // xorshift64*, seeded from the clock; failures print the offset.
+                        let mut state = seed.wrapping_add(job.wrapping_mul(0x9E37_79B9_7F4A_7C15)) | 1;
+                        let mut next = move || {
+                            state ^= state >> 12;
+                            state ^= state << 25;
+                            state ^= state >> 27;
+                            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+                        };
+                        let (mut v, skip) = aligned(1 << 20);
+                        let buf = &mut v[skip..skip + (1 << 20)];
+                        for _ in 0..count.div_ceil(jobs) {
+                            let len = ((next() % 256 + 1) * 4096).min(total) as usize;
+                            let offset = (next() % (blocks - len as u64 / 4096 + 1)) * 4096;
+                            file.read_exact_at(&mut buf[..len], offset)?;
+                            if let Some(bad) = testpattern::verify(&buf[..len], offset, tag) {
+                                bail!("pattern mismatch at offset {bad:#x}");
+                            }
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+            for w in workers {
+                w.join().map_err(|_| anyhow::anyhow!("reader thread panicked"))??;
             }
-        }
-        println!("pattern OK for {count} random reads over {}", size(total));
+            Ok(())
+        })?;
+        println!(
+            "pattern OK for {} random reads ({jobs} thread(s){}) over {}",
+            count.div_ceil(jobs) * jobs,
+            if direct { ", O_DIRECT" } else { "" },
+            size(total)
+        );
         return Ok(());
     }
     const CHUNK: usize = 1 << 20;
-    let mut buf = vec![0u8; CHUNK];
+    let (mut v, skip) = aligned(CHUNK);
+    let buf = &mut v[skip..skip + CHUNK];
     let mut offset = 0;
     while offset < total {
         let n = CHUNK.min((total - offset) as usize);
