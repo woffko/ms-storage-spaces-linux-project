@@ -344,9 +344,10 @@ Progress (2026-09-27):
   makepkg in an Arch Linux bootstrap root (bwrap; package with binary, udev
   rule, unit with `/usr/bin/spaces`, man page, modules-load file, docs);
   `cargo install --locked --path crates/spaces-cli` installs `spaces`.
-* crates.io metadata (readme, keywords, categories; the library package
-  leaves out the test fixtures; both crate names are free). Pending: the
-  repository URL, release tag and publishing (need approval).
+* crates.io metadata (repository github.com/woffko/ms-storage-spaces-linux-project,
+  readme, keywords, categories; the library package leaves out the test
+  fixtures; both crate names are free). Pending: release tag, publishing and
+  pushing (need approval).
 
 
 1. Packaging: `cargo install`, Debian/Ubuntu and Arch packages, static

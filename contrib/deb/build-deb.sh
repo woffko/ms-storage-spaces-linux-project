@@ -31,6 +31,7 @@ Depends: dmsetup, systemd, udev
 Recommends: nbd-client
 Suggests: fuse3, ntfs-3g
 Section: admin
+Homepage: https://github.com/woffko/ms-storage-spaces-linux-project
 Priority: optional
 Description: read Microsoft Storage Spaces pools on Linux
  Assembles Windows 11 Storage Spaces pools from their member disks and
