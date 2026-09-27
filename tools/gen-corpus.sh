@@ -89,7 +89,7 @@ respar     -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -SizeMB 512 
 resthin    -DiskCount 2 -Resiliency Simple -Columns 2 -Provisioning Thin -SizeMB 1024 -ResizeMB 2048 -ExtraSpaces resthin-mid,Simple,512,2
 m4kn       -DiskCount 2 -Resiliency Mirror -DataCopies 2 -Columns 1 -SizeMB 1024 -AllocationUnitMB 256 -Member4Kn
 parity4kn  -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -SizeMB 1024 -AllocationUnitMB 256 -Member4Kn
-full       -DiskCount 2 -DiskSizeMB 4096 -Resiliency Simple -Columns 2 -AllocationUnitMB 256 -SizeMB 0
+full       -DiskCount 1 -Resiliency Simple -Columns 1 -AllocationUnitMB 256 -SizeMB 0
 lrc13      -DiskCount 13 -Resiliency Parity -Redundancy 2 -Columns 13 -InterleaveKB 64 -SizeMB 2048 -WriteCacheMB 0 -PatternMB 1024
 lrc14      -DiskCount 14 -Resiliency Parity -Redundancy 2 -Columns 14 -InterleaveKB 64 -SizeMB 2048 -WriteCacheMB 0 -PatternMB 1024
 lrc15      -DiskCount 15 -Resiliency Parity -Redundancy 2 -Columns 15 -InterleaveKB 64 -SizeMB 2048 -WriteCacheMB 0 -PatternMB 1024
