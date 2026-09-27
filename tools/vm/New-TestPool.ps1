@@ -21,6 +21,10 @@ Layout variations:
   -Member4Kn    member VHDX files with 4096-byte logical sectors (the logical
       sector size item of the VHDX metadata is set before attaching)
   -SizeMB 0     the main space takes all remaining capacity (a full pool)
+  -Ntfs         instead of the pattern, the main space gets a GPT with one NTFS
+      partition holding real files (System32 DLLs, -NtfsFilesMB in total) and
+      random files of awkward sizes; the manifest lists every file with its
+      SHA-256 ("files")
 #>
 param(
     [Parameter(Mandatory)] [string] $Name,
@@ -48,6 +52,8 @@ param(
     [int] $HoleMB = 0,
     [int] $ResizeMB = 0,
     [switch] $Member4Kn,
+    [switch] $Ntfs,
+    [int] $NtfsFilesMB = 512,
     [string] $Root = 'C:\sstest'
 )
 $ErrorActionPreference = 'Stop'
@@ -245,6 +251,7 @@ if ($HoleMB -gt 0) { Remove-VirtualDisk -FriendlyName "$Name-hole" -Confirm:$fal
 
 $vd = New-VirtualDisk @vdParams
 $disk = $vd | Get-Disk
+if ($Ntfs) { $NoPattern = [switch]$true }
 $patternSize = if ($NoPattern) { 0 } elseif ($PatternMB -gt 0) { [int64]$PatternMB * 1MB } else { $vd.Size }
 if ($patternSize -gt 0) { Write-Pattern $Name 0 $patternSize }
 if ($ResizeMB -gt 0) {
@@ -256,6 +263,42 @@ if ($ResizeMB -gt 0) {
         Write-Pattern $Name $patternSize $vd.Size
         $patternSize = $vd.Size
     }
+}
+
+$files = @()
+if ($Ntfs) {
+    if ($disk.IsOffline) { $disk | Set-Disk -IsOffline $false }
+    if ($disk.IsReadOnly) { $disk | Set-Disk -IsReadOnly $false }
+    Initialize-Disk -Number $disk.Number -PartitionStyle GPT
+    $part = New-Partition -DiskNumber $disk.Number -UseMaximumSize -AssignDriveLetter
+    Format-Volume -Partition $part -FileSystem NTFS -NewFileSystemLabel $Name -Confirm:$false | Out-Null
+    $root = "$($part.DriveLetter):\"
+    # Real files: System32 DLLs in name order up to the size limit.
+    New-Item -ItemType Directory "$root\system32" | Out-Null
+    $total = 0
+    foreach ($f in Get-ChildItem C:\Windows\System32 -Filter *.dll -File | Sort-Object Name) {
+        if ($total + $f.Length -gt [int64]$NtfsFilesMB * 1MB) { break }
+        Copy-Item $f.FullName "$root\system32\"
+        $total += $f.Length
+    }
+    # Random files around sector, cluster and extent boundaries, and an
+    # empty file; a nested directory with a long Unicode name.
+    $rng = New-Object Random 1234
+    $dirName = "random - $([char]0x0444)$([char]0x0430)$([char]0x0439)$([char]0x043b)$([char]0x044b)"
+    New-Item -ItemType Directory "$root\$dirName" | Out-Null
+    foreach ($size in 0, 1, 511, 512, 4095, 4096, 4097, 65537, 1048593, 16777259, 67108879) {
+        $b = New-Object byte[] $size
+        $rng.NextBytes($b)
+        [IO.File]::WriteAllBytes("$root\$dirName\file-$size.bin", $b)
+    }
+    Write-VolumeCache -DriveLetter $part.DriveLetter
+    $files = @(Get-ChildItem $root -Recurse -File | Where-Object { $_.FullName -notlike '*System Volume Information*' } | ForEach-Object {
+        [ordered]@{
+            path = $_.FullName.Substring($root.Length).Replace('\', '/'); size = $_.Length
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+        }
+    })
+    Remove-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber $part.PartitionNumber -AccessPath $root
 }
 
 $poolDisks = foreach ($f in $images) {
@@ -302,6 +345,7 @@ $manifest = [ordered]@{
     }
     disks = @($poolDisks)
     extents = @($extents)
+    files = @($files)
     extra_spaces = @($extra | ForEach-Object {
         $v = Get-VirtualDisk -FriendlyName $_.FriendlyName
         [ordered]@{

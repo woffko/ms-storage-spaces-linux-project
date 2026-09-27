@@ -42,10 +42,14 @@ fn is_complete_pool(dir: &Path) -> bool {
 
 /// The spaces of a manifest that hold the pattern: (name, pattern size).
 fn pattern_spaces(m: &Value) -> Vec<(String, Option<u64>)> {
-    let mut v = vec![(
-        m["space"]["name"].as_str().unwrap().to_string(),
-        m["pattern_size"].as_u64(),
-    )];
+    let mut v = Vec::new();
+    // NTFS pools hold files instead (checked on the Linux VM).
+    if m["pattern"] != false {
+        v.push((
+            m["space"]["name"].as_str().unwrap().to_string(),
+            m["pattern_size"].as_u64(),
+        ));
+    }
     for e in m["extra_spaces"].as_array().into_iter().flatten() {
         v.push((e["name"].as_str().unwrap().to_string(), e["pattern_size"].as_u64()));
     }
