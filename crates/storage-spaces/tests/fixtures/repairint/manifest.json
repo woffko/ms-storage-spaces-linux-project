@@ -1,0 +1,70 @@
+﻿{
+    "name":  "repairint",
+    "kind":  "diskstate",
+    "scenario":  "Interrupted",
+    "windows_build":  "10.0.26100.0",
+    "pattern":  true,
+    "pattern_size":  4294967296,
+    "pool":  {
+                 "name":  "ss-repairint",
+                 "guid":  "8974fc2b-f971-4227-9786-1c2c7a367ff9",
+                 "version":  "Windows Server vNext",
+                 "version_number":  28,
+                 "logical_sector":  512,
+                 "physical_sector":  4096
+             },
+    "space":  {
+                  "name":  "repairint",
+                  "guid":  "7c8fcbdf-d34d-4dd1-ae19-7a239e11c6a1",
+                  "size":  4294967296,
+                  "resiliency":  "Mirror",
+                  "copies":  2,
+                  "redundancy":  1,
+                  "columns":  1,
+                  "interleave":  262144,
+                  "provisioning":  "Fixed",
+                  "logical_sector":  512,
+                  "physical_sector":  4096,
+                  "allocation_unit":  1073741824,
+                  "state":  {
+                                "operational":  "OK",
+                                "health":  "Healthy",
+                                "manual_attach":  false,
+                                "read_only":  false
+                            }
+              },
+    "victim":  "60022480965B35CDC49B1B015B710398",
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "6002248046EB96E190DB3039BE10E8C8",
+                      "spaces_guid":  "cef95b91-ef45-da27-28c6-cdf9747e5fb0",
+                      "size":  8589934592,
+                      "usage":  "Auto-Select",
+                      "operational":  "OK",
+                      "health":  "Healthy"
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "60022480965B35CDC49B1B015B710398",
+                      "spaces_guid":  "7dee8d0d-6cc9-d600-0f4e-432f5133a4af",
+                      "size":  8589934592,
+                      "usage":  "Retired",
+                      "operational":  "OK",
+                      "health":  "Healthy"
+                  },
+                  {
+                      "image":  "disk2.vhdx",
+                      "unique_id":  "600224806AB699A831FDAA8C4A7E0FC8",
+                      "spaces_guid":  "35e33f1b-a1c5-203c-e1fb-5dde0bba85ac",
+                      "size":  8589934592,
+                      "usage":  "Auto-Select",
+                      "operational":  "OK",
+                      "health":  "Healthy"
+                  }
+              ],
+    "extents":  null,
+    "extra_spaces":  [
+
+                     ]
+}

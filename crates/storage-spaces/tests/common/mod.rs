@@ -73,6 +73,9 @@ fn check_space<D: ReadAt>(pool: &Pool<D>, m: &Value, s: &Value, extents: &Value,
     // With every disk present, compare with the health Windows reported.
     let condition = pool.open_space(space.id()).unwrap().condition();
     let expected = match s["state"]["health"].as_str() {
+        // Detached a few seconds into a repair: a copy is still being
+        // regenerated. The health in the manifest was taken just before.
+        _ if m["scenario"] == "Interrupted" => Condition::Degraded,
         Some("Warning") => Condition::Degraded,
         Some("Unhealthy") => Condition::Failed,
         _ => Condition::Healthy,
