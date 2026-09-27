@@ -345,6 +345,26 @@ mod tests {
     }
 
     #[test]
+    fn skips_the_initialisation_slot() {
+        // Slot 0 of mirror and parity caches, as Windows writes it: type 1,
+        // sequence 1, one 8-byte entry. Read as a mapping it would be invalid.
+        let mut init = vec![0u8; 0x1000];
+        init[0..8].copy_from_slice(SPSLOT_SIGNATURE);
+        init[8..24].copy_from_slice(&GUID);
+        init[0x18..0x1c].copy_from_slice(&1u32.to_le_bytes());
+        init[0x1c..0x20].copy_from_slice(&0x1000u32.to_le_bytes());
+        init[0x20..0x24].copy_from_slice(&1u32.to_le_bytes());
+        init[0x28..0x30].copy_from_slice(&1u64.to_le_bytes());
+        init[0x30..0x34].copy_from_slice(&1u32.to_le_bytes());
+        init[0x38..0x40].copy_from_slice(&[8, 0, 0, 0, 1, 0, 0, 0]);
+        let crc = crc32(&init);
+        init[0x24..0x28].copy_from_slice(&crc.to_le_bytes());
+        let i = index(&[init, slot(2, &[(CHUNK, 1)])]);
+        assert_eq!(i.cached_chunks(), 1);
+        assert_eq!(hit(&i, CHUNK), Some(0x10_0000 + CHUNK));
+    }
+
+    #[test]
     fn maps_chunks_and_honours_tombstones() {
         let i = index(&[slot(1, &[(0, 2), (CHUNK, 3)]), slot(2, &[(0, NO_BLOCK)])]);
         assert_eq!(hit(&i, 5), None);

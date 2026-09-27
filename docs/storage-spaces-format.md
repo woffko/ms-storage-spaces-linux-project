@@ -242,7 +242,7 @@ The cache space starts with a header:
 | 0x5c | 4 | number of chunks in the data area |
 
 Slots ("SPSLOT\0\0"): same GUID, size and CRC fields as the header, `u32 type`
-at 0x20 (0 = mapping; 1 seen on mirror caches, not decoded), `u64 sequence` at
+at 0x20 (0 = mapping, 1 = initialisation record, see below), `u64 sequence` at
 0x28, `u32 count` at 0x30, then `count` variable-length entries at 0x38:
 
 | Offset | Size | Field |
@@ -257,6 +257,20 @@ at 0x20 (0 = mapping; 1 seen on mirror caches, not decoded), `u64 sequence` at
 256 KiB units valid for 256 KiB or 512 KiB; the log had wrapped around its
 1024 slots.) Entries are ordered by slot sequence and then by position within
 the slot.
+
+Log order (**verified** as far as reads go: the newest-entry rule reproduces
+the pattern of every corpus pool, including fully wrapped logs in `parity4`
+and `lrc12`, and the content Windows showed after the crash experiments):
+nothing on disk marks a head or a tail. The header is written once (its
+sequence stays 1 while mapping slots reach thousands), so the current state
+is the newest entry per chunk and per cache block over all valid slots.
+Slot placement is not a plain ring: in `wc64` slots 0-61 hold sequences
+1-62 and slots 62-97 sequences 127-162, so the log restarted at slot 62 and
+the slots after 97 were cleared. Caches of mirror and parity spaces start
+with a type 1 slot in slot 0 (sequence 1, one 8-byte entry
+`08 00 00 00 01 00 00 00` in every pool seen: `mirrorthin`, `paritythin`,
+`crashmirror`, `crashparity`), written when the cache is initialised; their
+mapping slots start at sequence 2. It carries no mappings and is skipped.
 
 Data of owner offset `X` held in the cache is at cache offset
 `data_offset + chunk_index * chunk_size + (X % chunk_size)`.
@@ -312,7 +326,8 @@ recovered space.
   torn entries is unknown (whether it compares copies like `spaces`).
 * Remaining record fields (provisioning type, sizes, disk attributes, tiers).
 * Per-space databases (type 7 record lists member disks).
-* SPACEDRT contents when regions are dirty; cache slot type 1; cache head/tail.
+* SPACEDRT contents when regions are dirty; the meaning of the constant entry
+  of the cache's type 1 slot; why the cache log restarts mid-area.
 * Which side Windows trusts for an inconsistent parity stripe.
 * Group sizes of grouped dual parity for 13-16 columns (not generated yet;
   the rule above predicts them).
