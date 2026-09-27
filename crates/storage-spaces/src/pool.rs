@@ -315,12 +315,18 @@ impl<D: ReadAt> Pool<D> {
         let Some(member) = disk.member.map(|m| &self.members[m]) else {
             return Ok(None);
         };
-        let pos = DATA_AREA_OFFSET + slab * SLAB_SIZE;
-        if pos + SLAB_SIZE > member.partition.length {
+        let pos = slab
+            .checked_mul(SLAB_SIZE)
+            .and_then(|p| p.checked_add(DATA_AREA_OFFSET))
+            .filter(|p| {
+                p.checked_add(SLAB_SIZE)
+                    .is_some_and(|end| end <= member.partition.length)
+            });
+        let Some(pos) = pos else {
             return Err(format_err!(
                 "slab {slab} of disk {disk_id} lies beyond the partition end"
             ));
-        }
+        };
         Ok(Some((member.device, member.partition.offset + pos)))
     }
 

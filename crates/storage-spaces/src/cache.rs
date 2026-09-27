@@ -94,6 +94,9 @@ impl CacheHeader {
             || (h.slot_size as u64) * (h.slot_count as u64) > 64 << 20
             || h.chunk_size == 0
             || !h.chunk_size.is_multiple_of(4096)
+            // Keeps cache offsets far from overflowing (real caches: GiBs).
+            || h.data_offset > 1 << 56
+            || (h.chunk_size as u64) * (h.chunk_count as u64) > 1 << 56
         {
             return Err(format_err!("implausible cache geometry: {h:?}"));
         }
@@ -255,6 +258,31 @@ mod tests {
 
     const GUID: [u8; 16] = [7; 16];
     const CHUNK: u64 = 0x20000;
+
+    #[test]
+    fn rejects_implausible_geometry() {
+        let mut b = vec![0u8; CacheHeader::SIZE];
+        b[0..8].copy_from_slice(SPCACHE_SIGNATURE);
+        b[0x1c..0x20].copy_from_slice(&(CacheHeader::SIZE as u32).to_le_bytes());
+        b[0x38..0x3c].copy_from_slice(&0x1000u32.to_le_bytes());
+        b[0x3c..0x40].copy_from_slice(&0x400u32.to_le_bytes());
+        b[0x58..0x5c].copy_from_slice(&0x2_0000u32.to_le_bytes());
+        b[0x5c..0x60].copy_from_slice(&8u32.to_le_bytes());
+        let with = |at: usize, v: &[u8]| {
+            let mut h = b.clone();
+            h[at..at + v.len()].copy_from_slice(v);
+            if at == 0x58 {
+                h[0x5c..0x60].copy_from_slice(&u32::MAX.to_le_bytes()); // chunk count
+            }
+            let crc = crc32_excluding(&h, 0x24);
+            h[0x24..0x28].copy_from_slice(&crc.to_le_bytes());
+            CacheHeader::parse(&h)
+        };
+        assert!(with(0x50, &0x1000u64.to_le_bytes()).unwrap().is_some());
+        // Offsets near the end of the address space would overflow lookups.
+        assert!(with(0x50, &u64::MAX.to_le_bytes()).is_err());
+        assert!(with(0x58, &0xffff_f000u32.to_le_bytes()).is_err());
+    }
 
     fn header() -> CacheHeader {
         CacheHeader {

@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 use crate::error::{Error, Result, format_err};
 use crate::format::{ExtentRecord, Policy, Resiliency, SLAB_SIZE};
 
+/// Largest slab number or count accepted from extent records.
+const MAX_SLABS: u64 = 1 << 32;
+
 /// A run of consecutive physical slabs backing consecutive rows of one column copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Run {
@@ -71,7 +74,7 @@ impl Layout {
             Resiliency::Simple | Resiliency::Mirror => policy.columns,
             Resiliency::Parity if policy.groups > 1 => {
                 // One local parity unit per group and one global one.
-                if policy.redundancy != 2 || policy.columns < 2 * policy.groups + 1 {
+                if policy.redundancy != 2 || policy.groups > policy.columns / 2 {
                     return Err(Error::Unsupported(format!(
                         "parity with {} groups, {} columns and redundancy {}",
                         policy.groups, policy.columns, policy.redundancy
@@ -105,6 +108,19 @@ impl Layout {
             .unwrap_or(1)
             .max(policy.copies.max(1));
         for e in extents {
+            // Slab numbers beyond 2^32 (1 EiB) cannot be real; the limit keeps
+            // all offset arithmetic far from overflowing.
+            if [e.virtual_slab, e.slab_count, e.physical_slab]
+                .iter()
+                .any(|&n| n > MAX_SLABS)
+            {
+                return Err(format_err!(
+                    "extent with implausible slab numbers: virtual {}, count {}, physical {}",
+                    e.virtual_slab,
+                    e.slab_count,
+                    e.physical_slab
+                ));
+            }
             if e.column >= policy.columns || e.copy >= copies.max(policy.copies + 1) {
                 return Err(format_err!(
                     "extent column {} copy {} outside a {}x{} layout",
@@ -339,6 +355,31 @@ mod tests {
         // Stripe 1: P in 3, Q in 4, data units 5..9 in columns 5, 6, 0, 1, 2.
         let cols: Vec<u64> = (5..10).map(|u| l.locate(u * 0x10000).column).collect();
         assert_eq!(cols, [5, 6, 0, 1, 2]);
+    }
+
+    #[test]
+    fn rejects_implausible_values() {
+        let lrc = Policy {
+            resiliency: Resiliency::Parity,
+            redundancy: 2,
+            copies: 1,
+            groups: u64::MAX,
+            columns: 12,
+            interleave: 0x10000,
+        };
+        assert!(Layout::new(&lrc, &[]).is_err());
+        let e = ExtentRecord {
+            flags: 0,
+            stale_marker: 0xffff_ffff,
+            space_id: 1,
+            virtual_slab: 0,
+            column: 0,
+            copy: 0,
+            slab_count: u64::MAX,
+            disk_id: 1,
+            physical_slab: 0,
+        };
+        assert!(Layout::new(&policy(1, 0x10000), &[e]).is_err());
     }
 
     #[test]
