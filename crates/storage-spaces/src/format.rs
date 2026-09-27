@@ -197,8 +197,46 @@ pub struct PoolRecord {
 #[derive(Debug, Clone)]
 pub struct DiskRecord {
     pub id: u64,
+    pub usage: DiskUsage,
     pub guid: Guid,
     pub name: String,
+}
+
+/// How the pool uses a disk (`Usage` of `Get-PhysicalDisk`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskUsage {
+    AutoSelect,
+    ManualSelect,
+    HotSpare,
+    /// Data is being or has been moved off the disk.
+    Retired,
+    Journal,
+    Other(u64),
+}
+
+impl DiskUsage {
+    fn from_value(v: u64) -> Self {
+        match v {
+            1 => DiskUsage::AutoSelect,
+            2 => DiskUsage::ManualSelect,
+            3 => DiskUsage::HotSpare,
+            4 => DiskUsage::Retired,
+            5 => DiskUsage::Journal,
+            other => DiskUsage::Other(other),
+        }
+    }
+
+    /// The name `Get-PhysicalDisk` shows.
+    pub fn name(&self) -> String {
+        match self {
+            DiskUsage::AutoSelect => "Auto-Select".into(),
+            DiskUsage::ManualSelect => "Manual-Select".into(),
+            DiskUsage::HotSpare => "Hot Spare".into(),
+            DiskUsage::Retired => "Retired".into(),
+            DiskUsage::Journal => "Journal".into(),
+            DiskUsage::Other(v) => format!("usage {v}"),
+        }
+    }
 }
 
 /// Role of a space, from the byte preceding its size.
@@ -318,10 +356,10 @@ impl Record {
             1 => decode_pool(&mut c).map(Record::Pool).map_err(ctx),
             2 => {
                 let id = c.varint().map_err(ctx)?;
-                c.varint().map_err(ctx)?;
+                let usage = DiskUsage::from_value(c.varint().map_err(ctx)?);
                 let guid = c.guid().map_err(ctx)?;
                 let name = c.string().map_err(ctx)?;
-                Ok(Record::Disk(DiskRecord { id, guid, name }))
+                Ok(Record::Disk(DiskRecord { id, usage, guid, name }))
             }
             3 | 6 => decode_space(&mut c, raw.kind == 6, raw.version)
                 .map(Record::Space)

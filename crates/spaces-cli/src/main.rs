@@ -382,7 +382,13 @@ fn info(pool: &Pool<File>, all: bool) -> Result<()> {
             Some(m) => format!("device {}", pool.members[m].device),
             None => "MISSING".into(),
         };
-        println!("  {:>3}  {}  {:<32} {state}", d.id, d.guid, d.name);
+        println!(
+            "  {:>3}  {}  {:<20} {:<13} {state}",
+            d.id,
+            d.guid,
+            d.name,
+            d.usage.name()
+        );
     }
     println!("Spaces:");
     for s in pool.spaces.values().filter(|s| all || s.is_user()) {

@@ -48,6 +48,13 @@ pub fn check_metadata<D: ReadAt>(pool: &Pool<D>, m: &Value, dir: &Path) {
         Some(pool.physical_sector_size as u64),
         m["space"]["physical_sector"].as_u64()
     );
+    for d in m["disks"].as_array().unwrap() {
+        if let Some(usage) = d["usage"].as_str() {
+            let guid = d["spaces_guid"].as_str().unwrap();
+            let disk = pool.disks.values().find(|p| p.guid.to_string() == guid).unwrap();
+            assert_eq!(disk.usage.name(), usage, "{}: disk {guid}", dir.display());
+        }
+    }
     check_space(pool, m, &m["space"], &m["extents"], &m["tiers"], dir);
     for extra in m["extra_spaces"].as_array().into_iter().flatten() {
         check_space(pool, m, extra, &extra["extents"], &Value::Null, dir);

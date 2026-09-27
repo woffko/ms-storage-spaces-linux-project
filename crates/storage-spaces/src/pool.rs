@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use crate::error::{Error, Result, format_err};
 use crate::format::{
-    DATA_AREA_OFFSET, DbHeader, DiskHeader, DiskRecord, ExtentRecord, POOL_DB_OFFSET, PoolRecord, RawRecord, Record,
-    SLAB_SIZE, SpaceRecord, SpaceRole, read_database,
+    DATA_AREA_OFFSET, DbHeader, DiskHeader, DiskRecord, DiskUsage, ExtentRecord, POOL_DB_OFFSET, PoolRecord, RawRecord,
+    Record, SLAB_SIZE, SpaceRecord, SpaceRole, read_database,
 };
 use crate::gpt::{PartitionLocation, find_spaces_partition};
 use crate::guid::Guid;
@@ -27,6 +27,7 @@ pub struct Member {
 #[derive(Debug, Clone)]
 pub struct PhysicalDisk {
     pub id: u64,
+    pub usage: DiskUsage,
     pub guid: Guid,
     pub name: String,
     /// Index into [`Pool::members`] if the disk was supplied.
@@ -204,8 +205,15 @@ impl<D: ReadAt> Pool<D> {
                 ));
             }
         }
+        // Windows stops updating the copy on a retired disk.
+        let retired = |m: &Member| {
+            decoded
+                .disks
+                .iter()
+                .any(|d| d.guid == m.header.disk_guid && d.usage == DiskUsage::Retired)
+        };
         for m in &members {
-            if m.db_sequence.is_some_and(|s| s < database.sequence) {
+            if m.db_sequence.is_some_and(|s| s < database.sequence) && !retired(m) {
                 warnings.push(format!("device {}: stale pool database copy", m.device));
             }
         }
@@ -223,6 +231,7 @@ impl<D: ReadAt> Pool<D> {
                 d.id,
                 PhysicalDisk {
                     id: d.id,
+                    usage: d.usage,
                     guid: d.guid,
                     name: d.name,
                     member,

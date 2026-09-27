@@ -97,8 +97,16 @@ Block devices and loop devices for a space must use this sector size: a 4 KiB
 space keeps its GPT at byte 0x1000.
 
 ### Type 2: physical disk
-`vint id, vint, guid[16], name, ...` (then description, manufacturer, model,
-serial, sizes; not decoded).
+`vint id, vint usage, guid[16], name, ...` (then description, manufacturer,
+model, serial, sizes; not decoded). `usage` is the `Usage` of
+`Get-PhysicalDisk`: 1 Auto-Select, 2 Manual-Select, 3 Hot Spare, 4 Retired,
+5 Journal (**verified**: 1 and 4 in pool `retired`, 1 everywhere else).
+Windows stops updating the pool database copy on a retired disk, so its copy
+is older than the others; `spaces` does not report that as stale. A disk
+removed from the pool (`Remove-PhysicalDisk`) disappears from the database
+while its own header still names the pool; `spaces` reports such a device
+as not listed in the pool database. A disk of the database without a device
+at hand is missing.
 
 ### Types 3 (space) and 6 (child space)
 ```
