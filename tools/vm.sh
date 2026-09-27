@@ -16,7 +16,7 @@ set -euo pipefail
 host=${WIN_VM_HOST:-sshuser@10.0.77.97}
 ssh_opts=(-F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes
   -o StrictHostKeyChecking=yes -o HostKeyAlias="${WIN_VM_HOSTKEY_ALIAS:-${host#*@}}"
-  -o ConnectTimeout=5 -i "$HOME/.ssh/rustadmin_vm_ed25519")
+  -o ConnectTimeout=30 -i "$HOME/.ssh/rustadmin_vm_ed25519")
 
 run_ps() {
   # Errors are rendered as text and turn into a non-zero exit code.
