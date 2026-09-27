@@ -106,7 +106,7 @@ ntfslrc    -DiskCount 12 -Resiliency Parity -Redundancy 2 -Columns 12 -SizeMB 40
 ntfstier   -DiskCount 4 -SsdDisks 2 -Tiers SSD,Mirror,1024;HDD,Simple,3072,2 -Provisioning Fixed -Ntfs
 ntfsmapar  -DiskCount 5 -SsdDisks 2 -Tiers SSD,Mirror,1024;HDD,Parity,3072,3 -Provisioning Fixed -Ntfs
 # Batch 8: crashes with dirty write-back cache data (fetch-corpus.sh --crash)
-crashmirrorwc @New-CrashPool.ps1 -Resiliency Mirror -DataCopies 2 -DiskCount 3 -SizeMB 2048 -WriteCacheMB 256 -SmallWrites -CrashAfterSeconds 30
+crashmirrorwc @New-CrashPool.ps1 -Resiliency Mirror -DataCopies 2 -DiskCount 3 -SizeMB 2048 -WriteCacheMB 256 -SsdMedia -SmallWrites -CrashAfterSeconds 30
 crashparitywc @New-CrashPool.ps1 -Resiliency Parity -Redundancy 1 -Columns 3 -DiskCount 3 -SizeMB 2048 -WriteCacheMB 256 -SmallWrites -CrashAfterSeconds 30
 LIST
 exit $status

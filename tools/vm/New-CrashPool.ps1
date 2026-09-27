@@ -8,7 +8,8 @@ pool and records CRC-32 checksums of every MiB of the recovered space.
 -SmallWrites fills the space first and then crashes during random 4-64 KiB
 writes of pattern blocks tagged "<Name>-w", which the write-back cache
 absorbs (-WriteCacheMB sets its size): the crashed disks hold dirty cache
-data.
+data. Windows 11 24H2 gives mirror spaces a write-back cache only on SSD
+media: -SsdMedia marks the member disks as SSD.
 
 Output in C:\sstest\<Name>:
   crash\disk<N>.vhdx   the disks as they were at the crash
@@ -28,6 +29,7 @@ param(
     [int] $CrashAfterSeconds = 20,
     [int] $WriteCacheMB = -1,
     [switch] $SmallWrites,
+    [switch] $SsdMedia,
     [string] $Root = 'C:\sstest'
 )
 $ErrorActionPreference = 'Stop'
@@ -138,6 +140,7 @@ $physical = foreach ($f in $images) { Get-PhysicalDisk | Where-Object DeviceId -
 $subsystem = Get-StorageSubSystem | Where-Object FriendlyName -like 'Windows Storage*' | Select-Object -First 1
 $poolName = "ss-$Name"
 New-StoragePool -FriendlyName $poolName -StorageSubSystemUniqueId $subsystem.UniqueId -PhysicalDisks $physical | Out-Null
+if ($SsdMedia) { Get-StoragePool -FriendlyName $poolName | Get-PhysicalDisk | Set-PhysicalDisk -MediaType SSD }
 $vdParams = @{ StoragePoolFriendlyName = $poolName; FriendlyName = $Name; ResiliencySettingName = $Resiliency
     ProvisioningType = $Provisioning; Size = [int64]$SizeMB * 1MB }
 if ($DataCopies -gt 0) { $vdParams.NumberOfDataCopies = $DataCopies }
