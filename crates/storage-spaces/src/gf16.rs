@@ -56,7 +56,7 @@ pub fn mul_region_xor(e: u8, src: &[u8], dst: &mut [u8]) {
         *c = v;
         v = mul_x(v);
     }
-    for (s, d) in src.chunks_exact(CHUNK).zip(dst.chunks_exact_mut(CHUNK)) {
+    for (s, d) in src.as_chunks::<CHUNK>().0.iter().zip(dst.as_chunks_mut::<CHUNK>().0) {
         for (j, &col) in columns.iter().enumerate() {
             let input = &s[j * PACKET..(j + 1) * PACKET];
             for i in 0..4 {

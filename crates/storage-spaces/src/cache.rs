@@ -43,7 +43,7 @@ const STATE_FULL: u16 = 3;
 fn parse_runs(words: &[u8], chunk: u64) -> Result<Vec<(bool, u64)>> {
     let mut runs = Vec::new();
     let mut total = 0;
-    for w in words.chunks_exact(2).map(|w| u16::from_le_bytes([w[0], w[1]])) {
+    for w in words.as_chunks::<2>().0.iter().map(|&w| u16::from_le_bytes(w)) {
         if w == 0 {
             break;
         }

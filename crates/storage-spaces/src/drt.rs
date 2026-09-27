@@ -52,8 +52,10 @@ impl DirtyRegions {
                 continue; // torn copy
             }
             let entries = h[0x18..span]
-                .chunks_exact(8)
-                .map(|e| u64::from_le_bytes(e.try_into().unwrap()))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|&e| u64::from_le_bytes(e))
                 .collect();
             if best.as_ref().is_none_or(|(g, _)| generation > *g) {
                 best = Some((generation, entries));

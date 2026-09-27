@@ -114,7 +114,7 @@ impl ParityJournal {
                     3 => Consistency::All,
                     _ => {
                         let mut runs = Vec::new();
-                        for w in body.chunks_exact(2).map(|w| u16::from_le_bytes([w[0], w[1]])) {
+                        for w in body.as_chunks::<2>().0.iter().map(|&w| u16::from_le_bytes(w)) {
                             if w == 0 {
                                 break;
                             }

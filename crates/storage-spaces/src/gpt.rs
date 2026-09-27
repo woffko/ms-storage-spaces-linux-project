@@ -72,8 +72,10 @@ pub fn read_gpt<D: ReadAt + ?Sized>(dev: &D, sector: u64) -> Result<Option<Vec<P
             continue;
         }
         let name: Vec<u16> = entry[56..128]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| u16::from_le_bytes(c))
             .collect();
         parts.push(Partition {
             number: i as u32 + 1,

@@ -24,7 +24,7 @@ pub fn fill_block(block: &mut [u8], offset: u64, tag: &str) {
     let n = t.len().min(16);
     block[16..16 + n].copy_from_slice(&t[..n]);
     let mut state = offset;
-    for word in block[32..].chunks_exact_mut(8) {
+    for word in block[32..].as_chunks_mut::<8>().0 {
         word.copy_from_slice(&splitmix(&mut state).to_le_bytes());
     }
 }
@@ -33,10 +33,10 @@ pub fn fill_block(block: &mut [u8], offset: u64, tag: &str) {
 /// Returns the offset of the first mismatching block.
 pub fn verify(buf: &[u8], offset: u64, tag: &str) -> Option<u64> {
     let mut expected = [0u8; BLOCK];
-    for (i, block) in buf.chunks_exact(BLOCK).enumerate() {
+    for (i, block) in buf.as_chunks::<BLOCK>().0.iter().enumerate() {
         let at = offset + (i * BLOCK) as u64;
         fill_block(&mut expected, at, tag);
-        if block != expected {
+        if *block != expected {
             return Some(at);
         }
     }

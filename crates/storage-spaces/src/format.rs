@@ -650,8 +650,10 @@ impl<'a> Cursor<'a> {
         let units = self.u16()? as usize;
         let bytes = self.take(units * 2)?;
         let chars: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|p| u16::from_be_bytes([p[0], p[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&p| u16::from_be_bytes(p))
             .collect();
         let s = String::from_utf16_lossy(&chars);
         Ok(s.trim_end_matches('\0').to_string())
