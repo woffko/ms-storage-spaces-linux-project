@@ -18,7 +18,7 @@ while [[ ${1:-} == --* ]]; do
   shift
 done
 for name in "$@"; do
-  [[ $name =~ ^[a-z0-9]+$ ]] || { echo "bad name $name" >&2; exit 1; }
+  [[ $name =~ ^[a-z0-9_]+$ ]] || { echo "bad name $name" >&2; exit 1; }
   final=testdata/$kind/$name
   if [[ -e $final ]]; then echo "$final exists, skipping" >&2; continue; fi
   # Download into a temporary directory so tests never see a partial pool.

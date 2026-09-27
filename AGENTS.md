@@ -8,7 +8,8 @@
 
 ## Windows test VM
 
-- `tools/vm.sh` runs PowerShell on the test VM (192.168.189.129); `-f script.ps1 args` uploads and runs a
+- `tools/vm.sh` runs PowerShell on the test VM (DESKTOP-BQ2J4NS, `sshuser@10.0.77.97`; the older VM
+  192.168.189.129 via `WIN_VM_HOST`, see the script); `-f script.ps1 args` uploads and runs a
   script, `-get` copies a file back.
 - `tools/vm/New-TestPool.ps1` builds a pool on VHDX files in `C:\sstest\<name>`, fills the space with the
   verification pattern, writes `manifest.json` (Windows' view incl. `Get-PhysicalExtent`) and detaches it.

@@ -7,10 +7,15 @@
 #                                             output goes to C:\sstest\logs\LOG.log, and a
 #                                             final "EXIT <code>" line marks completion
 #   tools/vm.sh -get REMOTE_PATH LOCAL_PATH   copy a file from the VM
+#
+# The VM is DESKTOP-BQ2J4NS (Windows 11 24H2, sshuser@10.0.77.97, key login
+# as a member of Administrators). The previous VM DESKTOP-ELS4LDK (Insider
+# build 26340, which created the first corpus) is reached with
+# WIN_VM_HOST=root@192.168.189.129 WIN_VM_HOSTKEY_ALIAS=192.168.189.138.
 set -euo pipefail
-host=root@192.168.189.129
+host=${WIN_VM_HOST:-sshuser@10.0.77.97}
 ssh_opts=(-F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes
-  -o StrictHostKeyChecking=yes -o HostKeyAlias=192.168.189.138
+  -o StrictHostKeyChecking=yes -o HostKeyAlias="${WIN_VM_HOSTKEY_ALIAS:-${host#*@}}"
   -o ConnectTimeout=5 -i "$HOME/.ssh/rustadmin_vm_ed25519")
 
 run_ps() {

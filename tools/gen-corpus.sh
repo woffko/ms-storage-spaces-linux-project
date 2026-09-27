@@ -1,7 +1,9 @@
 #!/bin/bash
 # Generate Storage Spaces test pools on the Windows VM.
 # Usage: tools/gen-corpus.sh [name...]   (default: every pool in the list)
-# Each list line: name followed by New-TestPool.ps1 arguments.
+# Each list line: name followed by New-TestPool.ps1 arguments, or by
+# @Script.ps1 and that script's arguments. SUFFIX=_26100 appends a suffix to
+# the pool names (the same configurations created by another Windows build).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 wanted=" $* "
@@ -9,6 +11,12 @@ status=0
 while read -r name args; do
   [[ -z $name || $name == \#* ]] && continue
   [[ $# -gt 0 && $wanted != *" $name "* ]] && continue
+  script=tools/vm/New-TestPool.ps1
+  if [[ $args == @* ]]; then
+    script=tools/vm/${args%% *}; script=${script/@/}
+    [[ $args == *" "* ]] && args=${args#* } || args=
+  fi
+  name+=${SUFFIX:-}
   echo "=== $name"
   # The generator runs detached on the VM: heavy I/O there can stall the
   # guest network for a minute, which would kill an attached SSH session.
@@ -16,7 +24,7 @@ while read -r name args; do
   started=0
   for attempt in 1 2 3; do
     # shellcheck disable=SC2086
-    if tools/vm.sh -bg "gen-$name" tools/vm/New-TestPool.ps1 -Name "$name" $args </dev/null; then started=1; break; fi
+    if tools/vm.sh -bg "gen-$name" "$script" -Name "$name" $args </dev/null; then started=1; break; fi
     sleep 30
   done
   if ((!started)); then status=1; continue; fi
@@ -53,5 +61,15 @@ paritythin -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -Provisionin
 # Batch 3: storage tiers
 tiered     -DiskCount 4 -SsdDisks 2 -Tiers SSD,Mirror,1024;HDD,Simple,1024,2 -Provisioning Fixed
 mapar      -DiskCount 5 -SsdDisks 2 -Tiers SSD,Mirror,1024;HDD,Parity,2048,3 -Provisioning Fixed
+# Batch 4: dual parity codes; impulse pools go to testdata/impulse
+# (fetch-corpus.sh --impulse) and become fixtures under tests/data
+imp7b      @New-ImpulsePool.ps1 -Columns 7
+imp8       @New-ImpulsePool.ps1 -Columns 8 -Simple
+imp9       @New-ImpulsePool.ps1 -Columns 9 -Simple
+imp10      @New-ImpulsePool.ps1 -Columns 10 -Simple
+lrc11      -DiskCount 11 -Resiliency Parity -Redundancy 2 -Columns 11 -InterleaveKB 64 -SizeMB 2048 -WriteCacheMB 0 -PatternMB 1024
+lrc12      -DiskCount 12 -Resiliency Parity -Redundancy 2 -Columns 12 -InterleaveKB 64 -SizeMB 2304 -WriteCacheMB 0
+lrc12i     @New-ImpulsePool.ps1 -Columns 12 -DataColumns 9 -Simple -FlushMB 2048
+lrc17i     @New-ImpulsePool.ps1 -Columns 17 -DataColumns 13 -Simple -FlushMB 2048
 LIST
 exit $status

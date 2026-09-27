@@ -24,7 +24,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-if ($env:COMPUTERNAME -ne 'DESKTOP-ELS4LDK') { throw 'Unexpected machine' }
+if ($env:COMPUTERNAME -notin 'DESKTOP-BQ2J4NS', 'DESKTOP-ELS4LDK') { throw 'Unexpected machine' }
 
 # stripe -> list of (data unit index, byte offset in the unit, value).
 # -Simple: stripe 0 empty, then one stripe per data unit with byte 0 = 1.

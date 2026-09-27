@@ -37,7 +37,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-if ($env:COMPUTERNAME -ne 'DESKTOP-ELS4LDK') { throw 'Unexpected machine' }
+if ($env:COMPUTERNAME -notin 'DESKTOP-BQ2J4NS', 'DESKTOP-ELS4LDK') { throw 'Unexpected machine' }
 
 Add-Type -TypeDefinition @'
 using System;

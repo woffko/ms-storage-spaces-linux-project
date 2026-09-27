@@ -182,6 +182,10 @@ enum Command {
         pool_dir: PathBuf,
         #[arg(short, long)]
         output: PathBuf,
+        /// Leave out write-back cache slots (a full cache log is megabytes;
+        /// the fixture then describes an empty cache).
+        #[arg(long)]
+        without_cache_slots: bool,
     },
     /// Verify the test pattern written by tools/vm/New-TestPool.ps1.
     #[command(hide = true)]
@@ -282,7 +286,11 @@ fn main() -> Result<()> {
             length,
             random,
         } => verify_pattern(&path, &tag, length, random),
-        Command::Fixture { pool_dir, output } => fixture(&pool_dir, &output),
+        Command::Fixture {
+            pool_dir,
+            output,
+            without_cache_slots,
+        } => fixture(&pool_dir, &output, without_cache_slots),
         Command::CheckPattern { devices, space, length } => {
             let pool = open_pool(&devices)?;
             check_pattern(&pool, find_space(&pool, &space)?, length)
@@ -753,7 +761,7 @@ fn cmd_status() -> Result<()> {
     Ok(())
 }
 
-fn fixture(dir: &std::path::Path, out: &std::path::Path) -> Result<()> {
+fn fixture(dir: &std::path::Path, out: &std::path::Path, without_cache_slots: bool) -> Result<()> {
     use storage_spaces::io::{Recording, SparseImage};
     let mut paths = Vec::new();
     while dir.join(format!("disk{}.img", paths.len())).exists() {
@@ -776,7 +784,7 @@ fn fixture(dir: &std::path::Path, out: &std::path::Path) -> Result<()> {
             let mut buf = vec![0u8; len];
             dev.inner().read_exact_at(&mut buf, offset)?;
             for (k, page) in buf.chunks(4096).enumerate() {
-                if page.iter().any(|&b| b != 0) {
+                if page.iter().any(|&b| b != 0) && !(without_cache_slots && page.starts_with(b"SPSLOT")) {
                     image.insert(offset + (k * 4096) as u64, page);
                 }
             }
