@@ -1,0 +1,110 @@
+﻿{
+    "name":  "removed",
+    "kind":  "diskstate",
+    "scenario":  "Replaced",
+    "windows_build":  "10.0.26100.0",
+    "pattern":  true,
+    "pattern_size":  1073741824,
+    "pool":  {
+                 "name":  "ss-removed",
+                 "guid":  "5ca821fd-36ac-455b-8dec-5641c53d5fd8",
+                 "version":  "Windows Server vNext",
+                 "version_number":  28,
+                 "logical_sector":  512,
+                 "physical_sector":  4096
+             },
+    "space":  {
+                  "name":  "removed",
+                  "guid":  "f9e2270d-000f-4a4d-b646-0c52da96057f",
+                  "size":  1073741824,
+                  "resiliency":  "Mirror",
+                  "copies":  2,
+                  "redundancy":  1,
+                  "columns":  1,
+                  "interleave":  262144,
+                  "provisioning":  "Fixed",
+                  "logical_sector":  512,
+                  "physical_sector":  4096,
+                  "allocation_unit":  1073741824,
+                  "state":  {
+                                "operational":  "OK",
+                                "health":  "Healthy",
+                                "manual_attach":  false,
+                                "read_only":  false
+                            }
+              },
+    "victim":  "6002248023381DA2CAE07131C648A861",
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "6002248085134FDF58D1D021C48E2CB8",
+                      "spaces_guid":  "13c99848-9d48-3c9c-2b6c-c3b1f9a68a71",
+                      "size":  8589934592,
+                      "usage":  "Auto-Select",
+                      "media":  "Unspecified",
+                      "operational":  "OK",
+                      "health":  "Healthy"
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "6002248013EDC1EA3B97466723837568",
+                      "spaces_guid":  "36809249-6232-ab00-d5af-e44039b46ec9",
+                      "size":  8589934592,
+                      "usage":  "Auto-Select",
+                      "media":  "Unspecified",
+                      "operational":  "OK",
+                      "health":  "Healthy"
+                  },
+                  {
+                      "image":  "disk2.vhdx",
+                      "unique_id":  "6002248044A24314FD5E0CD590FC5EEE",
+                      "spaces_guid":  "dbdafca2-f9c9-c361-b255-f54ab351119e",
+                      "size":  8589934592,
+                      "usage":  "Auto-Select",
+                      "media":  "Unspecified",
+                      "operational":  "OK",
+                      "health":  "Healthy"
+                  }
+              ],
+    "extents":  [
+                    {
+                        "column":  0,
+                        "copy":  1,
+                        "size":  1073741824,
+                        "virtual_offset":  0,
+                        "physical_offset":  536870912,
+                        "disk_unique_id":  "6002248013EDC1EA3B97466723837568",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  2,
+                        "size":  1073741824,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "6002248044A24314FD5E0CD590FC5EEE",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "6002248085134FDF58D1D021C48E2CB8",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  0,
+                        "copy":  1,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "6002248013EDC1EA3B97466723837568",
+                        "status":  "Active"
+                    }
+                ],
+    "extra_spaces":  [
+
+                     ]
+}

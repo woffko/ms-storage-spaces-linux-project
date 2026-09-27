@@ -110,10 +110,11 @@ Auto-Select, 2 Manual-Select, 3 Hot Spare, 4 Journal, 5 Retired. `media`:
 each usage and media type, and `retired`; the metadata tests compare both
 with `Get-PhysicalDisk`.) Windows stops updating the pool database copy on a
 retired disk, so its copy is older than the others; `spaces` does not
-report that as stale. A disk removed from the pool (`Remove-PhysicalDisk`)
-disappears from the database while its own header still names the pool;
-`spaces` reports such a device as not listed in the pool database. A disk
-of the database without a device at hand is missing.
+report that as stale. `Remove-PhysicalDisk` deletes the disk's record and
+its Storage Spaces partition entry; the SPACEDB header and the old database
+stay on the disk unreferenced, so a removed disk is no member any more
+(**verified**: pool `removed`, image `removed0.img`). A disk of the
+database without a device at hand is missing.
 
 ### Types 3 (space) and 6 (child space)
 ```

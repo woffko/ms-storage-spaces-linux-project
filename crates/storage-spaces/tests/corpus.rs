@@ -278,3 +278,25 @@ fn survives_two_failed_disks(name: &str) {
         }
     }
 }
+
+/// A disk taken out of a pool with Remove-PhysicalDisk (pool removed, image
+/// removed0.img) keeps its old SPACEDB header and database, but its
+/// partition entry is gone, so it is no longer found as a member; the pool
+/// reads from the remaining disks.
+#[test]
+fn removed_disks_are_no_members() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/pools/removed");
+    let Ok(removed) = File::open(dir.join("removed0.img")) else {
+        return;
+    };
+    assert_eq!(storage_spaces::gpt::find_spaces_partition(&removed).unwrap(), None);
+    let m = manifest(&dir);
+    let pool = open(&dir, &m);
+    assert!(pool.warnings.is_empty(), "{:?}", pool.warnings);
+    let mut devices: Vec<File> = (0..m["disks"].as_array().unwrap().len())
+        .map(|i| File::open(dir.join(format!("disk{i}.img"))).unwrap())
+        .collect();
+    devices.push(removed);
+    let err = Pool::open(devices).err().expect("a removed disk is no member");
+    assert!(err.to_string().contains("no Storage Spaces partition"), "{err}");
+}
