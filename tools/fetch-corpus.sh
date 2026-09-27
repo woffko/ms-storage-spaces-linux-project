@@ -28,7 +28,9 @@ for name in "$@"; do
   n=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1],encoding="utf-8-sig"))["disks"]))' "$out/manifest.json")
   for ((i = 0; i < n; i++)); do
     tools/vm.sh -get "C:/sstest/$name/${src_sub}disk$i.vhdx" "$out/disk$i.vhdx"
-    qemu-img convert -f vhdx -O raw "$out/disk$i.vhdx" "$out/disk$i.img"
+    # qemu-img 8.2 cannot open VHDX files with 4 KiB logical sectors.
+    qemu-img convert -f vhdx -O raw "$out/disk$i.vhdx" "$out/disk$i.img" 2>/dev/null ||
+      tools/vhdx2raw.py "$out/disk$i.vhdx" "$out/disk$i.img" >/dev/null
     rm "$out/disk$i.vhdx"
   done
   mv "$out" "$final"
