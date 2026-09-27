@@ -98,6 +98,7 @@ lrc16      -DiskCount 16 -Resiliency Parity -Redundancy 2 -Columns 16 -Interleav
 retired    @New-DiskStatePool.ps1 -Scenario Retired
 repairint  @New-DiskStatePool.ps1 -Scenario Interrupted -SizeMB 4096
 replaced   @New-DiskStatePool.ps1 -Scenario Replaced
+removed    @New-DiskStatePool.ps1 -Scenario Replaced
 spstates   @New-DiskStatePool.ps1 -Scenario SpaceStates
 usages     @New-DiskStatePool.ps1 -Scenario Usages -DiskCount 5
 # Batch 7: NTFS with real files (tools/ntfs-check.sh on the Linux VM)
