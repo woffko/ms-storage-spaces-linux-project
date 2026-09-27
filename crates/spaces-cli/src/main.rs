@@ -188,8 +188,9 @@ enum Command {
         pool_dir: PathBuf,
         #[arg(short, long)]
         output: PathBuf,
-        /// Leave out write-back cache slots (a full cache log is megabytes;
-        /// the fixture then describes an empty cache).
+        /// Leave out the slots of write-back caches and parity journals (a
+        /// full log is megabytes; the fixture then describes an empty cache
+        /// and a clean journal).
         #[arg(long)]
         without_cache_slots: bool,
     },
