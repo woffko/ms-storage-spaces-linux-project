@@ -1,0 +1,70 @@
+﻿{
+    "name":  "simple2c_26100",
+    "windows_build":  "10.0.26100.0",
+    "pattern":  true,
+    "pattern_size":  2147483648,
+    "pool":  {
+                 "name":  "ss-simple2c_26100",
+                 "guid":  "cf69020e-84b0-42f3-9620-155722630e67",
+                 "version":  "Windows Server vNext",
+                 "size":  16070475776,
+                 "allocated":  2684354560,
+                 "logical_sector":  512,
+                 "physical_sector":  4096
+             },
+    "space":  {
+                  "name":  "simple2c_26100",
+                  "guid":  "a87dfe00-b545-4b30-aba4-2babd7dd332f",
+                  "size":  2147483648,
+                  "footprint":  2147483648,
+                  "resiliency":  "Simple",
+                  "copies":  1,
+                  "redundancy":  0,
+                  "columns":  2,
+                  "interleave":  65536,
+                  "provisioning":  "Fixed",
+                  "logical_sector":  512,
+                  "physical_sector":  4096,
+                  "allocation_unit":  1073741824,
+                  "groups":  1,
+                  "write_cache":  0,
+                  "read_cache":  0
+              },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "6002248035B0FECDD856941FBABD04FD",
+                      "spaces_guid":  "14549c7b-094d-e392-ad82-5d928361c97b",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "600224804CA696037BF1E48A4BE985C4",
+                      "spaces_guid":  "fd3cdebc-ddc8-820c-6f45-885ea6110998",
+                      "size":  8589934592
+                  }
+              ],
+    "extents":  [
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  1073741824,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "6002248035B0FECDD856941FBABD04FD",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  1,
+                        "copy":  0,
+                        "size":  1073741824,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "600224804CA696037BF1E48A4BE985C4",
+                        "status":  "Active"
+                    }
+                ],
+    "tiers":  [
+
+              ]
+}

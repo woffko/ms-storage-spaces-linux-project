@@ -1,0 +1,55 @@
+﻿{
+    "name":  "simple1c_26100",
+    "windows_build":  "10.0.26100.0",
+    "pattern":  true,
+    "pattern_size":  1073741824,
+    "pool":  {
+                 "name":  "ss-simple1c_26100",
+                 "guid":  "5902e135-0230-4250-ac7f-31096115ec69",
+                 "version":  "Windows Server vNext",
+                 "size":  8035237888,
+                 "allocated":  1342177280,
+                 "logical_sector":  512,
+                 "physical_sector":  4096
+             },
+    "space":  {
+                  "name":  "simple1c_26100",
+                  "guid":  "98405f81-748a-4d0d-970e-8456c866817a",
+                  "size":  1073741824,
+                  "footprint":  1073741824,
+                  "resiliency":  "Simple",
+                  "copies":  1,
+                  "redundancy":  0,
+                  "columns":  1,
+                  "interleave":  262144,
+                  "provisioning":  "Fixed",
+                  "logical_sector":  512,
+                  "physical_sector":  4096,
+                  "allocation_unit":  1073741824,
+                  "groups":  1,
+                  "write_cache":  0,
+                  "read_cache":  0
+              },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "600224800B540A274487FBDE00821F37",
+                      "spaces_guid":  "1b06ac5c-3182-05f3-908c-e4e9411261bc",
+                      "size":  8589934592
+                  }
+              ],
+    "extents":  [
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  1073741824,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "600224800B540A274487FBDE00821F37",
+                        "status":  "Active"
+                    }
+                ],
+    "tiers":  [
+
+              ]
+}
