@@ -5,6 +5,11 @@ the verification pattern is being written (a simulated power loss for this
 pool only), keeps a copy of that crashed state, then lets Windows recover the
 pool and records CRC-32 checksums of every MiB of the recovered space.
 
+-SmallWrites fills the space first and then crashes during random 4-64 KiB
+writes of pattern blocks tagged "<Name>-w", which the write-back cache
+absorbs (-WriteCacheMB sets its size): the crashed disks hold dirty cache
+data.
+
 Output in C:\sstest\<Name>:
   crash\disk<N>.vhdx   the disks as they were at the crash
   disk<N>.vhdx         the disks after Windows recovered the pool
@@ -21,6 +26,8 @@ param(
     [ValidateSet('Thin', 'Fixed')] [string] $Provisioning = 'Fixed',
     [int] $SizeMB = 2048,
     [int] $CrashAfterSeconds = 20,
+    [int] $WriteCacheMB = -1,
+    [switch] $SmallWrites,
     [string] $Root = 'C:\sstest'
 )
 $ErrorActionPreference = 'Stop'
@@ -57,6 +64,32 @@ public static class SsCrash {
                     }
                     fs.Position = pos;
                     fs.Write(buf, 0, chunk);
+                }
+            }
+        } catch (Exception) { /* the disks disappear under us */ }
+    }
+    public static void Block(byte[] buf, int b, ulong off, byte[] t) {
+        byte[] magic = System.Text.Encoding.ASCII.GetBytes("SSPATTRN");
+        Buffer.BlockCopy(magic, 0, buf, b, 8);
+        Buffer.BlockCopy(BitConverter.GetBytes(off), 0, buf, b + 8, 8);
+        Array.Clear(buf, b + 16, 16);
+        Buffer.BlockCopy(t, 0, buf, b + 16, Math.Min(t.Length, 16));
+        ulong s = off;
+        for (int i = 32; i < 4096; i += 8) Buffer.BlockCopy(BitConverter.GetBytes(SplitMix(ref s)), 0, buf, b + i, 8);
+    }
+    // Random 4-64 KiB writes of pattern blocks until the disks disappear.
+    public static void RandomWrites(string device, long size, string tag) {
+        byte[] t = System.Text.Encoding.ASCII.GetBytes(tag);
+        byte[] buf = new byte[64 << 10];
+        var rng = new Random(4242);
+        try {
+            using (var fs = new FileStream(device, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, 4096, FileOptions.WriteThrough)) {
+                while (true) {
+                    int blocks = rng.Next(1, 17);
+                    long pos = (long)(rng.NextDouble() * (size / 4096 - blocks)) * 4096;
+                    for (int b = 0; b < blocks; b++) Block(buf, b * 4096, (ulong)(pos + b * 4096), t);
+                    fs.Position = pos;
+                    fs.Write(buf, 0, blocks * 4096);
                 }
             }
         } catch (Exception) { /* the disks disappear under us */ }
@@ -110,6 +143,7 @@ $vdParams = @{ StoragePoolFriendlyName = $poolName; FriendlyName = $Name; Resili
 if ($DataCopies -gt 0) { $vdParams.NumberOfDataCopies = $DataCopies }
 if ($Redundancy -ge 0) { $vdParams.PhysicalDiskRedundancy = $Redundancy }
 if ($Columns -gt 0) { $vdParams.NumberOfColumns = $Columns }
+if ($WriteCacheMB -ge 0) { $vdParams.WriteCacheSize = [int64]$WriteCacheMB * 1MB }
 $vd = New-VirtualDisk @vdParams
 $disk = $vd | Get-Disk
 if ($disk.IsOffline) { $disk | Set-Disk -IsOffline $false }
@@ -120,7 +154,12 @@ $size = $vd.Size
 
 # Write in a separate runspace and pull the disks while it runs.
 $ps = [powershell]::Create()
-[void]$ps.AddScript({ param($d, $s, $t) [SsCrash]::Fill($d, $s, $t) }).AddArgument("\\.\PhysicalDrive$($disk.Number)").AddArgument($size).AddArgument($Name)
+if ($SmallWrites) {
+    [SsCrash]::Fill("\\.\PhysicalDrive$($disk.Number)", $size, $Name)
+    [void]$ps.AddScript({ param($d, $s, $t) [SsCrash]::RandomWrites($d, $s, $t) }).AddArgument("\\.\PhysicalDrive$($disk.Number)").AddArgument($size).AddArgument("$Name-w")
+} else {
+    [void]$ps.AddScript({ param($d, $s, $t) [SsCrash]::Fill($d, $s, $t) }).AddArgument("\\.\PhysicalDrive$($disk.Number)").AddArgument($size).AddArgument($Name)
+}
 $handle = $ps.BeginInvoke()
 Start-Sleep -Seconds $CrashAfterSeconds
 foreach ($f in $images) { Dismount-DiskImage -ImagePath $f | Out-Null }
@@ -152,6 +191,8 @@ $manifest = [ordered]@{
     kind = 'crash'
     windows_build = [Environment]::OSVersion.Version.ToString()
     crash_after_seconds = $CrashAfterSeconds
+    small_writes = [bool]$SmallWrites
+    write_cache = $vd.WriteCacheSize
     space = [ordered]@{ name = $Name; guid = $vdGuid; size = $size; resiliency = $vd.ResiliencySettingName
         status_after_recovery = "$($vd.OperationalStatus)"; health_after_recovery = "$($vd.HealthStatus)" }
     disks = @($poolDisks)
