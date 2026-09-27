@@ -51,7 +51,7 @@ Guiding rules for all stages:
 Evidence is recorded here as milestones advance; commands refer to the tools
 in this repository.
 
-### M1 (in progress)
+### M1 (exit criteria met, 2026-09-27)
 
 * Corpus of 16+ Windows-created pools (Windows 11 Insider 26340, pool version
   29): simple 1-3 columns, 2/3-way mirror, single parity 3-5 columns, dual
