@@ -9,6 +9,18 @@ Every 4096-byte block of the space at byte offset O contains:
   16..32  the tag (space name, ASCII, zero padded)
   32..4096 splitmix64 stream seeded with O, little-endian u64 words
 Run on the Windows test VM only.
+
+Layout variations:
+  -ExtraSpaces "name,resiliency,sizeMB[,columns];..."  more spaces in the pool,
+      each filled with the pattern tagged with its own name (manifest
+      "extra_spaces"); created before the main space, or after it with -ResizeMB
+  -HoleMB N     a temporary space of N MB is created first and deleted before
+      the main space, which then starts in the hole (fragmented allocation)
+  -ResizeMB N   the main space is extended to N MB after its pattern was
+      written, and the pattern is continued over the new part
+  -Member4Kn    member VHDX files with 4096-byte logical sectors (the logical
+      sector size item of the VHDX metadata is set before attaching)
+  -SizeMB 0     the main space takes all remaining capacity (a full pool)
 #>
 param(
     [Parameter(Mandatory)] [string] $Name,
@@ -32,6 +44,10 @@ param(
     [string] $Tiers = '',
     [switch] $NoPattern,
     [int] $PatternMB = 0,
+    [string] $ExtraSpaces = '',
+    [int] $HoleMB = 0,
+    [int] $ResizeMB = 0,
+    [switch] $Member4Kn,
     [string] $Root = 'C:\sstest'
 )
 $ErrorActionPreference = 'Stop'
@@ -62,10 +78,13 @@ public static class SsPattern {
         }
     }
     public static void Fill(string device, long size, string tag) { FillThrottled(device, size, tag, 0); }
+    public static void FillThrottled(string device, long size, string tag, long maxBytesPerSecond) {
+        FillRange(device, 0, size, tag, maxBytesPerSecond);
+    }
     // maxBytesPerSecond > 0 writes through at a steady rate, so that a slow
     // host disk never builds up a long backlog (long stalls of the VM's
     // virtual NVMe controller crash Windows with 0x124).
-    public static void FillThrottled(string device, long size, string tag, long maxBytesPerSecond) {
+    public static void FillRange(string device, long start, long end, string tag, long maxBytesPerSecond) {
         byte[] t = System.Text.Encoding.ASCII.GetBytes(tag);
         // 4 MiB writes are whole stripes for every layout we generate.
         const int chunk = 4 << 20;
@@ -73,17 +92,55 @@ public static class SsPattern {
         var options = maxBytesPerSecond > 0 ? FileOptions.WriteThrough : FileOptions.None;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         using (var fs = new FileStream(device, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, 4096, options)) {
-            for (long pos = 0; pos < size; pos += chunk) {
-                int n = (int)Math.Min(chunk, size - pos);
+            for (long pos = start; pos < end; pos += chunk) {
+                int n = (int)Math.Min(chunk, end - pos);
                 for (int b = 0; b < n; b += 4096) FillBlock(buf, b, (ulong)(pos + b), t);
                 fs.Position = pos;
                 fs.Write(buf, 0, n);
                 if (maxBytesPerSecond > 0) {
-                    long due = (pos + n) * 1000 / maxBytesPerSecond - clock.ElapsedMilliseconds;
+                    long due = (pos - start + n) * 1000 / maxBytesPerSecond - clock.ElapsedMilliseconds;
                     if (due > 0) System.Threading.Thread.Sleep((int)due);
                 }
             }
             fs.Flush(true);
+        }
+    }
+    // Sets the logical sector size item of a VHDX's metadata region (no
+    // checksum covers it) to 4096; the file must not be attached.
+    public static void SetLogicalSector4K(string path) {
+        Guid metadataRegion = new Guid("8B7CA206-4790-4B9A-B8FE-575F050F886E");
+        Guid logicalSector = new Guid("8141BF1D-A96F-4709-BA47-F233A8FAAB5F");
+        using (var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite)) {
+            var r = new BinaryReader(fs);
+            fs.Position = 0x30000;
+            if (new string(r.ReadChars(4)) != "regi") throw new Exception("no VHDX region table");
+            r.ReadUInt32();
+            uint regions = r.ReadUInt32();
+            r.ReadUInt32();
+            long metadata = -1;
+            for (uint i = 0; i < regions; i++) {
+                var id = new Guid(r.ReadBytes(16));
+                long offset = r.ReadInt64();
+                r.ReadUInt32(); r.ReadUInt32();
+                if (id == metadataRegion) metadata = offset;
+            }
+            if (metadata < 0) throw new Exception("no VHDX metadata region");
+            fs.Position = metadata;
+            if (new string(r.ReadChars(8)) != "metadata") throw new Exception("no VHDX metadata table");
+            r.ReadUInt16();
+            ushort entries = r.ReadUInt16();
+            fs.Position = metadata + 32;
+            for (int i = 0; i < entries; i++) {
+                var id = new Guid(r.ReadBytes(16));
+                uint offset = r.ReadUInt32();
+                r.ReadUInt32(); r.ReadUInt32(); r.ReadUInt32();
+                if (id == logicalSector) {
+                    fs.Position = metadata + offset;
+                    fs.Write(BitConverter.GetBytes(4096u), 0, 4);
+                    return;
+                }
+            }
+            throw new Exception("no logical sector size item");
         }
     }
 }
@@ -96,9 +153,12 @@ New-Item -ItemType Directory -Path $dir | Out-Null
 $images = @()
 for ($i = 0; $i -lt $DiskCount; $i++) {
     $f = Join-Path $dir ("disk{0}.vhdx" -f $i)
-    $script = "create vdisk file=`"$f`" maximum=$DiskSizeMB type=expandable`r`nselect vdisk file=`"$f`"`r`nattach vdisk`r`n"
     $scriptPath = Join-Path $dir 'diskpart.txt'
-    [IO.File]::WriteAllText($scriptPath, $script)
+    [IO.File]::WriteAllText($scriptPath, "create vdisk file=`"$f`" maximum=$DiskSizeMB type=expandable`r`n")
+    $out = diskpart /s $scriptPath
+    if ($LASTEXITCODE -ne 0) { throw "diskpart failed: $out" }
+    if ($Member4Kn) { [SsPattern]::SetLogicalSector4K($f) }
+    [IO.File]::WriteAllText($scriptPath, "select vdisk file=`"$f`"`r`nattach vdisk`r`n")
     $out = diskpart /s $scriptPath
     if ($LASTEXITCODE -ne 0) { throw "diskpart failed: $out" }
     $images += $f
@@ -142,7 +202,7 @@ if ($Tiers) {
     $vdParams.StorageTierSizes = $tierSizes
 } else {
     $vdParams.ResiliencySettingName = $Resiliency
-    $vdParams.Size = [int64]$SizeMB * 1MB
+    if ($SizeMB -gt 0) { $vdParams.Size = [int64]$SizeMB * 1MB } else { $vdParams.UseMaximumSize = $true }
 }
 if ($DataCopies -gt 0) { $vdParams.NumberOfDataCopies = $DataCopies }
 if ($Redundancy -ge 0) { $vdParams.PhysicalDiskRedundancy = $Redundancy }
@@ -150,14 +210,52 @@ if ($Columns -gt 0) { $vdParams.NumberOfColumns = $Columns }
 if ($InterleaveKB -gt 0) { $vdParams.Interleave = [int64]$InterleaveKB * 1KB }
 if ($AllocationUnitMB -gt 0) { $vdParams.AllocationUnitSize = [int64]$AllocationUnitMB * 1MB }
 if ($WriteCacheMB -ge 0) { $vdParams.WriteCacheSize = [int64]$WriteCacheMB * 1MB }
+function Write-Pattern($vdName, [int64]$start, [int64]$end) {
+    $d = Get-VirtualDisk -FriendlyName $vdName | Get-Disk
+    if ($d.IsOffline) { $d | Set-Disk -IsOffline $false }
+    if ($d.IsReadOnly) { $d | Set-Disk -IsReadOnly $false }
+    [SsPattern]::FillRange("\\.\PhysicalDrive$($d.Number)", $start, $end, $vdName, [int64]$ThrottleMBps * 1MB)
+}
+
+$extra = @()
+foreach ($spec in ($ExtraSpaces.Split(';') | Where-Object { $_ })) {
+    $f = $spec.Split(',')
+    $ep = @{
+        StoragePoolFriendlyName = $poolName; FriendlyName = $f[0]; ResiliencySettingName = $f[1]
+        Size = [int64]$f[2] * 1MB; ProvisioningType = 'Fixed'
+    }
+    if ($f.Count -gt 3) { $ep.NumberOfColumns = [int]$f[3] }
+    $extra += , $ep
+}
+function New-ExtraSpaces {
+    foreach ($ep in $extra) {
+        New-VirtualDisk @ep | Out-Null
+        if (-not $NoPattern) { Write-Pattern $ep.FriendlyName 0 (Get-VirtualDisk -FriendlyName $ep.FriendlyName).Size }
+    }
+}
+if ($HoleMB -gt 0) {
+    $hole = $vdParams.Clone()
+    $hole.FriendlyName = "$Name-hole"
+    $hole.Remove('UseMaximumSize')
+    $hole.Size = [int64]$HoleMB * 1MB
+    New-VirtualDisk @hole | Out-Null
+}
+if ($ResizeMB -le 0) { New-ExtraSpaces }
+if ($HoleMB -gt 0) { Remove-VirtualDisk -FriendlyName "$Name-hole" -Confirm:$false }
+
 $vd = New-VirtualDisk @vdParams
 $disk = $vd | Get-Disk
-
-if (-not $NoPattern) {
-    if ($disk.IsOffline) { $disk | Set-Disk -IsOffline $false }
-    if ($disk.IsReadOnly) { $disk | Set-Disk -IsReadOnly $false }
-    $patternSize = if ($PatternMB -gt 0) { [int64]$PatternMB * 1MB } else { $vd.Size }
-    [SsPattern]::FillThrottled("\\.\PhysicalDrive$($disk.Number)", $patternSize, $Name, [int64]$ThrottleMBps * 1MB)
+$patternSize = if ($NoPattern) { 0 } elseif ($PatternMB -gt 0) { [int64]$PatternMB * 1MB } else { $vd.Size }
+if ($patternSize -gt 0) { Write-Pattern $Name 0 $patternSize }
+if ($ResizeMB -gt 0) {
+    # Other spaces take the next slabs, so the extension lands elsewhere.
+    New-ExtraSpaces
+    $vd | Resize-VirtualDisk -Size ([int64]$ResizeMB * 1MB)
+    $vd = Get-VirtualDisk -FriendlyName $Name
+    if (-not $NoPattern -and $PatternMB -le 0) {
+        Write-Pattern $Name $patternSize $vd.Size
+        $patternSize = $vd.Size
+    }
 }
 
 $poolDisks = foreach ($f in $images) {
@@ -166,23 +264,29 @@ $poolDisks = foreach ($f in $images) {
     $guid = if ($pd.ObjectId -match 'PD:\{([0-9a-fA-F-]+)\}') { $Matches[1].ToLowerInvariant() } else { $null }
     [ordered]@{ image = Split-Path $f -Leaf; unique_id = $pd.UniqueId; spaces_guid = $guid; size = $pd.Size }
 }
-$vd = Get-VirtualDisk -FriendlyName $Name
-$extents = $vd | Get-PhysicalExtent | ForEach-Object {
-    [ordered]@{
-        column = $_.ColumnNumber; copy = $_.CopyNumber; size = $_.Size
-        virtual_offset = $_.VirtualDiskOffset; physical_offset = $_.PhysicalDiskOffset
-        disk_unique_id = $_.PhysicalDiskUniqueId; status = "$($_.OperationalStatus)"
-    }
+function Get-Extents($v) {
+    @($v | Get-PhysicalExtent | ForEach-Object {
+        [ordered]@{
+            column = $_.ColumnNumber; copy = $_.CopyNumber; size = $_.Size
+            virtual_offset = $_.VirtualDiskOffset; physical_offset = $_.PhysicalDiskOffset
+            disk_unique_id = $_.PhysicalDiskUniqueId; status = "$($_.OperationalStatus)"
+        }
+    })
 }
+function Get-Guid($v) {
+    # The ObjectId ends with "VD:{pool guid}{space guid}".
+    if ($v.ObjectId -match '\{([0-9a-fA-F-]+)\}"?$') { $Matches[1].ToLowerInvariant() } else { $null }
+}
+$vd = Get-VirtualDisk -FriendlyName $Name
+$extents = Get-Extents $vd
 $pool = Get-StoragePool -FriendlyName $poolName
-# The ObjectId ends with "VD:{pool guid}{space guid}".
-$vdGuid = if ($vd.ObjectId -match '\{([0-9a-fA-F-]+)\}"?$') { $Matches[1].ToLowerInvariant() } else { $null }
+$vdGuid = Get-Guid $vd
 $poolGuid = if ($pool.ObjectId -match 'SP:\{([0-9a-fA-F-]+)\}') { $Matches[1].ToLowerInvariant() } else { $null }
 $manifest = [ordered]@{
     name = $Name
     windows_build = [Environment]::OSVersion.Version.ToString()
     pattern = -not $NoPattern
-    pattern_size = if ($NoPattern) { 0 } elseif ($PatternMB -gt 0) { [int64]$PatternMB * 1MB } else { $vd.Size }
+    pattern_size = $patternSize
     pool = [ordered]@{
         name = $poolName; guid = $poolGuid; version = "$($pool.Version)"; version_number = [int]$pool.CimInstanceProperties['Version'].Value; size = $pool.Size; allocated = $pool.AllocatedSize
         logical_sector = $pool.LogicalSectorSize; physical_sector = $pool.PhysicalSectorSize
@@ -198,6 +302,18 @@ $manifest = [ordered]@{
     }
     disks = @($poolDisks)
     extents = @($extents)
+    extra_spaces = @($extra | ForEach-Object {
+        $v = Get-VirtualDisk -FriendlyName $_.FriendlyName
+        [ordered]@{
+            name = $v.FriendlyName; guid = Get-Guid $v; size = $v.Size
+            resiliency = $v.ResiliencySettingName; copies = $v.NumberOfDataCopies
+            redundancy = $v.PhysicalDiskRedundancy; columns = $v.NumberOfColumns
+            interleave = $v.Interleave; provisioning = "$($v.ProvisioningType)"
+            allocation_unit = $v.AllocationUnitSize
+            pattern_size = if ($NoPattern) { 0 } else { $v.Size }
+            extents = Get-Extents $v
+        }
+    })
     tiers = @($vd | Get-StorageTier -ErrorAction SilentlyContinue | ForEach-Object {
         [ordered]@{
             name = $_.FriendlyName; media = "$($_.MediaType)"; size = $_.Size

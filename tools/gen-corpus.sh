@@ -17,6 +17,8 @@ while read -r name args; do
     [[ $args == *" "* ]] && args=${args#* } || args=
   fi
   name+=${SUFFIX:-}
+  # THROTTLE=MBps paces the pattern writes of New-TestPool.ps1 (default 15).
+  [[ -n ${THROTTLE:-} && $script == */New-TestPool.ps1 ]] && args+=" -ThrottleMBps $THROTTLE"
   echo "=== $name"
   # The generator runs detached on the VM: heavy I/O there can stall the
   # guest network for a minute, which would kill an attached SSH session.
@@ -71,5 +73,26 @@ lrc11      -DiskCount 11 -Resiliency Parity -Redundancy 2 -Columns 11 -Interleav
 lrc12      -DiskCount 12 -Resiliency Parity -Redundancy 2 -Columns 12 -InterleaveKB 64 -SizeMB 2304 -WriteCacheMB 0
 lrc12i     @New-ImpulsePool.ps1 -Columns 12 -DataColumns 9 -Simple -FlushMB 2048
 lrc17i     @New-ImpulsePool.ps1 -Columns 17 -DataColumns 13 -Simple -FlushMB 2048
+# Batch 5 (2026-09-27, Windows 11 24H2): the rest of the configuration matrix
+il16k      -DiskCount 2 -Resiliency Simple -Columns 2 -InterleaveKB 16 -SizeMB 1024 -AllocationUnitMB 256
+il1m       -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -InterleaveKB 1024 -SizeMB 1024 -AllocationUnitMB 256
+simple4c   -DiskCount 4 -Resiliency Simple -Columns 4 -InterleaveKB 64 -SizeMB 1024 -AllocationUnitMB 256
+simple5c   -DiskCount 5 -Resiliency Simple -Columns 5 -InterleaveKB 64 -SizeMB 1280 -AllocationUnitMB 256
+simple6c   -DiskCount 6 -Resiliency Simple -Columns 6 -InterleaveKB 128 -SizeMB 1536 -AllocationUnitMB 256
+simple7c   -DiskCount 7 -Resiliency Simple -Columns 7 -InterleaveKB 64 -SizeMB 1792 -AllocationUnitMB 256
+simple8c   -DiskCount 8 -Resiliency Simple -Columns 8 -InterleaveKB 32 -SizeMB 2048 -AllocationUnitMB 256
+multi      -DiskCount 3 -Resiliency Mirror -DataCopies 2 -Columns 1 -SizeMB 1024 -AllocationUnitMB 256 -ExtraSpaces multi-s,Simple,768,3;multi-p,Parity,1024,3
+frag       -DiskCount 2 -Resiliency Simple -Columns 2 -SizeMB 1536 -AllocationUnitMB 256 -HoleMB 512 -ExtraSpaces frag-keep,Simple,512,2
+fragpar    -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -SizeMB 1536 -AllocationUnitMB 256 -HoleMB 512 -ExtraSpaces fragpar-keep,Simple,512,3
+ressimple  -DiskCount 2 -Resiliency Simple -Columns 2 -SizeMB 512 -AllocationUnitMB 256 -ResizeMB 1536 -ExtraSpaces ressimple-mid,Simple,512,2
+respar     -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -SizeMB 512 -AllocationUnitMB 256 -ResizeMB 1536 -ExtraSpaces respar-mid,Simple,512,3
+resthin    -DiskCount 2 -Resiliency Simple -Columns 2 -Provisioning Thin -SizeMB 1024 -ResizeMB 2048 -ExtraSpaces resthin-mid,Simple,512,2
+m4kn       -DiskCount 2 -Resiliency Mirror -DataCopies 2 -Columns 1 -SizeMB 1024 -AllocationUnitMB 256 -Member4Kn
+parity4kn  -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -SizeMB 1024 -AllocationUnitMB 256 -Member4Kn
+full       -DiskCount 2 -DiskSizeMB 2560 -Resiliency Simple -Columns 2 -AllocationUnitMB 256 -SizeMB 0
+lrc13      -DiskCount 13 -Resiliency Parity -Redundancy 2 -Columns 13 -InterleaveKB 64 -SizeMB 2048 -WriteCacheMB 0 -PatternMB 1024
+lrc14      -DiskCount 14 -Resiliency Parity -Redundancy 2 -Columns 14 -InterleaveKB 64 -SizeMB 2048 -WriteCacheMB 0 -PatternMB 1024
+lrc15      -DiskCount 15 -Resiliency Parity -Redundancy 2 -Columns 15 -InterleaveKB 64 -SizeMB 2048 -WriteCacheMB 0 -PatternMB 1024
+lrc16      -DiskCount 16 -Resiliency Parity -Redundancy 2 -Columns 16 -InterleaveKB 64 -SizeMB 2048 -WriteCacheMB 0 -PatternMB 1024
 LIST
 exit $status
