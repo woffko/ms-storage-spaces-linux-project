@@ -48,7 +48,15 @@ pub fn check_metadata<D: ReadAt>(pool: &Pool<D>, m: &Value, dir: &Path) {
         Some(pool.physical_sector_size as u64),
         m["space"]["physical_sector"].as_u64()
     );
-    let s = &m["space"];
+    check_space(pool, m, &m["space"], &m["extents"], &m["tiers"], dir);
+    for extra in m["extra_spaces"].as_array().into_iter().flatten() {
+        check_space(pool, m, extra, &extra["extents"], &Value::Null, dir);
+    }
+}
+
+/// Compares one space (`s`, with Windows' extent list and tiers) with the
+/// parsed pool.
+fn check_space<D: ReadAt>(pool: &Pool<D>, m: &Value, s: &Value, extents: &Value, tiers: &Value, dir: &Path) {
     let space = pool.find_space(s["name"].as_str().unwrap()).expect("space not found");
     // Manifests from the first generator version recorded the pool GUID here.
     if s["guid"] != m["pool"]["guid"] {
@@ -73,7 +81,7 @@ pub fn check_metadata<D: ReadAt>(pool: &Pool<D>, m: &Value, dir: &Path) {
     };
     if s["resiliency"].is_null() {
         // Tiered space: Windows reports the policy per tier.
-        for t in m["tiers"].as_array().into_iter().flatten() {
+        for t in tiers.as_array().into_iter().flatten() {
             let tier = family(pool, space)
                 .into_iter()
                 .find(|c| c.info.is_child && c.name().ends_with(t["name"].as_str().unwrap()))
@@ -105,7 +113,7 @@ pub fn check_metadata<D: ReadAt>(pool: &Pool<D>, m: &Value, dir: &Path) {
             .unwrap()
             .to_string()
     };
-    let expected: BTreeSet<_> = m["extents"]
+    let expected: BTreeSet<_> = extents
         .as_array()
         .unwrap()
         .iter()

@@ -5,6 +5,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+readme = "../../README.md"
+keywords = ["storage-spaces", "windows", "raid", "disk", "recovery"]
+categories = ["filesystem", "parser-implementations"]
+# The tests need fixtures captured from Windows-created pools (12+ MB).
+exclude = ["tests"]
 
 [dependencies]
 thiserror.workspace = true
