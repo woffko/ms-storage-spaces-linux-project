@@ -1,0 +1,56 @@
+[package]
+name = "storage-spaces-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "GPL-2.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+crc32fast = "1"
+storage-spaces = { path = "../crates/storage-spaces" }
+
+# Not a member of the main workspace (the targets need nightly).
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "record_decode"
+path = "fuzz_targets/record_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "database"
+path = "fuzz_targets/database.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cache_index"
+path = "fuzz_targets/cache_index.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parity_journal"
+path = "fuzz_targets/parity_journal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pool_open"
+path = "fuzz_targets/pool_open.rs"
+test = false
+doc = false
+bench = false

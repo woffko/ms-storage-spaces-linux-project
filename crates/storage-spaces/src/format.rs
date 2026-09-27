@@ -132,7 +132,8 @@ pub fn read_database<D: ReadAt + ?Sized>(dev: &D, offset: u64) -> Result<Option<
 }
 
 /// Groups SDBB entries by record id and concatenates their fragments.
-fn assemble_records(raw: &[u8], entry_size: usize) -> Result<Vec<RawRecord>> {
+/// `raw` is the whole database (SDBC header entries included).
+pub fn assemble_records(raw: &[u8], entry_size: usize) -> Result<Vec<RawRecord>> {
     // record id -> fragment index -> payload
     let mut fragments: BTreeMap<u32, (u16, BTreeMap<u16, &[u8]>)> = BTreeMap::new();
     for (slot, entry) in raw.chunks_exact(entry_size).enumerate().skip(8) {
