@@ -15,10 +15,13 @@ Scenarios:
                removed0.vhdx and is not part of the manifest)
   SpaceStates  besides the main space, a space set to manual attach and
                detached, and a space whose disk is read-only
+  Usages       five members; after the space is created one member is set to
+               Manual-Select, one to Hot Spare and one to Journal (if Windows
+               accepts it), one to SSD and one to HDD media
 #>
 param(
     [Parameter(Mandatory)] [string] $Name,
-    [ValidateSet('Retired', 'Interrupted', 'Replaced', 'SpaceStates')] [string] $Scenario = 'Retired',
+    [ValidateSet('Retired', 'Interrupted', 'Replaced', 'SpaceStates', 'Usages')] [string] $Scenario = 'Retired',
     [int] $DiskCount = 3,
     [int] $DiskSizeMB = 8192,
     [int] $SizeMB = 1024,
@@ -145,6 +148,14 @@ switch ($Scenario) {
         Wait-Repair
         Remove-PhysicalDisk -StoragePoolFriendlyName $poolName -PhysicalDisks $victim -Confirm:$false
     }
+    'Usages' {
+        $pds = @($images | ForEach-Object { Get-PhysicalDisk | Where-Object DeviceId -eq "$((Get-DiskImage -ImagePath $_).Number)" })
+        $pds[1] | Set-PhysicalDisk -Usage ManualSelect
+        $pds[2] | Set-PhysicalDisk -Usage HotSpare
+        try { $pds[3] | Set-PhysicalDisk -Usage Journal } catch { "Journal usage refused: $_" }
+        $pds[3] | Set-PhysicalDisk -MediaType SSD
+        $pds[4] | Set-PhysicalDisk -MediaType HDD
+    }
     'SpaceStates' {
         New-Space "$Name-ma" 512
         Set-VirtualDisk -FriendlyName "$Name-ma" -IsManualAttach $true
@@ -168,7 +179,8 @@ $disks = foreach ($f in $members) {
     $guid = if ($pd.ObjectId -match 'PD:\{([0-9a-fA-F-]+)\}') { $Matches[1].ToLowerInvariant() } else { $null }
     [ordered]@{
         image = Split-Path $f -Leaf; unique_id = $pd.UniqueId; spaces_guid = $guid; size = $pd.Size
-        usage = "$($pd.Usage)"; operational = "$($pd.OperationalStatus)"; health = "$($pd.HealthStatus)"
+        usage = "$($pd.Usage)"; media = "$($pd.MediaType)"
+        operational = "$($pd.OperationalStatus)"; health = "$($pd.HealthStatus)"
     }
 }
 $extents = if ($extentsKnown) { Get-Extents $vd } else { $null }

@@ -384,11 +384,11 @@ fn info(pool: &Pool<File>, all: bool) -> Result<()> {
             None => "MISSING".into(),
         };
         println!(
-            "  {:>3}  {}  {:<20} {:<13} {state}",
+            "  {:>3}  {}  {:<13} {:<11} {state}",
             d.id,
             d.guid,
-            d.name,
-            d.usage.name()
+            d.usage.name(),
+            d.media.name()
         );
     }
     println!("Spaces:");

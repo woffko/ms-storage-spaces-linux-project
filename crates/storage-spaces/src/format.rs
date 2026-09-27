@@ -197,9 +197,42 @@ pub struct PoolRecord {
 #[derive(Debug, Clone)]
 pub struct DiskRecord {
     pub id: u64,
-    pub usage: DiskUsage,
+    /// Database sequence at which the record was last written.
+    pub sequence: u64,
     pub guid: Guid,
     pub name: String,
+    pub usage: DiskUsage,
+    pub media: MediaType,
+}
+
+/// Media type of a disk (`MediaType` of `Get-PhysicalDisk`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaType {
+    Unspecified,
+    Hdd,
+    Ssd,
+    Other(u8),
+}
+
+impl MediaType {
+    fn from_byte(b: u8) -> Self {
+        match b {
+            0 => MediaType::Unspecified,
+            1 => MediaType::Hdd,
+            2 => MediaType::Ssd,
+            other => MediaType::Other(other),
+        }
+    }
+
+    /// The name `Get-PhysicalDisk` shows.
+    pub fn name(&self) -> String {
+        match self {
+            MediaType::Unspecified => "Unspecified".into(),
+            MediaType::Hdd => "HDD".into(),
+            MediaType::Ssd => "SSD".into(),
+            MediaType::Other(v) => format!("media {v}"),
+        }
+    }
 }
 
 /// How the pool uses a disk (`Usage` of `Get-PhysicalDisk`).
@@ -215,14 +248,15 @@ pub enum DiskUsage {
 }
 
 impl DiskUsage {
-    fn from_value(v: u64) -> Self {
+    /// The record's own numbering differs from the one of the cmdlets.
+    fn from_byte(v: u8) -> Self {
         match v {
             1 => DiskUsage::AutoSelect,
             2 => DiskUsage::ManualSelect,
             3 => DiskUsage::HotSpare,
-            4 => DiskUsage::Retired,
-            5 => DiskUsage::Journal,
-            other => DiskUsage::Other(other),
+            4 => DiskUsage::Journal,
+            5 => DiskUsage::Retired,
+            other => DiskUsage::Other(other as u64),
         }
     }
 
@@ -354,13 +388,7 @@ impl Record {
         let mut c = Cursor::new(&raw.body);
         match raw.kind {
             1 => decode_pool(&mut c).map(Record::Pool).map_err(ctx),
-            2 => {
-                let id = c.varint().map_err(ctx)?;
-                let usage = DiskUsage::from_value(c.varint().map_err(ctx)?);
-                let guid = c.guid().map_err(ctx)?;
-                let name = c.string().map_err(ctx)?;
-                Ok(Record::Disk(DiskRecord { id, usage, guid, name }))
-            }
+            2 => decode_disk(&mut c).map(Record::Disk).map_err(ctx),
             3 | 6 => decode_space(&mut c, raw.kind == 6, raw.version)
                 .map(Record::Space)
                 .map_err(ctx),
@@ -368,6 +396,32 @@ impl Record {
             kind => Ok(Record::Other { kind }),
         }
     }
+}
+
+fn decode_disk(c: &mut Cursor) -> Result<DiskRecord> {
+    let id = c.varint()?;
+    let sequence = c.varint()?;
+    let guid = c.guid()?;
+    let name = c.string()?;
+    let _description = c.string()?;
+    c.u8()?;
+    // 2, or 0 on a retired disk.
+    c.u8()?;
+    let usage = DiskUsage::from_byte(c.u8()?);
+    // Manufacturer, model and two more strings (empty on virtual disks).
+    for _ in 0..4 {
+        c.string()?;
+    }
+    c.u8()?;
+    let media = MediaType::from_byte(c.u8()?);
+    Ok(DiskRecord {
+        id,
+        sequence,
+        guid,
+        name,
+        usage,
+        media,
+    })
 }
 
 fn decode_pool(c: &mut Cursor) -> Result<PoolRecord> {
@@ -490,9 +544,14 @@ fn decode_space(c: &mut Cursor, is_child: bool, record_version: u8) -> Result<Sp
         }
         Some(parent)
     } else {
-        for _ in 0..6 {
+        for _ in 0..4 {
             c.varint()?;
         }
+        // A security descriptor with a one-byte length, usually empty
+        // (Windows 11 24H2 stored one after Resize-VirtualDisk).
+        let len = c.u8()? as usize;
+        c.skip(len)?;
+        c.varint()?;
         Some(c.varint()?)
     };
     Ok(SpaceRecord {

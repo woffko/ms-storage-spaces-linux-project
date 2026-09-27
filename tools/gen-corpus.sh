@@ -99,6 +99,7 @@ retired    @New-DiskStatePool.ps1 -Scenario Retired
 repairint  @New-DiskStatePool.ps1 -Scenario Interrupted -SizeMB 4096
 replaced   @New-DiskStatePool.ps1 -Scenario Replaced
 spstates   @New-DiskStatePool.ps1 -Scenario SpaceStates
+usages     @New-DiskStatePool.ps1 -Scenario Usages -DiskCount 5
 # Batch 7: NTFS with real files (tools/ntfs-check.sh on the Linux VM)
 ntfsparity -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -SizeMB 4096 -Ntfs
 ntfsdual   -DiskCount 7 -Resiliency Parity -Redundancy 2 -Columns 7 -SizeMB 4096 -Ntfs

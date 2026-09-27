@@ -97,16 +97,23 @@ Block devices and loop devices for a space must use this sector size: a 4 KiB
 space keeps its GPT at byte 0x1000.
 
 ### Type 2: physical disk
-`vint id, vint usage, guid[16], name, ...` (then description, manufacturer,
-model, serial, sizes; not decoded). `usage` is the `Usage` of
-`Get-PhysicalDisk`: 1 Auto-Select, 2 Manual-Select, 3 Hot Spare, 4 Retired,
-5 Journal (**verified**: 1 and 4 in pool `retired`, 1 everywhere else).
-Windows stops updating the pool database copy on a retired disk, so its copy
-is older than the others; `spaces` does not report that as stale. A disk
-removed from the pool (`Remove-PhysicalDisk`) disappears from the database
-while its own header still names the pool; `spaces` reports such a device
-as not listed in the pool database. A disk of the database without a device
-at hand is missing.
+```
+vint id, vint sequence, guid[16], name, description,
+u8, u8 (2; 0 on a retired disk), u8 usage,
+manufacturer, model, string, string, u8 (0x0f), u8 media, ...
+```
+`sequence` is the database sequence at which the record was last written
+(disks whose media type was set one after the other carry consecutive
+numbers). `usage` counts differently from `Get-PhysicalDisk`: 1
+Auto-Select, 2 Manual-Select, 3 Hot Spare, 4 Journal, 5 Retired. `media`:
+0 unspecified, 1 HDD, 2 SSD. (**verified**: pools `usages`, one disk of
+each usage and media type, and `retired`; the metadata tests compare both
+with `Get-PhysicalDisk`.) Windows stops updating the pool database copy on a
+retired disk, so its copy is older than the others; `spaces` does not
+report that as stale. A disk removed from the pool (`Remove-PhysicalDisk`)
+disappears from the database while its own header still names the pool;
+`spaces` reports such a device as not listed in the pool database. A disk
+of the database without a device at hand is missing.
 
 ### Types 3 (space) and 6 (child space)
 ```
@@ -124,10 +131,13 @@ vint copies
 vint groups
 vint columns       (0xffffffff on tier templates: chosen by Windows)
 u8 log2(interleave)
-type 3: vint, vint x4, vint (=1), vint parent, ...
+type 3: vint x4, u8 n + n bytes (security descriptor, usually n = 0),
+        vint (=1), vint parent, ...
 type 6: vint, vint parent, ...
 ```
-(**verified**: every corpus pool; provisioning and allocation unit equal
+(**verified**: every corpus pool; `ressimple`, extended with
+`Resize-VirtualDisk`, carries a 120-byte self-relative security descriptor
+in its tail; provisioning and allocation unit equal
 `Get-VirtualDisk` in the metadata tests.) The record version (byte 1 of the
 record) selects the prefix: Insider build 26340 writes pool version 29 with
 space records of version 17, Windows 11 24H2 (build 26100) pool version 28

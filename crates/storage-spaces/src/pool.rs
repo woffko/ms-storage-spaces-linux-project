@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use crate::error::{Error, Result, format_err};
 use crate::format::{
-    DATA_AREA_OFFSET, DbHeader, DiskHeader, DiskRecord, DiskUsage, ExtentRecord, POOL_DB_OFFSET, PoolRecord, RawRecord,
-    Record, SLAB_SIZE, SpaceRecord, SpaceRole, read_database,
+    DATA_AREA_OFFSET, DbHeader, DiskHeader, DiskRecord, DiskUsage, ExtentRecord, MediaType, POOL_DB_OFFSET, PoolRecord,
+    RawRecord, Record, SLAB_SIZE, SpaceRecord, SpaceRole, read_database,
 };
 use crate::gpt::{PartitionLocation, find_spaces_partition};
 use crate::guid::Guid;
@@ -28,6 +28,7 @@ pub struct Member {
 pub struct PhysicalDisk {
     pub id: u64,
     pub usage: DiskUsage,
+    pub media: MediaType,
     pub guid: Guid,
     pub name: String,
     /// Index into [`Pool::members`] if the disk was supplied.
@@ -232,6 +233,7 @@ impl<D: ReadAt> Pool<D> {
                 PhysicalDisk {
                     id: d.id,
                     usage: d.usage,
+                    media: d.media,
                     guid: d.guid,
                     name: d.name,
                     member,
