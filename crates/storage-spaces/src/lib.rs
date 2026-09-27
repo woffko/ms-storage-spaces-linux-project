@@ -32,5 +32,6 @@ pub mod testpattern;
 
 pub use error::{Error, Result};
 pub use guid::Guid;
+pub use layout::Condition;
 pub use pool::{Member, PhysicalDisk, Pool, Space};
 pub use reader::{OpenOptions, SpaceReader, SpaceStream, UncleanParity};

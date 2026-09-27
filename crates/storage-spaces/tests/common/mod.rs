@@ -9,7 +9,7 @@ use std::path::Path;
 use serde_json::Value;
 use storage_spaces::format::{Provisioning, Resiliency, SLAB_SIZE};
 use storage_spaces::io::ReadAt;
-use storage_spaces::{Pool, Space};
+use storage_spaces::{Condition, Pool, Space};
 
 pub fn manifest(dir: &Path) -> Value {
     let text = fs::read_to_string(dir.join("manifest.json")).unwrap();
@@ -58,6 +58,14 @@ pub fn check_metadata<D: ReadAt>(pool: &Pool<D>, m: &Value, dir: &Path) {
 /// parsed pool.
 fn check_space<D: ReadAt>(pool: &Pool<D>, m: &Value, s: &Value, extents: &Value, tiers: &Value, dir: &Path) {
     let space = pool.find_space(s["name"].as_str().unwrap()).expect("space not found");
+    // With every disk present, compare with the health Windows reported.
+    let condition = pool.open_space(space.id()).unwrap().condition();
+    let expected = match s["state"]["health"].as_str() {
+        Some("Warning") => Condition::Degraded,
+        Some("Unhealthy") => Condition::Failed,
+        _ => Condition::Healthy,
+    };
+    assert_eq!(condition, expected, "{}: {}", dir.display(), space.name());
     // Manifests from the first generator version recorded the pool GUID here.
     if s["guid"] != m["pool"]["guid"] {
         assert_eq!(space.info.guid.to_string(), s["guid"].as_str().unwrap());

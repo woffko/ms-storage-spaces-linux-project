@@ -8,7 +8,7 @@ use crate::format::{Resiliency, SLAB_SIZE, SpaceRole};
 use crate::gf16;
 use crate::io::ReadAt;
 use crate::journal::ParityJournal;
-use crate::layout::{Layout, Location};
+use crate::layout::{Condition, Layout, Location};
 use crate::pool::{Pool, Space};
 use std::sync::Arc;
 
@@ -375,6 +375,20 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
     /// Size of the space in bytes.
     pub fn size(&self) -> u64 {
         self.size
+    }
+
+    /// Redundancy state of the space (its tiers and cache included) with
+    /// the disks at hand; see [`Condition`].
+    pub fn condition(&self) -> Condition {
+        let pool = self.base.pool;
+        let present = |disk: u64| pool.disks.get(&disk).is_some_and(|d| d.member.is_some());
+        let mut all: Vec<&Mapped<'p, D>> = vec![&self.base];
+        all.extend(&self.tiers);
+        all.extend(self.cache.as_ref().map(|(m, _)| m));
+        all.iter()
+            .map(|m| m.layout.condition(present))
+            .max()
+            .unwrap_or(Condition::Healthy)
     }
 
     pub fn layout(&self) -> &Layout {

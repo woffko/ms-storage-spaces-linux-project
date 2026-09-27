@@ -5,6 +5,18 @@ use std::collections::BTreeMap;
 use crate::error::{Error, Result, format_err};
 use crate::format::{ExtentRecord, Policy, Resiliency, SLAB_SIZE};
 
+/// Redundancy state of a space or layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Condition {
+    /// Every copy and column is on a present disk.
+    Healthy,
+    /// Some copies or columns are on missing disks or out of date, but all
+    /// data can still be read or rebuilt.
+    Degraded,
+    /// Some data is only on missing disks.
+    Failed,
+}
+
 /// Largest slab number or count accepted from extent records.
 const MAX_SLABS: u64 = 1 << 32;
 
@@ -282,6 +294,62 @@ impl Layout {
         self.stale
             .get(&column)
             .is_some_and(|runs| runs.iter().any(|r| r.first_row <= row && row < r.first_row + r.rows))
+    }
+
+    /// How much redundancy is left when only the disks for which `present`
+    /// returns true can be read. Rows without any extent (thin provisioning)
+    /// do not count.
+    pub fn condition(&self, present: impl Fn(u64) -> bool) -> Condition {
+        // The state is constant between run boundaries.
+        let mut bounds: Vec<u64> = self
+            .runs
+            .values()
+            .chain(self.stale.values())
+            .flatten()
+            .flat_map(|r| [r.first_row, r.first_row + r.rows])
+            .collect();
+        bounds.sort_unstable();
+        bounds.dedup();
+        // Disk failures a row survives.
+        let tolerance = match self.resiliency {
+            Resiliency::Parity if self.groups > 1 => 2,
+            Resiliency::Parity => self.parity_units,
+            _ => self.copies.saturating_sub(1),
+        };
+        let mut worst = Condition::Healthy;
+        for row in bounds {
+            let mut lost_columns = 0;
+            let mut reduced = false;
+            let mut allocated = false;
+            for column in 0..self.columns {
+                let stale = self.has_stale_copy(column, row);
+                let copies: Vec<u64> = (0..self.copies)
+                    .filter_map(|copy| self.physical(column, copy, row).map(|(disk, _)| disk))
+                    .collect();
+                if copies.is_empty() && !stale {
+                    continue;
+                }
+                allocated = true;
+                let readable = copies.iter().filter(|&&d| present(d)).count();
+                if readable == 0 {
+                    lost_columns += 1;
+                } else if readable < copies.len() || stale {
+                    reduced = true;
+                }
+            }
+            if !allocated {
+                continue;
+            }
+            let row_condition = match self.resiliency {
+                Resiliency::Parity if lost_columns > tolerance => Condition::Failed,
+                Resiliency::Parity if lost_columns > 0 || reduced => Condition::Degraded,
+                _ if lost_columns > 0 => Condition::Failed,
+                _ if reduced => Condition::Degraded,
+                _ => Condition::Healthy,
+            };
+            worst = worst.max(row_condition);
+        }
+        worst
     }
 
     /// All runs, keyed by (column, copy).

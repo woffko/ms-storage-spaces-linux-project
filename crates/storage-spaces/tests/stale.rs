@@ -7,7 +7,7 @@ mod common;
 use std::fs::{self, File};
 use std::path::Path;
 
-use storage_spaces::{Pool, testpattern};
+use storage_spaces::{Condition, Pool, testpattern};
 
 #[test]
 fn out_of_date_copies_are_never_read() {
@@ -47,6 +47,8 @@ fn out_of_date_copies_are_never_read() {
         let pool = open(None);
         let space = pool.find_space(name).unwrap();
         let reader = pool.open_space(space.id()).unwrap();
+        // The disk that was away holds out-of-date copies.
+        assert_eq!(reader.condition(), Condition::Degraded, "{name}");
         let mut block = vec![0u8; testpattern::BLOCK];
         for (tag, start, len) in &patterns {
             for offset in (*start..start + len).step_by(0x40000) {
@@ -72,6 +74,7 @@ fn out_of_date_copies_are_never_read() {
             .unwrap();
         let degraded = open(Some(device));
         let reader = degraded.open_space(degraded.find_space(name).unwrap().id()).unwrap();
+        assert_eq!(reader.condition(), Condition::Failed, "{name}");
         let (tag, start, _) = &patterns[0];
         match reader.read_exact_at(&mut block, *start) {
             Err(_) => {}

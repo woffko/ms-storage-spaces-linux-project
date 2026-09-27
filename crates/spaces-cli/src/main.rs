@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use storage_spaces::format::{SLAB_SIZE, SpaceRole};
 use storage_spaces::io::ReadAt;
 use storage_spaces::segments::SegmentKind;
-use storage_spaces::{Pool, Space, UncleanParity, testpattern};
+use storage_spaces::{Condition, Pool, Space, UncleanParity, testpattern};
 
 /// Inspect and read Microsoft Storage Spaces pools.
 #[derive(Parser)]
@@ -414,6 +414,15 @@ fn info(pool: &Pool<File>, all: bool) -> Result<()> {
         if s.is_user() {
             match open_space(pool, s.id()) {
                 Ok(r) => {
+                    println!(
+                        "       {}, provisioning {:?}",
+                        match r.condition() {
+                            Condition::Healthy => "healthy",
+                            Condition::Degraded => "degraded: redundancy reduced by missing or out-of-date disks",
+                            Condition::Failed => "failed: some data is only on missing disks",
+                        },
+                        s.info.provisioning
+                    );
                     if r.unclean_parity_runs() > 0 {
                         println!(
                             "       parity journal: {} extent run(s) not cleanly shut down; mismatching stripes are {}",
