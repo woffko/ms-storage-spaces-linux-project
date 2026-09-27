@@ -33,7 +33,7 @@ case "${1:-}" in
     scp -q "${ssh_opts[@]}" "$script" "$host:C:/sstest/$name"
     args=""
     for a in "$@"; do
-      if [[ $a =~ ^-[A-Za-z]+$ ]]; then args+=" $a"; else args+=" '${a//\'/\'\'}'"; fi
+      if [[ $a =~ ^-[A-Za-z][A-Za-z0-9]*$ ]]; then args+=" $a"; else args+=" '${a//\'/\'\'}'"; fi
     done
     run_ps "\$ErrorActionPreference='Stop'; & 'C:\\sstest\\$name'$args"
     ;;
@@ -44,7 +44,7 @@ case "${1:-}" in
     scp -q "${ssh_opts[@]}" "$script" "$host:C:/sstest/$name"
     args=""
     for a in "$@"; do
-      if [[ $a =~ ^-[A-Za-z]+$ ]]; then args+=" $a"; else args+=" '${a//\'/\'\'}'"; fi
+      if [[ $a =~ ^-[A-Za-z][A-Za-z0-9]*$ ]]; then args+=" $a"; else args+=" '${a//\'/\'\'}'"; fi
     done
     # The inner script runs in a process created by WMI, outside the job
     # object of the SSH session, so it survives disconnects.
