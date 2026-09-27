@@ -61,3 +61,10 @@ path = "fuzz_targets/partitions.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "dirty_regions"
+path = "fuzz_targets/dirty_regions.rs"
+test = false
+doc = false
+bench = false
