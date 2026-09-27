@@ -2,6 +2,10 @@
 .SH NAME
 spaces \- read Microsoft Storage Spaces pools on Linux
 .SH SYNOPSIS
+.RB [ \-\-unclean\-parity
+.IR refuse | data ]
+.I command
+.PP
 .B spaces scan
 .br
 .B spaces attach
@@ -12,6 +16,7 @@ spaces \- read Microsoft Storage Spaces pools on Linux
 .RB [ \-\-backend
 .IR auto | dm | ublk | nbd | fuse ]
 .RB [ \-\-degraded ]
+.RB [ \-\-force ]
 .RI [ device ...]
 .br
 .B spaces detach
@@ -41,15 +46,18 @@ spaces \- read Microsoft Storage Spaces pools on Linux
 .I name
 .SH DESCRIPTION
 .B spaces
-reads the metadata of Microsoft Storage Spaces pools (Windows 11
-layout) from their member disks and exposes the virtual disks ("spaces") as
-read-only Linux block devices. It never writes to pool members.
+reads the metadata of Microsoft Storage Spaces pools created by Windows 11
+(pool versions 28 and 29) from their member disks and exposes the virtual
+disks ("spaces") as read-only Linux block devices. It never writes to pool
+members.
 .PP
-Supported: simple, two- and three-way mirror, single and dual parity spaces,
-storage tiers,
-fixed and thin provisioning, the per-space write-back cache, pools with
-missing or failing disks as far as the redundancy allows. Not supported yet:
-writing, pool management, pools created by other Windows releases.
+Supported: simple, two- and three-way mirror, single and dual parity spaces
+(including the local reconstruction code of 11 and more columns), storage
+tiers and mirror-accelerated parity, fixed and thin provisioning, several
+spaces per pool, the per-space write-back cache, 512e and 4Kn member disks,
+pools with missing, failing or retired disks as far as the redundancy
+allows, and pools after a crash. Not supported yet: writing, pool
+management, pools created by other Windows releases.
 .SH COMMANDS
 .TP
 .B scan
@@ -64,7 +72,10 @@ and every partition inside it as
 .BI /dev/mapper/ss\- pool \- space \-p N\fR.
 Pools with missing disks are skipped unless
 .B \-\-degraded
-is given. Spaces already attached are left alone.
+is given; pools with fewer than half of their disks are skipped unless
+.B \-\-force
+is given too (the disks at hand may hold an old state of the pool).
+Spaces already attached are left alone.
 .TP
 .B detach
 Removes the devices of the given space (name, GUID or device-mapper name) or
@@ -74,9 +85,24 @@ of all attached spaces, and stops their serving processes.
 Lists attached spaces, their backends and partition devices.
 .TP
 .B info\fR, \fBextents\fR, \fBexport\fR, \fBdm\-table
-Inspect a pool given by its member devices or images: pool, disks and
-spaces; the slab allocation of a space; copy a space into a sparse image
-file; print a device-mapper table for a simple or mirror space.
+Inspect a pool given by its member devices or images: pool, disks (usage,
+media type, missing) and spaces (layout, provisioning, and whether they are
+healthy, degraded or failed with the disks at hand, plus the state of the
+parity journal, dirty region tracking and write-back cache); the slab
+allocation of a space; copy a space into a sparse image file; print a
+device-mapper table for a simple or mirror space.
+.SH OPTIONS
+.TP
+.BR \-\-unclean\-parity " " refuse | data
+After an unclean shutdown (crash, power loss, disks pulled), Windows
+repairs parity stripes and mirror copies with writes in flight when it
+mounts the pool, and which side it keeps is not recorded. By default reads
+of such parity stripes whose parity does not match, of mirror rows whose
+copies differ and of write-back cache chunks whose mirrored copies disagree
+fail with an I/O error;
+.B data
+returns the data as it is on disk (the highest mirror copy, the newest
+cache and journal entries). Attaching the pool to Windows once repairs it.
 .SH BACKENDS
 .TP
 .B dm
