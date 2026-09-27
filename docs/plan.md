@@ -116,6 +116,31 @@ in this repository.
   groups, built by 24H2) next to `lrc17i`, both made with
   `tools/data-fixture.py --no-cache-slots` (it reproduces the `lrc17i`
   fixture byte for byte); CI rebuilds any two lost columns of both.
+* Configuration matrix (T3) closed with pools created by Windows 11 24H2,
+  each with metadata equal to `Get-PhysicalExtent`, the whole pattern read
+  back and a metadata fixture: interleave 16 KiB (`il16k`) and 1 MiB
+  (`il1m`, parity); simple spaces of 4 to 8 columns (`simple4c`-`simple8c`);
+  several spaces of different resiliency in one pool (`multi`); a space
+  allocated into the hole of a deleted one and behind another space (`frag`,
+  `fragpar`); spaces extended after writing (`ressimple`, `respar`,
+  `resthin`); 4Kn member disks (`m4kn`, `parity4kn`; every other pool has
+  512e members); a pool filled completely (`full`); retired disks with the
+  repair finished (`retired`); grouped dual parity of 11 to 17 columns
+  (`lrc11`-`lrc16`, `lrc17i`: group sizes follow D split into g groups, the
+  first D mod g one larger, and any two failed disks are rebuilt).
+* M1 items 4, 5, 7: disk usage (Auto-Select, Manual-Select, Hot Spare,
+  Journal, Retired) and media type decoded and shown by `spaces info`
+  (`usages`, `retired`); missing disks and devices no longer in the pool
+  reported; space health computed (healthy/degraded/failed); manual attach,
+  detached and read-only states are not kept in the pool metadata
+  (`spstates`). Torn and unusable pool database copies are detected and
+  reported (unit tests). Cache slot type 1 (initialisation record) and the
+  absence of a head/tail are documented. Crashes with dirty write-back
+  cache data (`crashmirrorwc`, `crashparitywc`) led to reading dirty region
+  tracking, merging the copies of cache and journal slot areas and ignoring
+  uncommitted provisional cache entries: all five crash pools read exactly
+  like Windows' recovery or refuse (at most 9 of 2048 MiB), never different
+  data.
 * M2 on the Linux VM (2026-09-27), `tools/backend-matrix.sh` with fio 3.28:
   all 22 pools of the first corpus (including `dual7`, `lrc11`, `lrc12`)
   through dm, ublk, NBD and FUSE: 77 pool/backend combinations pass, dm is
