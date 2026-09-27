@@ -116,6 +116,13 @@ in this repository.
   groups, built by 24H2) next to `lrc17i`, both made with
   `tools/data-fixture.py --no-cache-slots` (it reproduces the `lrc17i`
   fixture byte for byte); CI rebuilds any two lost columns of both.
+* M2 on the Linux VM (2026-09-27), `tools/backend-matrix.sh` with fio 3.28:
+  all 22 pools of the first corpus (including `dual7`, `lrc11`, `lrc12`)
+  through dm, ublk, NBD and FUSE: 77 pool/backend combinations pass, dm is
+  skipped for the 11 spaces it cannot map (parity, cached data, tiers).
+  Each passing combination read the whole pattern sequentially, 300 random
+  reads, 2000 random O_DIRECT reads from 4 threads and a 20 s fio random
+  read load (4 KiB-1 MiB, queue depth 32, 4 jobs) without errors.
 * Windows 11 24H2 pools (pool version 28, space record layout 16) read:
   the basic configurations regenerated as `*_26100` pass the metadata and
   pattern tests (see the format document).
