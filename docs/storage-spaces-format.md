@@ -1,7 +1,8 @@
 # Storage Spaces on-disk format
 
 Reverse-engineered from pools created by Windows 11 Pro Insider build 26340
-(pool version 29, `spaceport.sys` 10.0.26100.8951). Every statement marked
+(pool version 29, `spaceport.sys` 10.0.26100.8951) and Windows 11 Pro 24H2
+build 26100 (pool version 28; pools named `*_26100`). Every statement marked
 **verified** is checked by the corpus tests (`crates/storage-spaces/tests/corpus.rs`)
 against Windows' own `Get-PhysicalExtent` output and against a known data
 pattern. Everything else is an observation or a hypothesis.
@@ -76,7 +77,7 @@ then `length` bytes of body.
 ### Type 1: pool
 `vint, vint, guid[16], name, description, vint, u16 version,
 u8 log2(logical sector size), u8 log2(physical sector size), ...`
-(**verified**: version 29, sectors 512/4096 and 4096/4096). Strings are `u16 BE`
+(**verified**: versions 28 and 29, sectors 512/4096 and 4096/4096). Strings are `u16 BE`
 length in UTF-16 code units (including the terminating NUL) followed by
 UTF-16BE text.
 
@@ -93,22 +94,35 @@ serial, sizes; not decoded).
 ### Types 3 (space) and 6 (child space)
 ```
 vint id, vint, guid[16], name, description,
-u8, u8, u8 role, [type 3: vint size], ...,
-01 00 01 00 00                      <- constant prefix, located by search
-u8 resiliency   1 simple, 2 mirror, 3 parity
-vint redundancy (disk failures tolerated)
+u8, u8, u8 role,
+type 3: vint size, vint (0 on user spaces, 0xffffffff on the metadata space)
+u8 provisioning    1 thin, 2 fixed
+vint allocation unit (bytes; all ones on tier templates)
+u8                 (2 on tiered spaces and hidden containers, else 0)
+prefix             01 00 01 00 00 (record version 17, type 6 version 5)
+                   01 01 00 00    (record version 16: Windows 11 24H2)
+u8 resiliency      1 simple, 2 mirror, 3 parity
+vint redundancy    (disk failures tolerated)
 vint copies
 vint groups
-vint columns
+vint columns       (0xffffffff on tier templates: chosen by Windows)
 u8 log2(interleave)
 type 3: vint, vint x4, vint (=1), vint parent, ...
 type 6: vint, vint parent, ...
 ```
-The bytes between size and the policy differ between fixed and thin
-provisioning and are not understood yet. `role`: 1 = internal metadata space,
-2 = user virtual disk, 0x0b = write-back cache container, 6 and 0x0a = unknown
-256 MiB mirrored children of mirror and parity spaces (probably dirty region
-tracking and parity journal).
+(**verified**: every corpus pool; provisioning and allocation unit equal
+`Get-VirtualDisk` in the metadata tests.) The record version (byte 1 of the
+record) selects the prefix: Insider build 26340 writes pool version 29 with
+space records of version 17, Windows 11 24H2 (build 26100) pool version 28
+with version 16 (**verified**: pools `*_26100`). A record with another prefix
+is reported as an unsupported layout instead of being guessed at.
+`role`: 1 = internal metadata space, 2 = user virtual disk, 0x0b =
+write-back cache container, 6 and 0x0a = unknown 256 MiB mirrored children
+of mirror and parity spaces (dirty region tracking and parity journal).
+
+Windows 11 24H2 shows pool version 28 as "Windows Server vNext" in
+`Get-StoragePool`; the CIM property holds 28. It creates no write-back cache
+for simple spaces by default (26340 creates 1 GiB).
 
 Hierarchy of a user virtual disk:
 ```

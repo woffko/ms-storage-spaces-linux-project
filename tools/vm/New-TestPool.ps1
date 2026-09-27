@@ -184,7 +184,7 @@ $manifest = [ordered]@{
     pattern = -not $NoPattern
     pattern_size = if ($NoPattern) { 0 } elseif ($PatternMB -gt 0) { [int64]$PatternMB * 1MB } else { $vd.Size }
     pool = [ordered]@{
-        name = $poolName; guid = $poolGuid; version = "$($pool.Version)"; size = $pool.Size; allocated = $pool.AllocatedSize
+        name = $poolName; guid = $poolGuid; version = "$($pool.Version)"; version_number = [int]$pool.CimInstanceProperties['Version'].Value; size = $pool.Size; allocated = $pool.AllocatedSize
         logical_sector = $pool.LogicalSectorSize; physical_sector = $pool.PhysicalSectorSize
     }
     space = [ordered]@{

@@ -12,8 +12,8 @@ Make Microsoft Storage Spaces pools fully usable from Linux:
    as ordinary read-only block devices (one per virtual disk) that can be
    partition-scanned and mounted like any disk.
 
-Scope decision (2026-09-26): only Windows 11 pools (current layout, pool
-version 29) are targeted. Older Windows releases, Windows Server and pools
+Scope decision (2026-09-26): only Windows 11 pools (pool version 28 from
+24H2 and 29 from Insider builds) are targeted. Older Windows releases, Windows Server and pools
 created by them are out of scope unless a user need appears; the parser
 rejects unknown layout versions instead of guessing.
 2. **Stage 2 - writes:** the same block devices are writable, and Windows
@@ -145,9 +145,12 @@ in this repository.
 
 ## Test infrastructure (continuous, feeds every stage)
 
-T1. **Windows 11 only.** All pools are created by the Windows 11 test VM
-    (currently Insider build 26340, pool version 29). When that VM moves to
-    a newer Windows 11 build, regenerate the corpus and diff the metadata.
+T1. **Windows 11 only.** All pools are created by Windows 11 test VMs: the
+    first corpus by Insider build 26340 (pool version 29, DESKTOP-ELS4LDK),
+    since 2026-09-27 by Windows 11 24H2 build 26100 (pool version 28,
+    DESKTOP-BQ2J4NS, `*_26100` pools regenerate the basic configurations).
+    When a VM moves to another Windows 11 build, regenerate the corpus and
+    diff the metadata.
 
 T2. **Corpus.** Large images stay out of git (`testdata/pools/`). Add a
     `spaces fixture` command that extracts only metadata regions (headers,

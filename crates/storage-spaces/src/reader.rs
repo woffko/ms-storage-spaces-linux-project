@@ -39,10 +39,14 @@ struct Mapped<'p, D> {
 
 impl<D: ReadAt> Mapped<'_, D> {
     fn new<'p>(pool: &'p Pool<D>, space: &Space) -> Result<Mapped<'p, D>> {
-        let policy = space
-            .info
-            .policy
-            .ok_or_else(|| format_err!("space {} has no recognised placement policy", space.id()))?;
+        let policy = space.info.policy.ok_or_else(|| {
+            Error::Unsupported(format!(
+                "space {}: placement policy not found in a type {} record of layout version {}",
+                space.id(),
+                if space.info.is_child { 6 } else { 3 },
+                space.info.record_version
+            ))
+        })?;
         let base = space.info.range.map_or(0, |(start, _)| start);
         Ok(Mapped {
             pool,

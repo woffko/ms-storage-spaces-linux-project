@@ -254,8 +254,13 @@ pub struct SpaceRecord {
     /// True for record type 6.
     pub is_child: bool,
     pub role: SpaceRole,
+    /// Layout version of the record.
+    pub record_version: u8,
     /// Provisioned size in bytes (type 3 records only).
     pub size: Option<u64>,
+    pub provisioning: Provisioning,
+    /// Allocation unit in bytes (all ones on tier definitions).
+    pub allocation_unit: u64,
     pub policy: Option<Policy>,
     /// Id of the parent space, 0 for top-level spaces.
     pub parent: Option<u64>,
@@ -318,7 +323,9 @@ impl Record {
                 let name = c.string().map_err(ctx)?;
                 Ok(Record::Disk(DiskRecord { id, guid, name }))
             }
-            3 | 6 => decode_space(&mut c, raw.kind == 6).map(Record::Space).map_err(ctx),
+            3 | 6 => decode_space(&mut c, raw.kind == 6, raw.version)
+                .map(Record::Space)
+                .map_err(ctx),
             4 => decode_extent(&mut c).map(Record::Extent).map_err(ctx),
             kind => Ok(Record::Other { kind }),
         }
@@ -350,10 +357,21 @@ fn decode_pool(c: &mut Cursor) -> Result<PoolRecord> {
     })
 }
 
-/// Marker preceding the placement policy inside space records.
-const POLICY_ANCHOR: [u8; 5] = [0x01, 0x00, 0x01, 0x00, 0x00];
+/// Bytes between the provisioning fields and the placement policy of a
+/// space record, by record layout: Windows 11 24H2 (pool version 28, space
+/// records version 16) and Insider build 26340 (pool version 29, version 17;
+/// its child records, type 6, are version 5).
+const POLICY_PREFIXES: [&[u8]; 2] = [&[0x01, 0x00, 0x01, 0x00, 0x00], &[0x01, 0x01, 0x00, 0x00]];
 
-fn decode_space(c: &mut Cursor, is_child: bool) -> Result<SpaceRecord> {
+/// Thin or fixed provisioning of a space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provisioning {
+    Thin,
+    Fixed,
+    Other(u8),
+}
+
+fn decode_space(c: &mut Cursor, is_child: bool, record_version: u8) -> Result<SpaceRecord> {
     let id = c.varint()?;
     c.varint()?;
     let guid = c.guid()?;
@@ -364,24 +382,38 @@ fn decode_space(c: &mut Cursor, is_child: bool) -> Result<SpaceRecord> {
     let role = SpaceRole::from_byte(c.u8()?);
     let size = if is_child { None } else { Some(c.varint()?) };
 
-    // The fields between the size and the policy are not fully understood
-    // (they differ between fixed and thin spaces), so the policy is located
-    // by its constant prefix.
+    // Type 3: size, an unknown number (0 on user spaces), then like type 6:
+    // provisioning (1 thin, 2 fixed), allocation unit (all ones on tier
+    // definitions), an unknown byte (2 on tiered spaces), a constant prefix
+    // that depends on the record layout, and the policy.
+    if !is_child {
+        c.varint()?;
+    }
+    let provisioning = match c.u8()? {
+        1 => Provisioning::Thin,
+        2 => Provisioning::Fixed,
+        other => Provisioning::Other(other),
+    };
+    let allocation_unit = c.varint()?;
+    c.u8()?;
     let rest = c.remaining();
-    let Some(pos) = rest.windows(POLICY_ANCHOR.len()).position(|w| w == POLICY_ANCHOR) else {
+    let Some(prefix) = POLICY_PREFIXES.iter().find(|p| rest.starts_with(p)) else {
         return Ok(SpaceRecord {
             id,
             guid,
             name,
             is_child,
             role,
+            record_version,
             size,
+            provisioning,
+            allocation_unit,
             policy: None,
             parent: None,
             range: None,
         });
     };
-    c.skip(pos + POLICY_ANCHOR.len())?;
+    c.skip(prefix.len())?;
     let resiliency = match c.u8()? {
         1 => Resiliency::Simple,
         2 => Resiliency::Mirror,
@@ -431,7 +463,10 @@ fn decode_space(c: &mut Cursor, is_child: bool) -> Result<SpaceRecord> {
         name,
         is_child,
         role,
+        record_version,
         size,
+        provisioning,
+        allocation_unit,
         policy: Some(policy),
         parent,
         range,
@@ -634,6 +669,31 @@ mod tests {
         assert_eq!(s.guid.to_string(), "ffc0f24d-f987-4f9e-971f-646e82218349");
         assert_eq!(s.role, SpaceRole::User);
         assert_eq!(s.size, Some(0x8000_0000));
+        assert_eq!((s.provisioning, s.allocation_unit), (Provisioning::Fixed, 0x4000_0000));
+        assert_eq!(s.parent, Some(0));
+        let p = s.policy.unwrap();
+        assert_eq!(
+            (p.resiliency, p.copies, p.columns, p.interleave),
+            (Resiliency::Simple, 1, 2, 0x10000)
+        );
+    }
+
+    #[test]
+    fn decodes_windows_11_24h2_space() {
+        // The same configuration created by Windows 11 24H2 (pool version 28,
+        // record layout 16): a shorter prefix before the policy.
+        let mut r = raw(
+            3,
+            "01 05 01 02 a8 7d fe 00 b5 45 4b 30 ab a4 2b ab d7 dd 33 2f 00 0f 00 73 00 69 00 6d 00 70 00 6c 00 65 00 32 \
+             00 63 00 5f 00 32 00 36 00 31 00 30 00 30 00 00 00 00 00 00 02 04 80 00 00 00 00 02 04 40 00 00 00 00 01 01 \
+             00 00 01 00 01 01 01 01 01 02 10 00 00 00 00 00 01 01 00 00 00 00 00",
+        );
+        r.version = 16;
+        let Record::Space(s) = Record::decode(&r).unwrap() else {
+            panic!()
+        };
+        assert_eq!((s.name.as_str(), s.record_version), ("simple2c_26100", 16));
+        assert_eq!((s.size, s.provisioning), (Some(0x8000_0000), Provisioning::Fixed));
         assert_eq!(s.parent, Some(0));
         let p = s.policy.unwrap();
         assert_eq!(
@@ -647,13 +707,14 @@ mod tests {
         let thin = raw(
             3,
             "01 05 01 02 00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff 00 07 00 74 00 68 00 69 00 6e 00 32 00 63 00 00 \
-             00 00 00 00 02 05 04 00 00 00 00 00 00 01 04 10 00 00 00 00 01 00 01 00 00 01 00 01 01 01 01 01 02 12 04 40 \
+             00 00 00 00 02 05 04 00 00 00 00 00 01 04 10 00 00 00 00 01 00 01 00 00 01 00 01 01 01 01 01 02 12 04 40 \
              00 00 00 00 00 00 00 01 01 00 00 00 00 00",
         );
         let Record::Space(s) = Record::decode(&thin).unwrap() else {
             panic!()
         };
         assert_eq!(s.size, Some(0x4_0000_0000));
+        assert_eq!((s.provisioning, s.allocation_unit), (Provisioning::Thin, 0x1000_0000));
         assert_eq!(s.policy.unwrap().interleave, 0x40000);
 
         let child = raw(

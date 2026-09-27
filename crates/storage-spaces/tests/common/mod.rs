@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use serde_json::Value;
-use storage_spaces::format::{Resiliency, SLAB_SIZE};
+use storage_spaces::format::{Provisioning, Resiliency, SLAB_SIZE};
 use storage_spaces::io::ReadAt;
 use storage_spaces::{Pool, Space};
 
@@ -30,10 +30,15 @@ pub fn family<'p, D: ReadAt>(pool: &'p Pool<D>, root: &'p Space) -> Vec<&'p Spac
 pub fn check_metadata<D: ReadAt>(pool: &Pool<D>, m: &Value, dir: &Path) {
     assert!(pool.warnings.is_empty(), "{}: {:?}", dir.display(), pool.warnings);
     assert_eq!(pool.guid.to_string(), m["pool"]["guid"].as_str().unwrap());
-    assert_eq!(
-        format!("Version {}", pool.version),
-        m["pool"]["version"].as_str().unwrap()
-    );
+    match m["pool"]["version_number"].as_u64() {
+        Some(n) => assert_eq!(u64::from(pool.version), n),
+        // Older manifests have the display string only; Windows 11 24H2
+        // shows version 28 as "Windows Server vNext".
+        None => match m["pool"]["version"].as_str().unwrap() {
+            "Windows Server vNext" => assert_eq!(pool.version, 28),
+            s => assert_eq!(format!("Version {}", pool.version), s),
+        },
+    }
     // Spaces inherit the pool's sector size.
     assert_eq!(
         Some(pool.logical_sector_size as u64),
@@ -50,6 +55,16 @@ pub fn check_metadata<D: ReadAt>(pool: &Pool<D>, m: &Value, dir: &Path) {
         assert_eq!(space.info.guid.to_string(), s["guid"].as_str().unwrap());
     }
     assert_eq!(space.info.size, s["size"].as_u64());
+    if let Some(prov) = s["provisioning"].as_str() {
+        let expected = match prov {
+            "Thin" => Provisioning::Thin,
+            _ => Provisioning::Fixed,
+        };
+        assert_eq!(space.info.provisioning, expected, "{}", dir.display());
+    }
+    if let Some(au) = s["allocation_unit"].as_u64() {
+        assert_eq!(space.info.allocation_unit, au, "{}", dir.display());
+    }
     let name_of = |r: Resiliency| match r {
         Resiliency::Simple => "Simple",
         Resiliency::Mirror => "Mirror",
