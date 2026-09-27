@@ -117,9 +117,9 @@ of the database without a device at hand is missing.
 
 ### Types 3 (space) and 6 (child space)
 ```
-vint id, vint, guid[16], name, description,
+vint id, vint sequence, guid[16], name, description,
 u8, u8, u8 role,
-type 3: vint size, vint (0 on user spaces, 0xffffffff on the metadata space)
+type 3: vint size, vint number (0xffffffff on the metadata space)
 u8 provisioning    1 thin, 2 fixed
 vint allocation unit (bytes; all ones on tier templates)
 u8                 (2 on tiered spaces and hidden containers, else 0)
@@ -143,6 +143,25 @@ record) selects the prefix: Insider build 26340 writes pool version 29 with
 space records of version 17, Windows 11 24H2 (build 26100) pool version 28
 with version 16 (**verified**: pools `*_26100`). A record with another prefix
 is reported as an unsupported layout instead of being guessed at.
+`sequence` is the database sequence at which the record was last written,
+as for disks. `number` counts the spaces a pool gets, hidden containers
+included (`spstates`: 0, 2, 4 for its three spaces, 1, 3, 5 for their dirty
+region tracking containers).
+
+Space states: a space set to manual attach and detached
+(`Set-VirtualDisk -IsManualAttach`, `Disconnect-VirtualDisk`) and a space
+whose disk is read-only (`Set-Disk -IsReadOnly`) have records identical to
+those of a normal space apart from ids, names and numbers, and setting
+these states wrote no record (pool `spstates`): they are not kept in the
+pool database. `spaces` exposes every space read-only and attaches detached
+ones too. Whether a space is degraded follows from its extents and the
+disks at hand (`spaces info`: healthy, degraded or failed).
+
+The internal metadata space (role 1) holds one database per space and
+hidden container, 4 MiB apart, each an SDBC database (same header and
+entries as the pool database) whose owner is the space GUID and whose only
+record, type 7, lists the member disks.
+
 `role`: 1 = internal metadata space, 2 = user virtual disk, 0x0b =
 write-back cache container, 6 and 0x0a = unknown 256 MiB mirrored children
 of mirror and parity spaces (dirty region tracking and parity journal).
@@ -392,7 +411,6 @@ recovered space.
 * SDBB entries carry no checksum of their own; how Windows itself detects
   torn entries is unknown (whether it compares copies like `spaces`).
 * Remaining record fields (provisioning type, sizes, disk attributes, tiers).
-* Per-space databases (type 7 record lists member disks).
 * How Windows chooses between differing mirror copies after an unclean
   shutdown; the meaning of the constant entry
   of the cache's type 1 slot; why the cache log restarts mid-area.
