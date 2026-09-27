@@ -148,7 +148,7 @@ switch ($Scenario) {
     'SpaceStates' {
         New-Space "$Name-ma" 512
         Set-VirtualDisk -FriendlyName "$Name-ma" -IsManualAttach $true
-        Disconnect-VirtualDisk -FriendlyName "$Name-ma" -Confirm:$false
+        Disconnect-VirtualDisk -FriendlyName "$Name-ma"
         New-Space "$Name-ro" 512
         Get-VirtualDisk -FriendlyName "$Name-ro" | Get-Disk | Set-Disk -IsReadOnly $true
         $extras = @("$Name-ma", "$Name-ro")
