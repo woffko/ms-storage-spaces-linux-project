@@ -47,9 +47,10 @@ pub fn read_gpt<D: ReadAt + ?Sized>(dev: &D, sector: u64) -> Result<Option<Vec<P
     if !(128..=4096).contains(&entry_size) || count > 4096 {
         return Ok(None);
     }
-    let table_start = entries_lba
-        .checked_mul(sector)
-        .filter(|&s| s + (count * entry_size) as u64 <= size);
+    let table_start = entries_lba.checked_mul(sector).filter(|&s| {
+        s.checked_add((count * entry_size) as u64)
+            .is_some_and(|end| end <= size)
+    });
     let Some(table_start) = table_start else {
         return Ok(None);
     };
@@ -62,7 +63,12 @@ pub fn read_gpt<D: ReadAt + ?Sized>(dev: &D, sector: u64) -> Result<Option<Vec<P
         }
         let first = u64::from_le_bytes(entry[32..40].try_into().unwrap());
         let last = u64::from_le_bytes(entry[40..48].try_into().unwrap());
-        if last < first || (last + 1).saturating_mul(sector) > size {
+        if last < first
+            || last
+                .checked_add(1)
+                .and_then(|n| n.checked_mul(sector))
+                .is_none_or(|end| end > size)
+        {
             continue;
         }
         let name: Vec<u16> = entry[56..128]
@@ -185,6 +191,18 @@ mod tests {
         );
         // With the wrong sector size the table is not found.
         assert!(read_gpt(&gpt_4k(), 512).unwrap().is_none());
+    }
+
+    #[test]
+    fn rejects_out_of_range_values() {
+        // A table at the end of the address space.
+        let mut d = gpt_4k();
+        d.0[4096 + 72..4096 + 80].copy_from_slice(&(u64::MAX / 4096).to_le_bytes());
+        assert!(read_gpt(&d, 4096).unwrap().is_none());
+        // A partition ending at the largest LBA.
+        let mut d = gpt_4k();
+        d.0[2 * 4096 + 40..2 * 4096 + 48].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(read_gpt(&d, 4096).unwrap(), Some(Vec::new()));
     }
 
     #[test]

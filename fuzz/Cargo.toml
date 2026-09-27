@@ -54,3 +54,10 @@ path = "fuzz_targets/pool_open.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "partitions"
+path = "fuzz_targets/partitions.rs"
+test = false
+doc = false
+bench = false
