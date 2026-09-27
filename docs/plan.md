@@ -142,9 +142,12 @@ in this repository.
   like Windows' recovery or refuse (at most 9 of 2048 MiB), never different
   data.
 * M2 on the Linux VM (2026-09-27), `tools/backend-matrix.sh` with fio 3.28:
-  all 22 pools of the first corpus (including `dual7`, `lrc11`, `lrc12`)
-  through dm, ublk, NBD and FUSE: 77 pool/backend combinations pass, dm is
-  skipped for the 11 spaces it cannot map (parity, cached data, tiers).
+  every corpus pool with a pattern, 67 pools (the first corpus including
+  `dual7`, `lrc11`, `lrc12`; the 24H2 regenerations; the configuration
+  matrix, disk state and grouped dual parity pools), every space of each,
+  through dm, ublk, NBD and FUSE: 277 pool/backend combinations pass, none
+  fails, dm is skipped for the 27 spaces it cannot map (parity, cached data,
+  tiers). The NTFS pools are checked by `tools/ntfs-check.sh` (M3).
   Each passing combination read the whole pattern sequentially, 300 random
   reads, 2000 random O_DIRECT reads from 4 threads and a 20 s fio random
   read load (4 KiB-1 MiB, queue depth 32, 4 jobs) without errors.
