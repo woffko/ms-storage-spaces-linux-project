@@ -258,12 +258,15 @@ at 0x20 (0 = mapping, 1 = initialisation record, see below), `u64 sequence` at
 | 0x00 | 8 | owner offset (multiple of the chunk size); bit 63 is a flag of unknown meaning, seen only on entries superseded by the next slot |
 | 0x08 | 4 | cache chunk index, `0xffffffff` = chunk removed from the cache |
 | 0x0c | 2 | state: 0 = block assigned, nothing valid; 2 = partially valid; 3 = whole chunk valid |
-| 0x0e | 2 | number of extra 16-bit words that follow the entry |
-| 0x10 | 2*n | for state 2: runs from the chunk start, u16 LE each, bit 15 = valid, bits 0-14 = length in 512-byte sectors, 0 ends the list |
+| 0x0e | 2 | length in bytes of the data that follows the entry; the next entry starts at the next multiple of 8 |
+| 0x10 | n | for state 2: runs from the chunk start, u16 LE each, bit 15 = valid, bits 0-14 = length in 512-byte sectors, 0 or the end of the data ends the list |
 
 (**verified**: pool `parity4`, whose 1 MiB-split writes leave chunks of three
 256 KiB units valid for 256 KiB or 512 KiB; the log had wrapped around its
-1024 slots.) Entries are ordered by slot sequence and then by position within
+1024 slots. The data length is in bytes and entries are 8-byte aligned
+(**verified**: NTFS pool `ntfsparity`, whose entries carry 4 to 14 bytes of
+runs summing to the chunk; with only 4-byte run lists, as in `parity4`,
+bytes plus padding and 16-bit words cannot be told apart.) Entries are ordered by slot sequence and then by position within
 the slot.
 
 Log order (**verified** as far as reads go: the newest-entry rule reproduces
@@ -311,6 +314,10 @@ entries keyed by the owner offset where an extent run starts:
 | 0x08 | 2 | state: 1 = bitmap, 2 = run list, 3 = whole run consistent |
 | 0x0a | 2 | states 1 and 2: byte length of what follows |
 | 0x0c | … | state 1: bitmap, one bit per stripe; state 2: u16 LE runs (bit 15 = consistent, bits 0-14 = stripes); state 3: 4 bytes |
+
+Entries start 8-byte aligned (**verified**: `ntfsparity`, whose slots hold
+several entries with 34-byte run lists and bitmaps; the earlier pools had
+one entry per slot).
 
 The newest entry per run wins. After a clean shutdown the runs are state 3
 (or all-set bitmaps). In the crash experiment `crashparity` (disks pulled

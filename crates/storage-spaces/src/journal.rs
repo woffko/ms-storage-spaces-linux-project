@@ -88,7 +88,8 @@ impl ParityJournal {
                 let body = slot
                     .get(pos + 12..pos + 12 + body_len)
                     .ok_or_else(|| format_err!("parity journal entry overflows its slot"))?;
-                pos += 12 + body_len;
+                // Entries start 8-byte aligned.
+                pos = (pos + 12 + body_len).next_multiple_of(8);
                 let consistency = match state {
                     1 => Consistency::Bitmap(body.to_vec()),
                     3 => Consistency::All,
@@ -147,4 +148,76 @@ fn le_u32(b: &[u8]) -> u32 {
 
 fn le_u64(b: &[u8]) -> u64 {
     u64::from_le_bytes(b[..8].try_into().unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OWNER: [u8; 16] = [3; 16];
+
+    fn set_crc(b: &mut [u8]) {
+        let crc = crc32_excluding(b, 0x24);
+        b[0x24..0x28].copy_from_slice(&crc.to_le_bytes());
+    }
+
+    /// A journal whose one slot holds `entries` (run offset, state, body).
+    fn journal(entries: &[(u64, u16, Vec<u8>)]) -> Vec<u8> {
+        let mut j = vec![0u8; 0x1000 + 0x1000];
+        j[0..8].copy_from_slice(SPVDT_SIGNATURE);
+        j[8..24].copy_from_slice(&OWNER);
+        j[0x30..0x38].copy_from_slice(&0x1000u64.to_le_bytes());
+        j[0x38..0x3c].copy_from_slice(&0x1000u32.to_le_bytes());
+        j[0x3c..0x40].copy_from_slice(&1u32.to_le_bytes());
+        set_crc(&mut j[..0x60]);
+        let s = &mut j[0x1000..];
+        s[0..8].copy_from_slice(SPSLOT_SIGNATURE);
+        s[0x1c..0x20].copy_from_slice(&0x1000u32.to_le_bytes());
+        s[0x28..0x30].copy_from_slice(&1u64.to_le_bytes());
+        s[0x30..0x34].copy_from_slice(&(entries.len() as u32).to_le_bytes());
+        let mut pos = 0x38;
+        for (offset, state, body) in entries {
+            s[pos..pos + 8].copy_from_slice(&offset.to_le_bytes());
+            s[pos + 8..pos + 10].copy_from_slice(&state.to_le_bytes());
+            s[pos + 10..pos + 12].copy_from_slice(&(body.len() as u16).to_le_bytes());
+            s[pos + 12..pos + 12 + body.len()].copy_from_slice(body);
+            pos = (pos + 12 + body.len()).next_multiple_of(8);
+        }
+        set_crc(s);
+        j
+    }
+
+    fn load(j: &[u8]) -> ParityJournal {
+        let owner = Guid::from_mixed_endian(&OWNER);
+        ParityJournal::load(owner, |off, buf| {
+            buf.copy_from_slice(&j[off as usize..off as usize + buf.len()]);
+            Ok(())
+        })
+        .unwrap()
+        .unwrap()
+    }
+
+    #[test]
+    fn reads_several_aligned_entries_per_slot() {
+        // As Windows 11 24H2 writes them under NTFS: stripe runs of odd
+        // length (17 words), then a bitmap, then a clean run.
+        let mut runs: Vec<u8> = Vec::new();
+        for w in [3u16, 0x8001].iter().cycle().take(16).chain([0x07e2].iter()) {
+            runs.extend(w.to_le_bytes());
+        }
+        let j = journal(&[
+            (0, 2, runs),
+            (1 << 28, 1, vec![0b0000_0100, 0]),
+            (2 << 28, 3, vec![0; 4]),
+        ]);
+        let journal = load(&j);
+        assert_eq!(journal.dirty_runs(), 2);
+        // Runs and bitmap bits mark consistent stripes.
+        assert!(journal.is_dirty(0, 0));
+        assert!(!journal.is_dirty(0, 3));
+        assert!(journal.is_dirty(0, 4));
+        assert!(!journal.is_dirty(1 << 28, 2));
+        assert!(journal.is_dirty(1 << 28, 3));
+        assert!(!journal.is_dirty(2 << 28, 5));
+    }
 }

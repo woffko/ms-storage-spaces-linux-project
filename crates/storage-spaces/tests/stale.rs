@@ -18,7 +18,8 @@ fn out_of_date_copies_are_never_read() {
     };
     for dir in entries
         .map(|e| e.unwrap().path())
-        .filter(|p| p.join("manifest.json").exists())
+        // Hidden directories are downloads in progress.
+        .filter(|p| p.join("manifest.json").exists() && !p.file_name().unwrap().to_string_lossy().starts_with('.'))
     {
         let m = common::manifest(&dir);
         let name = m["space"]["name"].as_str().unwrap();

@@ -33,7 +33,8 @@ fn crashed_pools_read_like_windows_recovers_them() {
     };
     let mut dirs: Vec<_> = entries
         .map(|e| e.unwrap().path())
-        .filter(|p| p.join("manifest.json").exists())
+        // Hidden directories are downloads in progress.
+        .filter(|p| p.join("manifest.json").exists() && !p.file_name().unwrap().to_string_lossy().starts_with('.'))
         .collect();
     dirs.sort();
     for dir in dirs {

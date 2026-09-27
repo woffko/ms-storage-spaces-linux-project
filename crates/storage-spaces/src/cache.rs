@@ -167,12 +167,13 @@ impl CacheIndex {
                 let offset = le_u64(e) & !ENTRY_OFFSET_FLAG;
                 let block = le_u32(&e[8..]);
                 let state = u16::from_le_bytes([e[12], e[13]]);
-                // The high half counts extra 16-bit words that follow the entry.
-                let words = u16::from_le_bytes([e[14], e[15]]) as usize;
+                // The high half is the length of the data that follows the
+                // entry, in bytes; the next entry starts 8-byte aligned.
+                let len = u16::from_le_bytes([e[14], e[15]]) as usize;
                 let extra = slot
-                    .get(pos + 16..pos + 16 + words * 2)
+                    .get(pos + 16..pos + 16 + len)
                     .ok_or_else(|| format_err!("cache entry overflows its slot"))?;
-                pos += 16 + words * 2;
+                pos += 16 + len.next_multiple_of(8);
                 if !offset.is_multiple_of(chunk) {
                     return Err(format_err!("bad cache entry: offset {offset:#x}"));
                 }
@@ -315,12 +316,13 @@ mod tests {
             s[pos..pos + 8].copy_from_slice(&offset.to_le_bytes());
             s[pos + 8..pos + 12].copy_from_slice(&block.to_le_bytes());
             s[pos + 12..pos + 14].copy_from_slice(&state.to_le_bytes());
-            s[pos + 14..pos + 16].copy_from_slice(&(words.len() as u16).to_le_bytes());
+            s[pos + 14..pos + 16].copy_from_slice(&(2 * words.len() as u16).to_le_bytes());
             pos += 16;
             for w in words {
                 s[pos..pos + 2].copy_from_slice(&w.to_le_bytes());
                 pos += 2;
             }
+            pos = pos.next_multiple_of(8);
         }
         let crc = crc32(&s);
         s[0x24..0x28].copy_from_slice(&crc.to_le_bytes());
@@ -362,6 +364,29 @@ mod tests {
         let i = index(&[init, slot(2, &[(CHUNK, 1)])]);
         assert_eq!(i.cached_chunks(), 1);
         assert_eq!(hit(&i, CHUNK), Some(0x10_0000 + CHUNK));
+    }
+
+    #[test]
+    fn entry_data_is_counted_in_bytes_and_padded() {
+        // As in a Windows 11 24H2 cache after NTFS writes: partial entries
+        // with four and three runs, each followed by a full one.
+        let runs4 = vec![0x801d, 0x0003, 0x8008, (CHUNK / 512 - 40) as u16];
+        let runs3 = vec![0x0001, 0x8001, (CHUNK / 512 - 2) as u16];
+        let i = index(&[slot_with(
+            1,
+            &[
+                (0, 1, STATE_PARTIAL, runs4),
+                (CHUNK, 2, STATE_FULL, vec![]),
+                (2 * CHUNK, 3, STATE_PARTIAL, runs3),
+                (3 * CHUNK, 4, STATE_FULL, vec![]),
+            ],
+        )]);
+        assert_eq!(i.cached_chunks(), 4);
+        assert_eq!(hit(&i, 0), Some(0x10_0000 + CHUNK));
+        assert_eq!(hit(&i, 29 * 512), None);
+        assert_eq!(hit(&i, CHUNK + 7), Some(0x10_0000 + 2 * CHUNK + 7));
+        assert_eq!(hit(&i, 2 * CHUNK + 512), Some(0x10_0000 + 3 * CHUNK + 512));
+        assert_eq!(hit(&i, 3 * CHUNK), Some(0x10_0000 + 4 * CHUNK));
     }
 
     #[test]
