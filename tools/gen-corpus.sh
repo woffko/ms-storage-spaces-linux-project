@@ -94,5 +94,10 @@ lrc13      -DiskCount 13 -Resiliency Parity -Redundancy 2 -Columns 13 -Interleav
 lrc14      -DiskCount 14 -Resiliency Parity -Redundancy 2 -Columns 14 -InterleaveKB 64 -SizeMB 2048 -WriteCacheMB 0 -PatternMB 1024
 lrc15      -DiskCount 15 -Resiliency Parity -Redundancy 2 -Columns 15 -InterleaveKB 64 -SizeMB 2048 -WriteCacheMB 0 -PatternMB 1024
 lrc16      -DiskCount 16 -Resiliency Parity -Redundancy 2 -Columns 16 -InterleaveKB 64 -SizeMB 2048 -WriteCacheMB 0 -PatternMB 1024
+# Batch 6: disk and space states
+retired    @New-DiskStatePool.ps1 -Scenario Retired
+repairint  @New-DiskStatePool.ps1 -Scenario Interrupted -SizeMB 4096
+replaced   @New-DiskStatePool.ps1 -Scenario Replaced
+spstates   @New-DiskStatePool.ps1 -Scenario SpaceStates
 LIST
 exit $status

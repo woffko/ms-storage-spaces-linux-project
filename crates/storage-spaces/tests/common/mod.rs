@@ -109,7 +109,11 @@ fn check_space<D: ReadAt>(pool: &Pool<D>, m: &Value, s: &Value, extents: &Value,
         assert_eq!(Some(p.interleave), s["interleave"].as_u64());
     }
 
-    // Windows lists the extents of the space and of its hidden children.
+    // Windows lists the extents of the space and of its hidden children
+    // (not recorded while a repair was moving them).
+    if extents.is_null() {
+        return;
+    }
     let guid_of = |unique_id: &str| {
         m["disks"]
             .as_array()
