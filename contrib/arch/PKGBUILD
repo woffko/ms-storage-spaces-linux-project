@@ -1,0 +1,46 @@
+# Arch Linux package built from this source tree.
+# Usage: cd contrib/arch && makepkg -si
+pkgname=storage-spaces
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Read Microsoft Storage Spaces pools (Windows 11) as read-only block devices'
+arch=('x86_64' 'aarch64')
+license=('GPL-2.0-or-later')
+depends=('device-mapper' 'systemd' 'gcc-libs')
+makedepends=('cargo' 'clang')
+optdepends=('nbd: NBD backend (nbd-client)'
+            'fuse3: FUSE backend'
+            'ntfs-3g: mounting NTFS volumes with FUSE (the kernel has ntfs3)')
+install=storage-spaces.install
+options=('!lto')
+
+_root() {
+  cd "$startdir/../.."
+}
+
+prepare() {
+  _root
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  _root
+  CARGO_TARGET_DIR="$srcdir/target" cargo build --frozen --release -p spaces-cli
+}
+
+check() {
+  _root
+  CARGO_TARGET_DIR="$srcdir/target" cargo test --frozen --release -p storage-spaces --lib
+}
+
+package() {
+  _root
+  install -Dm755 "$srcdir/target/release/spaces" "$pkgdir/usr/bin/spaces"
+  install -Dm644 contrib/udev/69-storage-spaces.rules "$pkgdir/usr/lib/udev/rules.d/69-storage-spaces.rules"
+  sed 's#/usr/local/sbin/spaces#/usr/bin/spaces#' contrib/systemd/storage-spaces-attach.service |
+    install -Dm644 /dev/stdin "$pkgdir/usr/lib/systemd/system/storage-spaces-attach.service"
+  install -Dm644 contrib/man/spaces.8 "$pkgdir/usr/share/man/man8/spaces.8"
+  printf 'ublk_drv\nnbd\n' | install -Dm644 /dev/stdin "$pkgdir/usr/lib/modules-load.d/storage-spaces.conf"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 docs/user-guide.md "$pkgdir/usr/share/doc/$pkgname/user-guide.md"
+}

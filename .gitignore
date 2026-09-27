@@ -4,3 +4,6 @@
 /fuzz/corpus/
 /fuzz/artifacts/
 /fuzz/coverage/
+/contrib/arch/src/
+/contrib/arch/pkg/
+/contrib/arch/*.pkg.tar.*

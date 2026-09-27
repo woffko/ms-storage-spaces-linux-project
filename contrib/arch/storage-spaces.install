@@ -1,0 +1,17 @@
+post_install() {
+  systemctl daemon-reload
+  systemctl enable storage-spaces-attach.service
+  udevadm control --reload
+  modprobe ublk_drv 2>/dev/null || true
+  echo "pools are attached at boot and when their disks appear"
+}
+
+post_upgrade() {
+  systemctl daemon-reload
+  udevadm control --reload
+}
+
+pre_remove() {
+  spaces detach || true
+  systemctl disable storage-spaces-attach.service
+}

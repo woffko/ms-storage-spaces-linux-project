@@ -295,6 +295,10 @@ Progress (2026-09-27):
   (now at most 2^32), grouped parity group counts, slab offsets, cache data
   offsets. No `unsafe` code in either crate (the ublk and FUSE crates hold
   their own).
+* Packaging: `contrib/arch/PKGBUILD` builds and tests the package with
+  makepkg in an Arch Linux bootstrap root (bwrap; package with binary, udev
+  rule, unit with `/usr/bin/spaces`, man page, modules-load file, docs);
+  `cargo install --locked --path crates/spaces-cli` installs `spaces`.
 * crates.io metadata (readme, keywords, categories; the library package
   leaves out the test fixtures; both crate names are free). Pending: the
   repository URL, release tag and publishing (need approval).
