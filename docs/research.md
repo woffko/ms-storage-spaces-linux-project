@@ -19,7 +19,33 @@ Linux, implemented in Rust. ReFS support must also work without Storage Spaces
 | Kim et al., *Digital forensic investigation methodology for Storage Space*, J. Forensic Sci. 2022 | paper | Format description + reconstruction | Same authors as SSR. |
 | *A Research on Virtual Disk Reconstruction Method on Windows Storage Space*, J. Digital Forensics 2018 | paper (Korean) | Layout and metadata | |
 | [Kyle Song blog series](https://kyl3song.github.io/windows%20storage%20spaces/Windows-Storage-Spaces-Forensics-(aka.-SPACEDB)-part-2/) | blog | Overview, 256 MiB slabs | Little byte-level detail. |
+| [johnhnguyen97/spacedb-explorer](https://github.com/johnhnguyen97/spacedb-explorer) | Rust, MIT | SPACEDB parser and virtual disk reconstruction for one Storage Spaces Direct cluster (3 columns, 2-way mirror across two nodes) | Appeared in March 2026. Hard-coded disk ids and file names, picks a mirror copy and fills gaps with zeros, no parity recovery, no library API. S2D is out of our scope. |
+| Junho Kim, *A Research on Virtual Disk Reconstruction Method on Windows Storage Space*, master's thesis, Korea University 2020 | thesis (Korean) | SPACEDB/SDBC/SDBB, simple/mirror/parity reconstruction | Only the table of contents is public. |
+| Song, *A Study on Maximizing Data Recovery Rate in Windows Storage Spaces using File System*, 2020 | paper (Korean) | Recovering files when the pool cannot be assembled | A file system level fallback, not a layout description. |
 | R-Studio, UFS Explorer, ReclaiMe, DiskInternals | commercial, closed | Recovery / read-only reconstruction | Prove the format is fully tractable for reading. |
+
+As far as their code and descriptions show, none of the open projects
+rebuilds data from parity (SSR skips the parity units; its wiki lists only
+simple spaces for Windows 11), and none reads write-back caches, parity
+journals, tiers or pools after a crash.
+
+Microsoft documents the management side, not the on-disk format: the
+Storage Management API (`MSFT_StoragePool`, `MSFT_VirtualDisk`,
+`MSFT_PhysicalDisk`, ...), the Storage PowerShell module
+(`Get-PhysicalExtent` is what our tests compare the parser with), the
+[health and operational states](https://learn.microsoft.com/en-us/windows-server/storage/storage-spaces/storage-spaces-states)
+(`DetachedReason`, `ReadOnlyReason`, `CannotPoolReason`), the Windows Server
+2012 R2 *Software-Defined Storage Design Considerations Guide* (columns,
+write-back cache, parity journal) and the Windows 8 design post
+[Virtualizing storage for scale, resiliency, and efficiency](https://learn.microsoft.com/en-us/archive/blogs/b8/virtualizing-storage-for-scale-resiliency-and-efficiency)
+(slabs, thin provisioning, quorum). The SDK headers name the partition
+types: `PARTITION_SPACES_GUID` e75caf8f-f680-4cee-afa3-b001e56efc2d,
+`PARTITION_SPACES_DATA_GUID` e7addcb4-dc34-4539-9a76-ebbd07be6f7e, MBR types
+0xE7 and 0xD7, and the attribute `GPT_SPACES_ATTRIBUTE_NO_METADATA`
+(bit 63) for the first type. In our corpus all 735 member partitions are
+e75caf8f with no attributes set, the 198 members without a pool database
+copy included, so Windows 11 pools use neither the second type nor the
+attribute.
 
 There is **no open-source Linux driver or tool that assembles a Storage Spaces
 pool as a live block device**, and nothing supports writes.
