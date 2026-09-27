@@ -17,8 +17,8 @@ pool disks.
 | Fixed and thin provisioning | read |
 | Write-back cache (default for new spaces) | read, including data not yet moved out of the cache |
 | Storage tiers, mirror-accelerated parity | read |
-| 512-byte and 4 KiB logical sectors | read |
-| Pools after a crash or power loss | read; parity stripes with unresolved writes are refused (see below) |
+| 512-byte and 4 KiB logical sectors, interleave 16 KiB to 1 MiB | read |
+| Pools after a crash or power loss | read; parity stripes and mirror copies whose outcome Windows decides on its next mount are refused (see below) |
 | Several spaces per pool, fragmented and extended spaces | read |
 | Member disks with 512-byte, 512e and 4Kn sectors | read |
 | Pools after a disk was retired, replaced or removed | read |
@@ -34,7 +34,10 @@ cargo build --release
 sudo contrib/install.sh              # /usr/local/sbin/spaces, udev rule, systemd unit
 # or build a package
 contrib/deb/build-deb.sh && sudo apt install ./target/deb/storage-spaces_*.deb
+(cd contrib/arch && makepkg -si)     # Arch Linux
 ```
+
+Only the `spaces` binary: `cargo install --locked --path crates/spaces-cli`.
 
 The udev rule starts `storage-spaces-attach.service` whenever a pool member
 appears, so pools are attached at boot and when their disks are plugged in.
@@ -79,7 +82,8 @@ device-mapper mapping reads one copy only.
 ## Pools with missing disks
 
 `attach` skips pools with missing disks. `spaces info <disks...>` shows which
-disk is missing. If the redundancy of every space still covers the loss
+disk is missing and whether each space is degraded (still complete) or
+failed (data lost with the disks at hand). If the redundancy of every space still covers the loss
 (mirror: at least one copy of every slab; single parity: at most one
 missing disk; dual parity: at most two),
 attach anyway:
