@@ -1,0 +1,104 @@
+﻿{
+    "name":  "simple4c",
+    "windows_build":  "10.0.26100.0",
+    "pattern":  true,
+    "pattern_size":  1073741824,
+    "pool":  {
+                 "name":  "ss-simple4c",
+                 "guid":  "85cac563-340d-467b-abfa-69f6d4cefd37",
+                 "version":  "Windows Server vNext",
+                 "version_number":  28,
+                 "size":  32140951552,
+                 "allocated":  2147483648,
+                 "logical_sector":  512,
+                 "physical_sector":  4096
+             },
+    "space":  {
+                  "name":  "simple4c",
+                  "guid":  "6a9b7caa-dec2-494f-8123-bb5cf6ff19a9",
+                  "size":  1073741824,
+                  "footprint":  1073741824,
+                  "resiliency":  "Simple",
+                  "copies":  1,
+                  "redundancy":  0,
+                  "columns":  4,
+                  "interleave":  65536,
+                  "provisioning":  "Fixed",
+                  "logical_sector":  512,
+                  "physical_sector":  4096,
+                  "allocation_unit":  268435456,
+                  "groups":  1,
+                  "write_cache":  0,
+                  "read_cache":  0
+              },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "60022480D0C306DCFA1215063DFB40C5",
+                      "spaces_guid":  "8462f15a-a425-b4fd-1d91-e4ae204e7805",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "6002248080CFB742CAA81AB16D3C5D78",
+                      "spaces_guid":  "2c7d7c53-b4ea-3bc2-3edb-276d4e0c3a3e",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk2.vhdx",
+                      "unique_id":  "600224807AB21587E2AEF7C7657B8086",
+                      "spaces_guid":  "79852a2c-97fd-5036-034e-34db9b6c7442",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk3.vhdx",
+                      "unique_id":  "60022480E1757AB4845B6417A07C5D8D",
+                      "spaces_guid":  "07401560-99d6-c16a-da0d-e7158573c56a",
+                      "size":  8589934592
+                  }
+              ],
+    "extents":  [
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "60022480D0C306DCFA1215063DFB40C5",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  1,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "60022480E1757AB4845B6417A07C5D8D",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  2,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "600224807AB21587E2AEF7C7657B8086",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  3,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "6002248080CFB742CAA81AB16D3C5D78",
+                        "status":  "Active"
+                    }
+                ],
+    "extra_spaces":  [
+
+                     ],
+    "tiers":  [
+
+              ]
+}

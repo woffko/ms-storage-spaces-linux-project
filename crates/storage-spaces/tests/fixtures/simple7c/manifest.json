@@ -1,0 +1,149 @@
+﻿{
+    "name":  "simple7c",
+    "windows_build":  "10.0.26100.0",
+    "pattern":  true,
+    "pattern_size":  1879048192,
+    "pool":  {
+                 "name":  "ss-simple7c",
+                 "guid":  "a8f1507e-13a6-49b6-af02-237ea934c35c",
+                 "version":  "Windows Server vNext",
+                 "version_number":  28,
+                 "size":  56246665216,
+                 "allocated":  3758096384,
+                 "logical_sector":  512,
+                 "physical_sector":  4096
+             },
+    "space":  {
+                  "name":  "simple7c",
+                  "guid":  "3e13a24a-4852-400c-815d-08a047ed9343",
+                  "size":  1879048192,
+                  "footprint":  1879048192,
+                  "resiliency":  "Simple",
+                  "copies":  1,
+                  "redundancy":  0,
+                  "columns":  7,
+                  "interleave":  65536,
+                  "provisioning":  "Fixed",
+                  "logical_sector":  512,
+                  "physical_sector":  4096,
+                  "allocation_unit":  268435456,
+                  "groups":  1,
+                  "write_cache":  0,
+                  "read_cache":  0
+              },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "60022480E3CF15F895A0EA0DC1583BE9",
+                      "spaces_guid":  "042f9a09-9b66-7ad0-02e3-fbb58522bb68",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "600224803EDF8B1E56F7C531A4A9C36E",
+                      "spaces_guid":  "fa1a5a07-3e28-adcb-9673-9e89ca0b5810",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk2.vhdx",
+                      "unique_id":  "60022480669695A4DC40440EB1088827",
+                      "spaces_guid":  "d399becf-590a-a2eb-5cf3-3c598ddf9f7d",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk3.vhdx",
+                      "unique_id":  "60022480ACF61347F0FE39F985C8B242",
+                      "spaces_guid":  "f18bfa49-7f25-e9b9-9cc6-84e8036313e7",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk4.vhdx",
+                      "unique_id":  "60022480EBC3746D7CF8B0A9B5048964",
+                      "spaces_guid":  "4e64f308-849a-48c4-bd13-3ae39ee53534",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk5.vhdx",
+                      "unique_id":  "60022480A6A1D977C5D6DF6FF3A9027A",
+                      "spaces_guid":  "787cb6c1-7497-4016-acf5-286064c1479e",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk6.vhdx",
+                      "unique_id":  "600224804F4F3D9F7CFE07C7CB6B022E",
+                      "spaces_guid":  "116fcf5b-e34e-1985-0b7e-a82458fa3714",
+                      "size":  8589934592
+                  }
+              ],
+    "extents":  [
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "60022480ACF61347F0FE39F985C8B242",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  1,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "60022480669695A4DC40440EB1088827",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  2,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "600224803EDF8B1E56F7C531A4A9C36E",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  3,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "60022480E3CF15F895A0EA0DC1583BE9",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  4,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "60022480A6A1D977C5D6DF6FF3A9027A",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  5,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "600224804F4F3D9F7CFE07C7CB6B022E",
+                        "status":  "Active"
+                    },
+                    {
+                        "column":  6,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "60022480EBC3746D7CF8B0A9B5048964",
+                        "status":  "Active"
+                    }
+                ],
+    "extra_spaces":  [
+
+                     ],
+    "tiers":  [
+
+              ]
+}
