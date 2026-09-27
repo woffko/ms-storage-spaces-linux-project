@@ -104,6 +104,22 @@ in this repository.
   disks absent (ublk) reads its whole pattern, sequentially and with 500
   random reads.
 
+### Stage 1 completion work (from 2026-09-27)
+
+* Test VM: pools are generated on DESKTOP-BQ2J4NS (Windows 11 24H2, build
+  26100, QEMU, SATA system disk; no crashes); `tools/vm.sh` reaches the old
+  VM through `WIN_VM_HOST`. Fetched pools are deleted from both VMs
+  (`fetch-corpus.sh --remove-remote`, `Remove-TestPool.ps1`).
+* Housekeeping: `tools/gen-corpus.sh` lists every pool including the impulse
+  and LRC pools (`@Script.ps1` lines, `SUFFIX`, `THROTTLE`); metadata
+  fixtures for `lrc11`, `lrc12`; data fixture `lrc12i` (12 columns, 2
+  groups, built by 24H2) next to `lrc17i`, both made with
+  `tools/data-fixture.py --no-cache-slots` (it reproduces the `lrc17i`
+  fixture byte for byte); CI rebuilds any two lost columns of both.
+* Windows 11 24H2 pools (pool version 28, space record layout 16) read:
+  the basic configurations regenerated as `*_26100` pass the metadata and
+  pattern tests (see the format document).
+
 ### M2 (exit criteria met on the test VM, 2026-09-26)
 
 * dm (`dm-table`), ublk (`serve-ublk`), NBD (`serve-nbd`) and FUSE
