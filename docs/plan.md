@@ -281,8 +281,23 @@ Progress (2026-09-26): manual page, user guide (`docs/user-guide.md`),
 `contrib/install.sh`, Debian package script (`contrib/deb/build-deb.sh`),
 CI workflow on metadata fixtures, mutation test of the metadata parser
 (200 000 corrupted variants of the fixtures, no panic; corrupt headers can
-no longer request large allocations). Static musl build in CI. Pending:
-crates.io metadata, release tag (needs approval).
+no longer request large allocations). Static musl build in CI.
+
+Progress (2026-09-27):
+* Fuzzing: six cargo-fuzz targets in `fuzz/` (record decoding, SDBB
+  assembly, cache header and slot log, parity journal, GPT/MBR, whole-pool
+  open with reads on patched fixtures); CI runs each for 30 s. A 24 h run of
+  all six (4 processes each) started 2026-09-27T05:31Z on 4772df4.
+* Security review of the parsing code: every read of metadata-controlled
+  sizes is bounded (database 64 MiB, cache and journal slot areas 64 MiB,
+  NBD requests 32 MiB, options 64 KiB); integer overflows found and fixed
+  with regression tests: GPT table and partition bounds, extent slab numbers
+  (now at most 2^32), grouped parity group counts, slab offsets, cache data
+  offsets. No `unsafe` code in either crate (the ublk and FUSE crates hold
+  their own).
+* crates.io metadata (readme, keywords, categories; the library package
+  leaves out the test fixtures; both crate names are free). Pending: the
+  repository URL, release tag and publishing (need approval).
 
 
 1. Packaging: `cargo install`, Debian/Ubuntu and Arch packages, static
