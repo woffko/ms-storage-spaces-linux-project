@@ -228,20 +228,42 @@ impl CacheWriter {
     }
 
     fn slot(&self, kind: u32, sequence: u64, count: u32, entries: &[u8]) -> Vec<u8> {
-        let mut s = vec![0u8; self.header.slot_size as usize];
-        s[..8].copy_from_slice(SPSLOT_SIGNATURE);
-        s[8..24].copy_from_slice(&self.header.owner_guid.to_mixed_endian());
-        s[0x18..0x1c].copy_from_slice(&1u32.to_le_bytes());
-        s[0x1c..0x20].copy_from_slice(&self.header.slot_size.to_le_bytes());
-        s[0x20..0x24].copy_from_slice(&kind.to_le_bytes());
-        s[0x28..0x30].copy_from_slice(&sequence.to_le_bytes());
-        s[0x30..0x34].copy_from_slice(&count.to_le_bytes());
-        let n = entries.len().min(s.len().saturating_sub(0x38));
-        s[0x38..0x38 + n].copy_from_slice(&entries[..n]);
-        let crc = crc32_excluding(&s, 0x24);
-        s[0x24..0x28].copy_from_slice(&crc.to_le_bytes());
-        s
+        encode_slot(
+            self.header.owner_guid,
+            self.header.slot_size,
+            kind,
+            sequence,
+            count,
+            entries,
+        )
     }
+}
+
+/// A slot of a cache or parity journal as Windows writes it: "SPSLOT", the
+/// owner GUID (mixed-endian), u32 1, the slot size, the type, the CRC-32 of
+/// the slot with its field zeroed, the sequence, the entry count, u32 0 and
+/// the entries (cut off at the end of the slot).
+pub(crate) fn encode_slot(
+    owner: Guid,
+    slot_size: u32,
+    kind: u32,
+    sequence: u64,
+    count: u32,
+    entries: &[u8],
+) -> Vec<u8> {
+    let mut s = vec![0u8; slot_size as usize];
+    s[..8].copy_from_slice(SPSLOT_SIGNATURE);
+    s[8..24].copy_from_slice(&owner.to_mixed_endian());
+    s[0x18..0x1c].copy_from_slice(&1u32.to_le_bytes());
+    s[0x1c..0x20].copy_from_slice(&slot_size.to_le_bytes());
+    s[0x20..0x24].copy_from_slice(&kind.to_le_bytes());
+    s[0x28..0x30].copy_from_slice(&sequence.to_le_bytes());
+    s[0x30..0x34].copy_from_slice(&count.to_le_bytes());
+    let n = entries.len().min(s.len().saturating_sub(0x38));
+    s[0x38..0x38 + n].copy_from_slice(&entries[..n]);
+    let crc = crc32_excluding(&s, 0x24);
+    s[0x24..0x28].copy_from_slice(&crc.to_le_bytes());
+    s
 }
 
 /// Runs of equally valid sectors, from the chunk start.

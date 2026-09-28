@@ -1,11 +1,13 @@
 //! The parity journal (SPVDT) of parity spaces. The input is the journal
 //! space from its start; the harness sets the signature, owner and header
-//! CRC so that inputs reach the entry parser.
+//! CRC so that inputs reach the entry parser. The journal model then logs
+//! writes of stripes taken from the input, which must read back as exactly
+//! the stripes written being consistent.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
 use storage_spaces::Guid;
-use storage_spaces::journal::ParityJournal;
+use storage_spaces::journal::{JournalWriter, ParityJournal};
 
 const OWNER: [u8; 16] = [9; 16];
 
@@ -60,4 +62,43 @@ fuzz_target!(|data: &[u8]| {
             }
         }
     }
+    // A quarter of the inputs also drive the model (it is slower).
+    if data[0] & 3 == 0 {
+        model_round_trip(data, Guid::from_slice(&owner).unwrap());
+    }
 });
+
+/// Up to 8 writes into a run of 40000 stripes (so that runs of stripes
+/// longer than a run word can hold occur), logged by the model.
+fn model_round_trip(data: &[u8], owner: Guid) {
+    const STRIPES: u64 = 40000;
+    const SLOT: usize = 0x2000;
+    let mut journal = JournalWriter::new(owner, SLOT as u32, 32);
+    let mut space = vec![0u8; 0x60 + 32 * SLOT];
+    space[0..8].copy_from_slice(b"SPVDT\0\0\0");
+    space[8..24].copy_from_slice(&owner.to_mixed_endian());
+    space[0x30..0x38].copy_from_slice(&0x60u64.to_le_bytes());
+    space[0x38..0x3c].copy_from_slice(&(SLOT as u32).to_le_bytes());
+    space[0x3c..0x40].copy_from_slice(&32u32.to_le_bytes());
+    set_crc(&mut space[..0x60], 0x24);
+    let mut written = vec![false; STRIPES as usize];
+    for w in data.chunks_exact(6).take(8) {
+        let first = u64::from(u32::from_le_bytes(w[..4].try_into().unwrap())) % STRIPES;
+        let count = (u64::from(u16::from_le_bytes([w[4], w[5]])) + 1).min(STRIPES - first);
+        let (index, page) = journal.write(0, STRIPES, first, count);
+        space[0x60 + index * SLOT..0x60 + (index + 1) * SLOT].copy_from_slice(&page);
+        written[first as usize..(first + count) as usize].fill(true);
+    }
+    if !written.contains(&true) {
+        return;
+    }
+    let journal = ParityJournal::load(owner, |off: u64, buf: &mut [u8]| {
+        buf.copy_from_slice(&space[off as usize..off as usize + buf.len()]);
+        Ok(())
+    })
+    .unwrap()
+    .unwrap();
+    for (s, &w) in written.iter().enumerate().step_by(13) {
+        assert_eq!(journal.is_dirty(0, s as u64), !w, "stripe {s}");
+    }
+}

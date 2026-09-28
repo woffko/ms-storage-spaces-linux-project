@@ -525,6 +525,23 @@ Entries start 8-byte aligned (**verified**: `ntfsparity`, whose slots hold
 several entries with 34-byte run lists and bitmaps; the earlier pools had
 one entry per slot).
 
+How Windows writes the journal (**verified** slot by slot, byte for byte,
+by the test `parity_journal_logs_whole_stripe_writes` on the scenario
+`m5pj2`: 3-column parity, writes of 4 MiB, 512 KiB and 4 MiB in requests
+of 1 MiB, then 4 KiB; `JournalWriter` implements it):
+
+* A new journal has no slots. Slots have the layout of cache slots, with
+  the space GUID as owner.
+* A write request of whole stripes (here every 1 MiB request: two stripes
+  of 512 KiB of data) goes to the space directly, bypassing the write-back
+  cache, and gets the next slot with the next sequence and one state 2
+  entry for its extent run: runs over all stripes of the run (4096 here),
+  in which the stripes written so far are consistent and those never
+  written count as not consistent. Smaller writes go to the cache (the
+  4 KiB write took cache block 64), as do writes into chunks the cache
+  holds (`m5pj`: 512 KiB at 0).
+* A minute without writes changed nothing.
+
 The newest entry per run wins. After a clean shutdown the runs are state 3
 (or all-set bitmaps). In the crash experiment `crashparity` (disks pulled
 while writing) the entry was state 2 `consistent 1164, unknown 2932` over

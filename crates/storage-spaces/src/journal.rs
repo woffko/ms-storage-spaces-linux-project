@@ -167,6 +167,73 @@ impl ParityJournal {
     }
 }
 
+/// How Windows logs writes of whole stripes that bypass the write-back
+/// cache (the model the scenario tests check slot by slot): the journal
+/// starts without slots; every write request gets the next slot with the
+/// next sequence and one entry for the extent run it touches, listing the
+/// consistency of all stripes of the run (runs of stripes, bit 15 =
+/// consistent), in which the written stripes are now consistent and those
+/// never written count as not consistent.
+#[derive(Debug, Clone)]
+pub struct JournalWriter {
+    owner: Guid,
+    slot_size: u32,
+    slot_count: u32,
+    next_slot: usize,
+    sequence: u64,
+    /// Owner offset where an extent run starts -> consistent stripes.
+    runs: std::collections::BTreeMap<u64, Vec<bool>>,
+}
+
+impl JournalWriter {
+    /// An empty journal of the space `owner`.
+    pub fn new(owner: Guid, slot_size: u32, slot_count: u32) -> Self {
+        JournalWriter {
+            owner,
+            slot_size,
+            slot_count,
+            next_slot: 0,
+            sequence: 0,
+            runs: Default::default(),
+        }
+    }
+
+    /// A write request of stripes `first..first + count` of the extent run
+    /// that starts at owner offset `run_start` and has `stripes` stripes:
+    /// the slot Windows writes (index and page).
+    pub fn write(&mut self, run_start: u64, stripes: u64, first: u64, count: u64) -> (usize, Vec<u8>) {
+        let consistent = self
+            .runs
+            .entry(run_start)
+            .or_insert_with(|| vec![false; stripes as usize]);
+        let end = (first + count).min(consistent.len() as u64);
+        for s in first.min(end)..end {
+            consistent[s as usize] = true;
+        }
+        let mut words = Vec::new();
+        let mut i = 0;
+        while i < consistent.len() {
+            let v = consistent[i];
+            let n = consistent[i..].iter().take(0x7fff).take_while(|&&c| c == v).count();
+            words.push((u16::from(v) << 15) | n as u16);
+            i += n;
+        }
+        let mut entry = run_start.to_le_bytes().to_vec();
+        entry.extend_from_slice(&2u16.to_le_bytes());
+        entry.extend_from_slice(&(2 * words.len() as u16).to_le_bytes());
+        for w in words {
+            entry.extend_from_slice(&w.to_le_bytes());
+        }
+        self.sequence += 1;
+        let index = self.next_slot;
+        self.next_slot = (self.next_slot + 1) % self.slot_count.max(1) as usize;
+        (
+            index,
+            crate::cache::encode_slot(self.owner, self.slot_size, 0, self.sequence, 1, &entry),
+        )
+    }
+}
+
 impl Consistency {
     fn is_dirty(&self, stripe: u64) -> bool {
         match self {

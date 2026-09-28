@@ -14,6 +14,7 @@ use storage_spaces::format::{
     ExtentRecord, POOL_DB_OFFSET, Record, SLAB_SIZE, SPACE_SECURITY_DESCRIPTOR, SpaceEdit, edit_space_record,
 };
 use storage_spaces::io::SparseImage;
+use storage_spaces::journal::JournalWriter;
 
 fn state(scenario: &str, label: &str) -> Pool<SparseImage> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -443,4 +444,62 @@ fn cache_log_follows_the_writes() {
         }
         assert!(checked >= 5, "{scenario}");
     }
+}
+
+/// m5pj2: a 3-column parity space (stripes of 512 KiB of data) written
+/// 4 MiB at 0, 512 KiB at 8 MiB and 4 MiB at 16 MiB, then 4 KiB at 0, in
+/// requests of at most 1 MiB. Each request of whole stripes bypasses the
+/// cache and gets a parity journal slot ([`JournalWriter`]); the 4 KiB write
+/// goes to the cache ([`CacheWriter`]). Every journal and cache slot of every
+/// state matches byte for byte; a minute without writes changed nothing.
+#[test]
+fn parity_journal_logs_whole_stripe_writes() {
+    let scenario = "m5pj2";
+    let first = state(scenario, "s0");
+    let space = first.user_spaces().next().unwrap();
+    let reader = first.open_space(space.id()).unwrap();
+    let layout = reader.layout().clone();
+    let stripe = layout.data_columns * layout.interleave;
+    let stripes = reader.size() / stripe;
+    assert_eq!(stripes, 4096);
+    let mut journal = JournalWriter::new(space.info.guid, 4096, 1024);
+    let mut cache = CacheWriter::new(reader.cache().unwrap().header.clone(), 64);
+    let mut journal_slots: Vec<(usize, Vec<u8>)> = Vec::new();
+    let mut cached = vec![(0, content(&cache.init_slot()))];
+    let mut checked = 0;
+    for (step, _) in steps(scenario) {
+        let a: Vec<&str> = step.split(':').collect();
+        match a[0] {
+            "write" => {
+                let offset = a[2].parse::<u64>().unwrap() * 1024;
+                let len = a[3].parse::<u64>().unwrap() * 1024;
+                let mut at = offset;
+                while at < offset + len {
+                    let n = (offset + len - at).min(1 << 20);
+                    if at % stripe == 0 && n % stripe == 0 {
+                        let (i, page) = journal.write(0, stripes, at / stripe, n / stripe);
+                        journal_slots.push((i, content(&page)));
+                    } else {
+                        for (i, page) in cache.write(at, n) {
+                            cached.push((i, content(&page)));
+                        }
+                    }
+                    at += n;
+                }
+            }
+            "snap" => {
+                let pool = state(scenario, a[1]);
+                let space = pool.user_spaces().next().unwrap();
+                let reader = pool.open_space(space.id()).unwrap();
+                let windows: Vec<(usize, Vec<u8>)> = reader.journal().map_or(Vec::new(), |j| {
+                    j.slots().iter().map(|s| (s.index, s.content.clone())).collect()
+                });
+                assert_eq!(windows, journal_slots, "{scenario} {} journal", a[1]);
+                assert_eq!(cache_slots(&pool), cached, "{scenario} {} cache", a[1]);
+                checked += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(checked, 6);
 }
