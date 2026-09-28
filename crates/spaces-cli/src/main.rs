@@ -236,6 +236,20 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    // Output piped into a program that stops reading (`spaces dump | head`)
+    // ends the process quietly, as SIGPIPE would, instead of a panic.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or_default();
+        if message.starts_with("failed printing to stdout") && message.contains("Broken pipe") {
+            std::process::exit(141);
+        }
+        default_hook(info);
+    }));
     let cli = Cli::parse();
     let unclean_parity = match cli.unclean_parity {
         UncleanArg::Refuse => UncleanParity::Refuse,
