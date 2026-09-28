@@ -163,7 +163,7 @@ impl<D: ReadAt> Mapped<'_, D> {
         }
         if differ && self.unclean == UncleanParity::Refuse {
             return Err(Error::Pool(format!(
-                "mirror copies differ at {offset:#x} (a crash with writes in flight)"
+                "mirror copies differ at {offset:#x} (writes in flight at a crash, or a disk that missed writes and was not repaired)"
             )));
         }
         Ok(true)

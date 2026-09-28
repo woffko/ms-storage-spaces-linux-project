@@ -1,0 +1,127 @@
+﻿{
+    "pool":  {
+                 "health":  "Warning",
+                 "operational":  "Degraded",
+                 "read_only":  false
+             },
+    "spaces":  [
+                   {
+                       "name":  "m5stale",
+                       "health":  "Warning",
+                       "operational":  "Degraded Incomplete",
+                       "size":  1073741824,
+                       "footprint":  2684354560,
+                       "manual_attach":  false,
+                       "extents":  [
+                                       {
+                                           "column":  0,
+                                           "copy":  0,
+                                           "size":  268435456,
+                                           "virtual_offset":  0,
+                                           "physical_offset":  536870912,
+                                           "disk_unique_id":  "{7d9ab91f-2cff-df6e-97b0-57e9fd6a130e}",
+                                           "status":  "Need Reallocation"
+                                       },
+                                       {
+                                           "column":  0,
+                                           "copy":  1,
+                                           "size":  268435456,
+                                           "virtual_offset":  0,
+                                           "physical_offset":  536870912,
+                                           "disk_unique_id":  "6002248070B743C0323BCDE7DEE85ECE",
+                                           "status":  "Active"
+                                       },
+                                       {
+                                           "column":  0,
+                                           "copy":  0,
+                                           "size":  268435456,
+                                           "virtual_offset":  268435456,
+                                           "physical_offset":  805306368,
+                                           "disk_unique_id":  "6002248070B743C0323BCDE7DEE85ECE",
+                                           "status":  "Active"
+                                       },
+                                       {
+                                           "column":  0,
+                                           "copy":  1,
+                                           "size":  268435456,
+                                           "virtual_offset":  268435456,
+                                           "physical_offset":  805306368,
+                                           "disk_unique_id":  "{7d9ab91f-2cff-df6e-97b0-57e9fd6a130e}",
+                                           "status":  "Lost Communication"
+                                       },
+                                       {
+                                           "column":  0,
+                                           "copy":  0,
+                                           "size":  268435456,
+                                           "virtual_offset":  536870912,
+                                           "physical_offset":  1073741824,
+                                           "disk_unique_id":  "6002248070B743C0323BCDE7DEE85ECE",
+                                           "status":  "Active"
+                                       },
+                                       {
+                                           "column":  0,
+                                           "copy":  1,
+                                           "size":  268435456,
+                                           "virtual_offset":  536870912,
+                                           "physical_offset":  1073741824,
+                                           "disk_unique_id":  "{7d9ab91f-2cff-df6e-97b0-57e9fd6a130e}",
+                                           "status":  "Stale Metadata"
+                                       },
+                                       {
+                                           "column":  0,
+                                           "copy":  0,
+                                           "size":  268435456,
+                                           "virtual_offset":  805306368,
+                                           "physical_offset":  1342177280,
+                                           "disk_unique_id":  "6002248070B743C0323BCDE7DEE85ECE",
+                                           "status":  "Active"
+                                       },
+                                       {
+                                           "column":  0,
+                                           "copy":  1,
+                                           "size":  268435456,
+                                           "virtual_offset":  805306368,
+                                           "physical_offset":  1342177280,
+                                           "disk_unique_id":  "{7d9ab91f-2cff-df6e-97b0-57e9fd6a130e}",
+                                           "status":  "Lost Communication"
+                                       },
+                                       {
+                                           "column":  0,
+                                           "copy":  0,
+                                           "size":  268435456,
+                                           "virtual_offset":  0,
+                                           "physical_offset":  268435456,
+                                           "disk_unique_id":  "6002248070B743C0323BCDE7DEE85ECE",
+                                           "status":  "Active"
+                                       },
+                                       {
+                                           "column":  0,
+                                           "copy":  1,
+                                           "size":  268435456,
+                                           "virtual_offset":  0,
+                                           "physical_offset":  268435456,
+                                           "disk_unique_id":  "{7d9ab91f-2cff-df6e-97b0-57e9fd6a130e}",
+                                           "status":  "Stale Metadata"
+                                       }
+                                   ]
+                   }
+               ],
+    "disks":  [
+                  {
+                      "unique_id":  "{7d9ab91f-2cff-df6e-97b0-57e9fd6a130e}",
+                      "health":  "Warning",
+                      "operational":  "Lost Communication",
+                      "usage":  "Auto-Select",
+                      "allocated":  2165309440,
+                      "size":  8589934592
+                  },
+                  {
+                      "unique_id":  "6002248070B743C0323BCDE7DEE85ECE",
+                      "health":  "Healthy",
+                      "operational":  "OK",
+                      "usage":  "Auto-Select",
+                      "allocated":  2165309440,
+                      "size":  8589934592
+                  }
+              ]
+}

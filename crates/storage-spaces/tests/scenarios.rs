@@ -10,7 +10,7 @@ use storage_spaces::Pool;
 use storage_spaces::database::Database;
 use storage_spaces::drt::{DirtyRegions, DrtWriter};
 use storage_spaces::format::{
-    ExtentRecord, POOL_DB_OFFSET, SLAB_SIZE, SPACE_SECURITY_DESCRIPTOR, SpaceEdit, edit_space_record,
+    ExtentRecord, POOL_DB_OFFSET, Record, SLAB_SIZE, SPACE_SECURITY_DESCRIPTOR, SpaceEdit, edit_space_record,
 };
 use storage_spaces::io::SparseImage;
 
@@ -356,4 +356,32 @@ fn thin_slabs_are_allocated_per_update_at_the_first_free_slab() {
             ("s4", &[(4, &[1, 3]), (5, &[1, 2]), (6, &[2, 1]), (7, &[2, 3])]),
         ],
     );
+}
+
+/// m5stale: a two-way mirror on two disks, written, one disk detached and
+/// the space written in two runs, the disk attached again, the space
+/// repaired. While the disk is away Windows writes nothing to the pool
+/// database (copies that miss writes are only known in memory and from the
+/// dirty region log). When the disk returns, it alone gets an update: the
+/// extent of the copy Windows lists as needing reallocation (copy 0 of the
+/// first row, written while its disk was away) rewritten unchanged with the
+/// new sequence; the other member keeps the older database until the repair
+/// writes the same one there.
+#[test]
+fn a_returning_disk_is_updated_first_and_the_others_at_repair() {
+    let s1 = databases("m5stale", "s1");
+    for label in ["s2", "s3"] {
+        assert_database(&s1[0], "m5stale", label);
+    }
+    let mut db = s1[0].clone();
+    let Ok(Record::Extent(extent)) = Record::decode(&db.record(29).unwrap()) else {
+        panic!("record 29 is no extent")
+    };
+    assert_eq!((extent.virtual_slab, extent.copy, extent.disk_id), (0, 0, 2));
+    assert_eq!(db.update(&[(4, 6, &extent.encode(3))], &[29]), Some(vec![37]));
+    let s4 = databases("m5stale", "s4");
+    db.commit(3, s4[1].timestamp());
+    assert_eq!(s4[0].bytes(), s1[0].bytes(), "the member that stayed");
+    assert_eq!(s4[1].bytes(), db.bytes(), "the returning member");
+    assert_database(&db, "m5stale", "s5");
 }

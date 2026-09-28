@@ -234,6 +234,27 @@ copy number beyond the policy's copy count and flag 0x01 (**verified**: pool
 `stale3`, 2-way mirror on 3 disks; only the copy that stayed current holds the
 data written while the disk was away). Readers must use current copies only;
 a row with out-of-date copies only is lost.
+A disk that misses writes without a replacement (**verified** byte for byte
+by the test `a_returning_disk_is_updated_first_and_the_others_at_repair`
+on the scenario `m5stale`: two-way mirror on two disks, one detached while
+the space was written in two runs, attached again, repaired):
+
+* While the disk is away Windows writes nothing to the pool database. It
+  lists the copy 0 of a written row on the missing disk as "Need
+  Reallocation" and other copies as "Stale Metadata" (`Get-PhysicalExtent`),
+  in memory only; the dirty region log (on the remaining disk) lists the
+  written runs.
+* When the disk returns, Windows resynchronises the dirty region log's own
+  copies, brings the "Stale Metadata" copies up to date, and writes a
+  database update to the returning disk only: the extent records of the
+  "Need Reallocation" copies rewritten unchanged with the new sequence. The
+  other members keep the older database, and the data of those copies stays
+  out of date, until `Repair-VirtualDisk` regenerates it and writes the same
+  database to the other members.
+* Between the return and the repair nothing on disk says which copy of a
+  listed run is current (the log's copies are equal again), so `spaces`
+  refuses rows whose copies differ.
+
 A run of `slab_count` consecutive physical slabs backs column `column`, copy
 `copy`, rows `virtual_slab / data_columns ...` (**verified**).
 
@@ -433,9 +454,11 @@ their recorded step times on `DrtWriter` and compares every snapshot):
   removes the runs no write has reached for about 30 s (runs idle for 29 s
   stayed, runs idle for 35 s went), scanning the array from the front and
   moving the last listed entry into the place of each removed one, then
-  appends the run, increments the generation and writes the page. Odd
-  generations go to the copy at the end, even ones to the start, so the
-  older copy is replaced. Removed entries stay behind the listed ones,
+  appends the run, increments the generation and writes the page into the
+  copy that does not hold the current generation (the one at the end when
+  both hold the same), so the copies alternate. Once, with a disk of the
+  mirror missing (`m5stale`), the generation went from 1 to 3 into the copy
+  at the start; not modelled yet. Removed entries stay behind the listed ones,
   outside the count and checksum (`m5drt2`: listing run 2 after runs 0 and
   1 went clean leaves a stale 1 behind it).
 * A write into a listed run writes no header, so the log keeps listing

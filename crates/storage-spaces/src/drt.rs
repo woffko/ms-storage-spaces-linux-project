@@ -91,6 +91,13 @@ impl DirtyRegions {
             w.generation = h.generation;
             w.entries[..h.runs.len()].copy_from_slice(&h.runs);
             w.count = h.runs.len();
+            // With equal generations the copy at the start counts as current.
+            let other = self
+                .copies
+                .iter()
+                .find(|c| c.offset == 0)
+                .and_then(|c| c.header.as_ref());
+            w.current_at_end = other.is_none_or(|o| o.generation < h.generation);
         }
         w
     }
@@ -146,6 +153,8 @@ pub struct DrtWriter {
     generation: u64,
     entries: Vec<u64>,
     count: usize,
+    /// Whether the copy at the end holds the current generation.
+    current_at_end: bool,
 }
 
 impl Default for DrtWriter {
@@ -161,6 +170,7 @@ impl DrtWriter {
             generation: 0,
             entries: vec![0; MAX_ENTRIES],
             count: 0,
+            current_at_end: false,
         }
     }
 
@@ -188,9 +198,10 @@ impl DrtWriter {
 
     /// A write reaches the extent run starting at virtual slab `run`. If it
     /// is not listed, it is appended in the next generation, and the header
-    /// is written: returns the page and whether it goes to the copy at the
-    /// end (odd generations) rather than the start. `None` if the run is
-    /// listed or does not fit (what Windows does then is not known).
+    /// is written into the copy that does not hold the current generation
+    /// (the one at the end when both hold the same): returns the page and
+    /// whether it goes to the copy at the end. `None` if the run is listed or
+    /// does not fit (what Windows does then is not known).
     pub fn write(&mut self, run: u64) -> Option<(bool, Vec<u8>)> {
         if self.runs().contains(&run) || self.count == MAX_ENTRIES {
             return None;
@@ -198,7 +209,8 @@ impl DrtWriter {
         self.generation = self.generation.checked_add(1)?;
         self.entries[self.count] = run;
         self.count += 1;
-        Some((self.generation % 2 == 1, self.page()))
+        self.current_at_end = !self.current_at_end;
+        Some((self.current_at_end, self.page()))
     }
 
     /// `Disconnect-VirtualDisk`: every run is removed and generation 0 is
@@ -206,6 +218,7 @@ impl DrtWriter {
     pub fn disconnect(&mut self) -> Vec<u8> {
         self.clean(|_| true);
         self.generation = 0;
+        self.current_at_end = false;
         self.page()
     }
 
@@ -306,8 +319,9 @@ mod tests {
         // With one run gone clean the new one fits again: the last entry
         // takes the place of the removed one.
         w.clean(|r| r == 0);
+        // Only the copy at the start is valid, so the next one goes to the end.
         let (at_end, page) = w.write(1 << 40).unwrap();
-        assert!(!at_end);
+        assert!(at_end);
         assert_eq!(
             u32::from_le_bytes(page[0x10..0x14].try_into().unwrap()) as usize,
             MAX_ENTRIES
