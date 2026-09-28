@@ -44,6 +44,14 @@ spaces \- read Microsoft Storage Spaces pools on Linux
 .I device ...
 .B \-\-space
 .I name
+.br
+.B spaces dump
+.I device ...
+.br
+.B spaces diff \-\-old
+.I device ...
+.B \-\-new
+.I device ...
 .SH DESCRIPTION
 .B spaces
 reads the metadata of Microsoft Storage Spaces pools created by Windows 11
@@ -91,6 +99,12 @@ healthy, degraded or failed with the disks at hand, plus the state of the
 parity journal, dirty region tracking and write-back cache); the slab
 allocation of a space; copy a space into a sparse image file; print a
 device-mapper table for a simple or mirror space.
+.TP
+.B dump\fR, \fBdiff
+Print the pool metadata one fact per line (every copy of the pool
+database, its records raw and decoded, the dirty region log, parity journal
+and write-back cache of each space), or the lines only one of two states of
+a pool has, for comparing a pool before and after a change.
 .SH OPTIONS
 .TP
 .BR \-\-unclean\-parity " " refuse | data

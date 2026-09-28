@@ -577,12 +577,18 @@ recovered space.
 
 ## Open questions
 
-* SDBB entries carry no checksum of their own; how Windows itself detects
-  torn entries is unknown (whether it compares copies like `spaces`).
+* SDBB entries carry no checksum of their own: a torn copy of equal
+  sequence goes unnoticed by Windows (it used device 0's copy and rewrote
+  neither), one that does not decode costs its disk.
 * Remaining record fields (provisioning type, sizes, disk attributes, tiers).
 * Which copy of a mirror Windows reads when (it varies between attaches);
-  the meaning of the constant entry
-  of the cache's type 1 slot; why the cache log restarts mid-area.
+  the meaning of the constant entry `8, 1` of the cache's type 1 slot; how
+  Windows groups concurrent writes into cache slots and when a flush starts.
+* The object id of a new space and the disk a new slab goes to (both vary
+  between identical runs or follow no metadata); the order in which the
+  members' database copies are written within one update.
+* The dirty region log's generation jumping by 2 while a mirror disk was
+  missing.
 * Which side Windows trusts for an inconsistent parity stripe.
 * Tier movement by the tiering optimizer (not exercised yet), enclosure
   awareness, older pool versions

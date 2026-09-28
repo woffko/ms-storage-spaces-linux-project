@@ -295,7 +295,12 @@ The format document has the specifications.
   first write into a chunk takes the next block (parity caches from 64)
   and the next slot; writes of whole stripes bypass the cache and get a
   journal slot listing the run's consistent stripes. 24H2 ignores a zero
-  cache size for parity spaces.
+  cache size for parity spaces. Destaging (`m5wbc2`, 1500 small writes):
+  driven by the log, not the clock; the log wraps to slot 0, and before
+  reusing the oldest slots Windows flushes every cached chunk (tombstone
+  entries in batches, the data through the parity journal); a disconnect
+  and five idle minutes destage nothing. All 1500 blocks read back through
+  the reader, destaged or still cached.
 * Database update protocol (`m5db`, `m5stale`; `database::Database`): every
   member's pool database in every state byte for byte (rename, new space,
   extension, deletion, a disk that missed writes and came back): new
@@ -303,7 +308,10 @@ The format document has the specifications.
   theirs, then the old ones freed, then the header; the default security
   descriptor on the first change of a space. While a disk is away nothing
   is written; the returning disk gets the next update first, the others at
-  the repair.
+  the repair. Diverging copies (round trips of altered copies): on equal
+  sequences Windows used device 0's copy, as `spaces` does; a newer copy
+  that does not decode cost its disk, and the good copy was rewritten with
+  a higher sequence.
 * Extent and space health (`m5stale`, with `stale3` of the corpus): with a
   disk to reallocate to, a missing disk's copy gets a stale marker and a
   replacement copy; without one, missed writes are known only from the

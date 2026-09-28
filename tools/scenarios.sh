@@ -68,6 +68,9 @@ m5ids | -DiskCount 2 -Resiliency Simple -Columns 2 -SizeMB 1024 -AllocationUnitM
 # Destaging of the write-back cache: a disconnect, then 1500 small writes
 # into distinct chunks (73 % of the cache), then five minutes idle.
 m5wbc2 | -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -SizeMB 2048 -NoPattern | snap:s0; write:m5wbc2:0:4:a; snap:s1; disconnect:m5wbc2; snap:s2; connect:m5wbc2; snap:s3; writes:m5wbc2:1500:512:4:b; snap:s4; sleep:300; snap:s5; dismount
+# Thin parity space with the cache: a write into an unallocated row, then
+# enough small writes to make Windows destage.
+m5thinwbc | -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -Provisioning Thin -SizeMB 4096 -NoPattern | snap:s0; write:m5thinwbc:2097152:4:a; snap:s1; writes:m5thinwbc:1500:512:4:b; snap:s2; dismount
 LIST
 exit $status
 }

@@ -162,6 +162,13 @@ away while the pool changed (normal); a `torn` copy was cut short by an
 interrupted update and is ignored in favour of the copy most disks hold; an
 `unusable` newer copy could not be decoded, so an older one is used.
 
+`spaces dump DEVICES...` prints the whole metadata one fact per line: every
+copy of the pool database with its records, and the dirty region log,
+parity journal and write-back cache of each space. `spaces diff --old
+DEVICES... --new DEVICES...` lists what changed between two states of a
+pool (for example copies of the disks before and after Windows used it),
+which helps with bug reports.
+
 ## Troubleshooting
 
 * `no Storage Spaces pool members found`: the disks are not visible

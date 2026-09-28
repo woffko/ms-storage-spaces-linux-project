@@ -30,7 +30,8 @@ Windows 11 (24H2, pool version 28, and Insider builds, pool version 29).
 * udev rule and systemd unit: pools are attached at boot and when their disks
   appear.
 * `spaces info`, `extents`, `export`, `dm-table` for inspecting pools without
-  attaching them.
+  attaching them; `spaces dump` and `diff` print the metadata one fact per
+  line and compare two states of a pool.
 
 ### Packaging
 
