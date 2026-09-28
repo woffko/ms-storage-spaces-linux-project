@@ -28,7 +28,7 @@ on-disk format that is checked against pools created by Windows.
 | The per-space write-back cache | read, including data not yet moved out of it |
 | 512-byte and 4 KiB logical sectors; 512e and 4Kn member disks | read |
 | Retired, replaced or missing disks, out-of-date mirror copies | read as far as the redundancy allows |
-| Pools after a crash or power loss | read; the few stripes or mirror rows whose outcome Windows decides on its next mount are refused |
+| Pools after a crash or power loss | read; the few parity stripes or mirror rows left inconsistent by writes in flight are refused |
 | Pools created by Windows 11 24H2 (pool version 28) and Insider builds (version 29) | yes |
 | Pools created by Windows 8, 10 or Windows Server | not supported |
 | Writing, pool management, ReFS | not yet |

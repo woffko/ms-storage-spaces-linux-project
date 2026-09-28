@@ -1,0 +1,32 @@
+{
+ "windows_build": "10.0.26100.0",
+ "wait_seconds": 120,
+ "states": {
+  "attached": {
+   "pool": "Healthy",
+   "space": "Healthy",
+   "jobs": []
+  },
+  "waited": {
+   "pool": "Healthy",
+   "space": "Healthy",
+   "jobs": []
+  },
+  "repaired": {
+   "pool": "Healthy",
+   "space": "Healthy",
+   "jobs": [
+    "drtdism-Repair:Completed"
+   ]
+  }
+ },
+ "pattern_check_ok": true,
+ "block_8mib_before": {
+  "copy0": "drtdism",
+  "copy1": "COPY1"
+ },
+ "block_8mib_after": {
+  "copy0": "drtdism",
+  "copy1": "COPY1"
+ }
+}

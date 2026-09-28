@@ -1,0 +1,50 @@
+{
+ "windows_build": "10.0.26100.0",
+ "attached": {
+  "pool": "Healthy",
+  "space": "Healthy",
+  "operational": "OK"
+ },
+ "pattern_check_ok": true,
+ "probe": [
+  {
+   "pass": "sequential",
+   "counts": {
+    "drtdism": 256
+   }
+  },
+  {
+   "pass": "4k",
+   "counts": {
+    "drtdism": 256
+   }
+  },
+  {
+   "pass": "sequential-again",
+   "counts": {
+    "drtdism": 256
+   }
+  }
+ ],
+ "copies_before": {
+  "copy0": {
+   "drtdism": 256
+  },
+  "copy1": {
+   "COPY1": 256
+  }
+ },
+ "copies_after": {
+  "copy0": {
+   "drtdism": 256
+  },
+  "copy1": {
+   "COPY1": 256
+  }
+ },
+ "connected": {
+  "pool": "Healthy",
+  "space": "Healthy",
+  "operational": "OK"
+ }
+}

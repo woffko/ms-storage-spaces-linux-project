@@ -362,21 +362,45 @@ starts with a header, and a second copy of it sits 8 KiB before the end:
 | 0x08 | 8 | generation (the copy with the higher one is current) |
 | 0x10 | 4 | number of entries |
 | 0x14 | 4 | CRC-32 (zlib) of the first `0x18 + 8 * count` bytes with this field zeroed |
-| 0x18 | 8 each | virtual slab where an extent run with writes in flight starts |
+| 0x18 | 8 each | virtual slab where a listed extent run starts |
 
-(**verified**: `crashmirrorwc`, whose disks were pulled during small
-writes, lists both of its extent runs, 0 and 4, in generation 2 and run 0
-in generation 1.) The pools made by `tools/vm/New-TestPool.ps1` list the
-extent runs they were written through as well, although their copies agree
-(the pattern tests read them without a refusal): the generator dismounts
-the VHDX files while the pool is online. Whether a clean detach or a
-Windows shutdown empties the log is not known yet. The copies of a mirror may differ
-inside a listed run, and Windows resynchronises them when it mounts the
-pool. Which copy it keeps is not recorded and not predictable: in
-`crashmirrorwc` it kept copy 1 in 8 of the 9 differing MiB and copy 0 in
-the other, in `crashmirror` copy 0 in both. `spaces` reads every copy in a
-listed run and refuses rows whose copies differ (`--unclean-parity data`
-returns the highest copy).
+The log lists the extent runs written since the space was last
+disconnected (**verified** with batch 9 of `tools/gen-corpus.sh`, whose
+fixtures the test `dirty_region_log_after_each_ending` reads):
+
+* A new space has both copies at generation 0 with no entries
+  (`drtnowrite`).
+* The first write into an extent run rewrites the older copy with the next
+  generation and the run added: `drtdism` has generation 1 listing run 0
+  at the end and generation 0 at the start; `m4kn`, written through four
+  runs of 256 MiB, has generation 4 listing runs 0-3 at the start and
+  generation 3 listing 0-2 at the end.
+* The runs stay listed after 1, 5 and 15 minutes without writes
+  (`drtidle*`), after setting the pool read-only (`drtro`), when the disks
+  are detached with the pool online (`drtdism`, and every other pool of the
+  generator) and through a Windows restart with the pool attached
+  (`drtkeep`).
+* Only `Disconnect-VirtualDisk` empties the log: `drtdisc` has both copies
+  at generation 0 with no entries again.
+
+So a listed run is no sign of a crash: pools moved from a Windows machine
+that was shut down normally list every run written in their last sessions.
+The copies of a mirror can only differ inside a listed run, where a crash
+may have left a write on some copies only (`crashmirrorwc`, whose disks
+were pulled during small writes, lists both of its extent runs, 0 and 4, in
+generation 2 and run 0 in generation 1).
+
+Windows does not use the log to reconcile the copies, and it reads either
+copy (**verified** by the round trips recorded in `tests/evidence`
+and the test `roundtrip.rs`: copy 1 of `drtdism` and `drtdisc` was changed
+in the first 4 KiB of every MiB; Windows attached both pools as healthy,
+left both copies as they were, also after 120 s and `Repair-VirtualDisk`,
+and read copy 0 in four passes over `drtdism` but copy 1 in three of four
+passes over `drtdisc`). After the crash experiments its reads accordingly
+returned copy 1 in 8 of the 9 differing MiB of `crashmirrorwc` and copy 0
+in `crashmirror`. Differing copies have no right answer, so `spaces` reads
+every copy in a listed run and refuses rows whose copies differ
+(`--unclean-parity data` returns the highest copy).
 
 ## Parity journal (SPVDT, LE)
 
@@ -408,8 +432,7 @@ unless told to prefer the data (**verified**: every other MiB of the crashed
 pool equals what Windows shows after recovery).
 
 The mirror dirty region log (SPACEDRT, role 6) was unchanged in the mirror
-crash experiment; Windows' recovered content equalled copy 0, which the reader
-prefers. The thin space crash (cache in use) read exactly like Windows'
+crash experiment, and Windows' reads returned copy 0 there. The thin space crash (cache in use) read exactly like Windows'
 recovered space.
 
 ## Open questions
@@ -417,10 +440,8 @@ recovered space.
 * SDBB entries carry no checksum of their own; how Windows itself detects
   torn entries is unknown (whether it compares copies like `spaces`).
 * Remaining record fields (provisioning type, sizes, disk attributes, tiers).
-* Whether a clean detach or a Windows shutdown empties the mirror dirty
-  region log.
-* How Windows chooses between differing mirror copies after an unclean
-  shutdown; the meaning of the constant entry
+* Which copy of a mirror Windows reads when (it varies between attaches);
+  the meaning of the constant entry
   of the cache's type 1 slot; why the cache log restarts mid-area.
 * Which side Windows trusts for an inconsistent parity stripe.
 * Tier movement by the tiering optimizer (not exercised yet), enclosure

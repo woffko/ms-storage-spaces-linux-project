@@ -18,7 +18,7 @@ pool disks.
 | Write-back cache (default for new spaces) | read, including data not yet moved out of the cache |
 | Storage tiers, mirror-accelerated parity | read |
 | 512-byte and 4 KiB logical sectors, interleave 16 KiB to 1 MiB | read |
-| Pools after a crash or power loss | read; parity stripes and mirror copies whose outcome Windows decides on its next mount are refused (see below) |
+| Pools after a crash or power loss | read; parity stripes and mirror rows left inconsistent by writes in flight are refused (see below) |
 | Several spaces per pool, fragmented and extended spaces | read |
 | Member disks with 512-byte, 512e and 4Kn sectors | read |
 | Pools after a disk was retired, replaced or removed | read |
@@ -124,10 +124,14 @@ Options:
   sudo spaces --unclean-parity data attach
   ```
 
-In mirror runs with writes in flight the copies are compared on every
-read; rows whose copies differ are refused the same way (`spaces info`
-reports `dirty region tracking: ... not cleanly shut down`), because which
-copy Windows keeps when it resynchronises them is not predictable. The
+Mirror spaces are handled differently: Windows lists the extent runs
+written since the space was last disconnected (a restart does not clear
+the list, so nearly every mirror shows some, and `spaces info` reports
+`dirty region log: N extent run(s) written since ...`). The copies of such
+runs are compared on every read, and rows whose copies differ, which only a
+crash with writes in flight leaves behind, are refused the same way:
+Windows itself never reconciles them and reads either copy, so there is no
+right answer. Comparing costs reading every copy of those runs. The
 write-back cache and the parity journal are mirrored too; what their copies
 disagree about is treated the same way. `--unclean-parity data` reads the
 highest mirror copy and the newest cache and journal slots. Simple spaces

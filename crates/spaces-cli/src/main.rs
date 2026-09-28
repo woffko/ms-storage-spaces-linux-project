@@ -476,10 +476,10 @@ fn info(pool: &Pool<File>, all: bool) -> Result<()> {
                             }
                         );
                     }
-                    if r.unclean_mirror_runs() > 0 {
+                    if r.listed_mirror_runs() > 0 {
                         println!(
-                            "       dirty region tracking: {} extent run(s) not cleanly shut down; differing mirror copies are {}",
-                            r.unclean_mirror_runs(),
+                            "       dirty region log: {} extent run(s) written since the space was last disconnected; their copies are compared on read, and differing copies are {}",
+                            r.listed_mirror_runs(),
                             if OPEN_OPTIONS
                                 .get()
                                 .is_some_and(|o| o.unclean_parity == UncleanParity::PreferData)

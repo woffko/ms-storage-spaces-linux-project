@@ -16,9 +16,11 @@ Windows 11 (24H2, pool version 28, and Insider builds, pool version 29).
 * The per-space write-back cache, including data not yet moved to the space.
 * Missing or failing disks as far as the redundancy allows (any two for dual
   parity); out-of-date mirror copies are never read; quorum check.
-* Unclean shutdowns: parity stripes and mirror rows with writes in flight are
-  checked, and those whose outcome Windows decides on its next mount are
-  refused unless `--unclean-parity data` is given.
+* Unclean shutdowns: parity stripes the journal does not mark consistent
+  are checked, and so are the copies of mirror extent runs the dirty region
+  log lists (those written since the space was last disconnected); stripes
+  whose parity does not match and rows whose copies differ are refused
+  unless `--unclean-parity data` is given.
 
 ### Block devices
 

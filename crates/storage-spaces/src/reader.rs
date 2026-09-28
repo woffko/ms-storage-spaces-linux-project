@@ -125,35 +125,47 @@ impl<D: ReadAt> Mapped<'_, D> {
         Ok((n, false)) // not allocated (thin provisioning, or another tier)
     }
 
-    /// Reads a mirror row that had writes in flight at an unclean shutdown:
-    /// every present copy is read, and copies that differ are refused (or,
-    /// with [`UncleanParity::PreferData`], the highest copy number wins, which
-    /// is what Windows kept in the crash experiment `crashmirrorwc`).
-    /// Returns false when fewer than two copies can be read.
+    /// Reads a mirror row of an extent run the dirty region log lists (one
+    /// written since the space was last disconnected): every present copy is
+    /// read, and copies that differ are refused, or with
+    /// [`UncleanParity::PreferData`] the highest copy is returned. Windows
+    /// itself serves either copy and never reconciles them, so differing
+    /// copies have no right answer. Returns false when fewer than two copies
+    /// can be read.
     fn read_unclean_mirror(&self, offset: u64, loc: &Location, buf: &mut [u8]) -> Result<bool> {
         let l = &self.layout;
-        let mut copies: Vec<Vec<u8>> = Vec::new();
-        for copy in 0..l.copies {
+        let mut read = 0;
+        let mut differ = false;
+        let mut other = Vec::new();
+        for copy in (0..l.copies).rev() {
             let Some((disk, slab)) = l.physical(loc.column, copy, loc.row) else {
                 continue;
             };
-            let mut data = vec![0u8; buf.len()];
-            match self.pool.read_slab(disk, slab, loc.offset_in_slab, &mut data) {
-                Ok(true) => copies.push(data),
+            // The highest copy goes straight into `buf`, the others are
+            // compared with it.
+            let target = if read == 0 {
+                &mut *buf
+            } else {
+                other.resize(buf.len(), 0);
+                &mut other[..]
+            };
+            match self.pool.read_slab(disk, slab, loc.offset_in_slab, target) {
+                Ok(true) => {
+                    differ |= read > 0 && other[..] != buf[..];
+                    read += 1;
+                }
                 Ok(false) | Err(Error::Io(_)) => {}
                 Err(e) => return Err(e),
             }
         }
-        let Some(last) = copies.last() else { return Ok(false) };
-        if copies.len() < 2 {
+        if read < 2 {
             return Ok(false);
         }
-        if copies.iter().any(|c| c != last) && self.unclean == UncleanParity::Refuse {
+        if differ && self.unclean == UncleanParity::Refuse {
             return Err(Error::Pool(format!(
-                "mirror copies differ at {offset:#x} after an unclean shutdown"
+                "mirror copies differ at {offset:#x} (a crash with writes in flight)"
             )));
         }
-        buf.copy_from_slice(last);
         Ok(true)
     }
 
@@ -476,9 +488,10 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
         Ok(None)
     }
 
-    /// Number of mirror extent runs that had writes in flight when the pool
-    /// was last detached (0 after a clean shutdown).
-    pub fn unclean_mirror_runs(&self) -> usize {
+    /// Number of mirror extent runs the dirty region log lists: those written
+    /// since the space was last disconnected (a restart does not clear them).
+    /// Their copies are compared on read.
+    pub fn listed_mirror_runs(&self) -> usize {
         self.base.drt.as_ref().map_or(0, |d| d.dirty_runs())
     }
 

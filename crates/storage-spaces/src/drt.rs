@@ -9,13 +9,13 @@
 //! | 0x08 | 8 | generation (the copy with the higher one is current) |
 //! | 0x10 | 4 | number of entries |
 //! | 0x14 | 4 | CRC-32 (zlib) of the first `0x18 + 8 * count` bytes, this field zeroed |
-//! | 0x18 | 8 each | virtual slab where an extent run with writes in flight starts |
+//! | 0x18 | 8 each | virtual slab where a listed extent run starts |
 //!
-//! Pools whose disks were removed while the pool was online list the runs
-//! written last even when the copies agree; whether a clean shutdown empties
-//! the log is not known. The copies of a mirror may differ inside a listed
-//! run: Windows resynchronises them when it mounts the pool, and which copy
-//! it keeps is not recorded here.
+//! The log lists the extent runs written since the space was last
+//! disconnected; a Windows restart does not clear it. The copies of a mirror
+//! can differ only inside a listed run (after a crash with writes in
+//! flight), and Windows neither reconciles them nor prefers one when it
+//! reads.
 
 use std::collections::BTreeSet;
 

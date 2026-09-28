@@ -206,15 +206,31 @@ in this repository.
 
 ### M4 (exit criteria met except the release, 2026-09-28)
 
-* Release: postponed (2026-09-28). Every mirror pool of the corpus lists
-  extent runs in its dirty region log although its copies agree (see the
-  format document), so `spaces info` calls them not cleanly shut down and
-  reads there compare every copy. How the log looks after a clean detach
-  or a Windows shutdown decides whether that wording and the extra reads
-  are right; it is to be settled first. The release is then a tag
-  `v0.1.0` and a GitHub release with a static x86_64 musl build; the
+* Release: postponed (2026-09-28) until the dirty region question was
+  settled; it is (below) and v0.1.0 waits for approval. The release is a
+  tag `v0.1.0` and a GitHub release with a static x86_64 musl build; the
   crates go to crates.io only once a stable release is confirmed (decision
   2026-09-28), their metadata is ready.
+* Dirty region log of mirrors (settled 2026-09-28): every mirror pool of the
+  corpus listed extent runs although its copies agreed. Batch 9 of
+  `tools/gen-corpus.sh` ended small mirror pools in every way
+  (`New-TestPool.ps1 -Finish/-IdleSeconds`, one restart of the VM): the log
+  lists the runs written since the space was last disconnected; 1-15 min
+  idle, a read-only pool, detaching the disks and a Windows restart keep
+  them, only `Disconnect-VirtualDisk` empties it (fixtures and the test
+  `dirty_region_log_after_each_ending`). Round trips of copies whose mirror
+  copies were made to differ in 256 blocks (`tools/raw2vhdx.py`,
+  `tools/vm/Test-RoundTrip.ps1`): Windows attached them as healthy, left
+  both copies as they were, also after 120 s and `Repair-VirtualDisk`, and
+  read copy 0 on one attach and copy 1 on another (`tests/roundtrip.rs`).
+  Consequences: `spaces info` now says "dirty region log: N extent run(s)
+  written since the space was last disconnected" instead of calling the
+  pool unclean; reads keep comparing the copies of listed runs, since only
+  there can a crash leave them different and Windows offers no answer (the
+  comparison now reads the highest copy into the caller's buffer and costs
+  about 20 % CPU when cached, one read per extra copy from disk); the
+  generator keeps detaching the disks with the pool online, because a
+  restart leaves the same state.
 * Packaging: `cargo install --locked --path crates/spaces-cli` installs
   `spaces`; `contrib/install.sh`; Debian package script
   (`contrib/deb/build-deb.sh`); `contrib/arch/PKGBUILD` builds and tests the

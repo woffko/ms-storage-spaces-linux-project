@@ -22,8 +22,10 @@ Layout variations:
       sector size item of the VHDX metadata is set before attaching)
   -SizeMB 0     the main space takes all remaining capacity (a full pool)
   -Finish       how the pool ends: Dismount detaches the VHDX files with the
-      pool online (default), Disconnect disconnects its spaces first, ReadOnly
-      sets the pool read-only first, Keep leaves it attached (for a restart)
+      pool online (default; mirror dirty region logs end as after a Windows
+      restart), Disconnect disconnects its spaces first (manual attach; empties
+      the logs), ReadOnly sets the pool read-only first, Keep leaves it
+      attached (for a restart)
   -IdleSeconds N  wait N seconds after the last write before finishing
   -Ntfs         instead of the pattern, the main space gets a GPT with one NTFS
       partition holding real files (System32 DLLs, -NtfsFilesMB in total) and
@@ -379,7 +381,13 @@ $manifest | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $dir
 
 if ($IdleSeconds -gt 0) { Start-Sleep -Seconds $IdleSeconds }
 switch ($Finish) {
-    'Disconnect' { Get-StoragePool -FriendlyName $poolName | Get-VirtualDisk | Disconnect-VirtualDisk }
+    'Disconnect' {
+        # Only spaces that are attached manually can be disconnected.
+        foreach ($v in Get-StoragePool -FriendlyName $poolName | Get-VirtualDisk) {
+            $v | Set-VirtualDisk -IsManualAttach $true
+            Disconnect-VirtualDisk -FriendlyName $v.FriendlyName
+        }
+    }
     'ReadOnly' { Set-StoragePool -FriendlyName $poolName -IsReadOnly $true }
 }
 # Detach so the VHDX files are consistent and can be copied.

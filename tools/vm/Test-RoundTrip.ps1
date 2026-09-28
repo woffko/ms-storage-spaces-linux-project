@@ -12,12 +12,20 @@ The script attaches the disks and writes roundtrip.json there:
   extents    Get-PhysicalExtent of every space
   checks     the verification pattern of every pattern space, chkdsk and
              the file hashes of an NTFS space
-Then it detaches the disks again. Run on the Windows test VM only.
+With -ProbeStrideKB N it also reads the 4 KiB block at every N KiB of the
+main space three times (4 MiB sequential reads, 4 KiB reads, 4 MiB again)
+and counts the tags found there ("probe"): after mirror copies were made
+to differ, this shows which copy Windows reads.
+With -WaitSeconds it keeps the pool attached that long before the checks
+(state "waited"), so that background work of Windows can run. Then it
+detaches the disks again. Run on the Windows test VM only.
 #>
 param(
     [Parameter(Mandatory)] [string] $Name,
     [string] $Root = 'C:\sstest\roundtrip',
-    [switch] $NoRepair
+    [switch] $NoRepair,
+    [int] $WaitSeconds = 0,
+    [int] $ProbeStrideKB = 0
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -66,6 +74,30 @@ public static class SsVerify {
             }
         }
         return -1;
+    }
+    // Tags (bytes 16..32) of the 4 KiB blocks at every stride bytes in
+    // [0, size), read in chunk-sized reads.
+    public static string[] Tags(string device, long size, long stride, int chunk) {
+        var tags = new System.Collections.Generic.List<string>();
+        byte[] buf = new byte[Math.Max(chunk, 4096)];
+        using (var fs = new FileStream(device, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4096)) {
+            if (chunk <= 4096) {
+                for (long at = 0; at < size; at += stride) {
+                    fs.Position = at;
+                    for (int got = 0; got < 4096; ) got += fs.Read(buf, got, 4096 - got);
+                    tags.Add(System.Text.Encoding.ASCII.GetString(buf, 16, 16).TrimEnd('\0'));
+                }
+            } else {
+                for (long pos = 0; pos < size; pos += chunk) {
+                    int n = (int)Math.Min(chunk, size - pos);
+                    fs.Position = pos;
+                    for (int got = 0; got < n; ) got += fs.Read(buf, got, n - got);
+                    for (long at = (pos + stride - 1) / stride * stride; at < pos + n; at += stride)
+                        tags.Add(System.Text.Encoding.ASCII.GetString(buf, (int)(at - pos) + 16, 16).TrimEnd('\0'));
+                }
+            }
+        }
+        return tags.ToArray();
     }
 }
 '@
@@ -123,6 +155,11 @@ try {
     Start-Sleep -Seconds 5
     $result.connected = Get-State
 
+    if ($WaitSeconds -gt 0) {
+        Start-Sleep -Seconds $WaitSeconds
+        $result.waited = Get-State
+    }
+
     if (-not $NoRepair) {
         foreach ($vd in Get-StoragePool -FriendlyName $poolName | Get-VirtualDisk) {
             Repair-VirtualDisk -FriendlyName $vd.FriendlyName
@@ -172,6 +209,19 @@ try {
         Remove-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber $part.PartitionNumber -AccessPath "$($letter):\"
     }
     $result.checks = $checks
+    if ($ProbeStrideKB -gt 0) {
+        $disk = Get-VirtualDisk -FriendlyName $manifest.space.name | Get-Disk
+        $dev = "\\.\PhysicalDrive$($disk.Number)"
+        $size = [int64]$manifest.pattern_size
+        $probe = @()
+        foreach ($pass in @(@('sequential', 4MB), @('4k', 4096), @('sequential-again', 4MB))) {
+            $tags = [SsVerify]::Tags($dev, $size, [int64]$ProbeStrideKB * 1KB, $pass[1])
+            $counts = [ordered]@{}
+            foreach ($g in $tags | Group-Object | Sort-Object Name) { $counts[$g.Name] = $g.Count }
+            $probe += [ordered]@{ pass = $pass[0]; counts = $counts; tags = ($tags -join ',') }
+        }
+        $result.probe = $probe
+    }
 } catch {
     $result.error = "$_"
 } finally {

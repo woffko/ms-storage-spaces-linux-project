@@ -94,15 +94,17 @@ device-mapper table for a simple or mirror space.
 .SH OPTIONS
 .TP
 .BR \-\-unclean\-parity " " refuse | data
-After an unclean shutdown (crash, power loss, disks pulled), Windows
-repairs parity stripes and mirror copies with writes in flight when it
-mounts the pool, and which side it keeps is not recorded. By default reads
-of such parity stripes whose parity does not match, of mirror rows whose
-copies differ and of write-back cache chunks whose mirrored copies disagree
-fail with an I/O error;
+After an unclean shutdown (crash, power loss, disks pulled), parity
+stripes, mirror rows and write-back cache slots with writes in flight can
+be inconsistent. Windows repairs parity stripes when it mounts the pool,
+and which side it keeps is not recorded; mirror copies it never reconciles
+and reads either one. By default reads of parity stripes whose parity does
+not match, of mirror rows whose copies differ and of write-back cache
+chunks whose mirrored copies disagree fail with an I/O error;
 .B data
 returns the data as it is on disk (the highest mirror copy, the newest
-cache and journal entries). Attaching the pool to Windows once repairs it.
+cache and journal entries). Attaching the pool to Windows once repairs its
+parity stripes.
 .SH BACKENDS
 .TP
 .B dm
