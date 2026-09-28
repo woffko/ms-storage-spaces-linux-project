@@ -1,6 +1,7 @@
 //! Dirty region tracking headers (SPACEDRT) of mirror spaces. The input is
 //! the tracking space; the harness fixes the signature and CRC of both
-//! header copies when their first byte after the signature is odd.
+//! header copies when their first byte after the signature is odd. Valid
+//! copies must survive encoding and decoding unchanged.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -38,5 +39,28 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(Some(d)) = DirtyRegions::load(len as u64, read) {
         let _ = d.dirty_runs();
         let _ = d.is_dirty(0);
+        // Encoding a valid copy reproduces the part its checksum covers,
+        // and decodes to the same header.
+        for c in d.copies() {
+            if let Some(h) = &c.header {
+                let page = h.encode();
+                let covered = 0x18 + 8 * h.runs.len();
+                assert_eq!(page[..covered], c.page[..covered]);
+                let again = DirtyRegions::load(0x4000, |off, buf| {
+                    buf.fill(0);
+                    if off == 0 {
+                        buf.copy_from_slice(&page);
+                    }
+                    Ok(())
+                })
+                .unwrap()
+                .unwrap();
+                assert_eq!(again.copies()[0].header.as_ref(), Some(h));
+                // The next write predicts a header that decodes as well.
+                if let Some((_, next)) = d.after_first_write(len as u64, u64::MAX, &[]) {
+                    assert_eq!(&next[..8], b"SPACEDRT");
+                }
+            }
+        }
     }
 });

@@ -1,0 +1,250 @@
+<#
+.SYNOPSIS
+Runs a scripted scenario on an attached test pool and takes snapshots of its
+member disks between the steps (for the experiments of M5 in docs/plan.md).
+
+The pool is made by New-TestPool.ps1 -Finish Keep, so it stays attached.
+-Steps lists operations separated by ';', arguments separated by ':':
+  snap:LABEL[:MB]            snapshot every attached member disk to
+                             C:\sstest\<Name>\snap-LABEL\disk<i>.snap, plus
+                             state.json (health, extents, disks); with MB only
+                             the first MB MiB are read (a few seconds instead of
+                             a minute; the rest of the image stays zero)
+  write:SPACE:OFFKB:LENKB:TAG  write the verification pattern tagged TAG
+                             (write-through, flushed)
+  sleep:SECONDS
+  rename:SPACE:NEWNAME
+  resize:SPACE:SIZEMB
+  disconnect:SPACE           set manual attach and disconnect the space
+  connect:SPACE
+  detachdisk:I / attachdisk:I  dismount / mount member image disk<I>.vhdx
+  newdisk:I                  create disk<I>.vhdx (8 GiB) and add it to the pool
+  retire:I                   set the usage of member I to Retired
+  removedisk:I               remove member I from the pool
+  repair:SPACE               Repair-VirtualDisk (waits for it)
+  readonly:true|false        set the pool read-only or writable
+  newspace:NAME:RESILIENCY:SIZEMB[:Thin|Fixed]
+  removespace:NAME
+  dismount                   detach every member image
+A snapshot file ("SSSNAP01") holds the disk size and runs of 4 KiB pages:
+kind 1 = data (offset u64, pages u32, the pages), kind 2 = verification
+pattern (offset u64, pages u32, pattern offset u64, tag[16]); zero pages
+are left out. `spaces snapshot-to-raw` turns it into a raw image.
+Run on the Windows test VM only.
+#>
+param(
+    [Parameter(Mandatory)] [string] $Name,
+    [Parameter(Mandatory)] [string] $Steps,
+    [string] $Root = 'C:\sstest'
+)
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+if ($env:COMPUTERNAME -notin 'DESKTOP-BQ2J4NS', 'DESKTOP-ELS4LDK') { throw 'Unexpected machine' }
+if ($Name -notmatch '^[A-Za-z0-9_-]+$') { throw 'Bad name' }
+
+Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+public static class SsScenario {
+    static ulong SplitMix(ref ulong s) {
+        s += 0x9E3779B97F4A7C15UL;
+        ulong z = s;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9UL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBUL;
+        return z ^ (z >> 31);
+    }
+    static readonly byte[] Magic = System.Text.Encoding.ASCII.GetBytes("SSPATTRN");
+    static void FillBlock(byte[] buf, int at, ulong offset, byte[] tag, int tagAt) {
+        Buffer.BlockCopy(Magic, 0, buf, at, 8);
+        Buffer.BlockCopy(BitConverter.GetBytes(offset), 0, buf, at + 8, 8);
+        Buffer.BlockCopy(tag, tagAt, buf, at + 16, 16);
+        ulong s = offset;
+        for (int i = 32; i < 4096; i += 8) Buffer.BlockCopy(BitConverter.GetBytes(SplitMix(ref s)), 0, buf, at + i, 8);
+    }
+    public static void Write(string device, long start, long end, string tag) {
+        byte[] t = new byte[16];
+        byte[] a = System.Text.Encoding.ASCII.GetBytes(tag);
+        Buffer.BlockCopy(a, 0, t, 0, Math.Min(a.Length, 16));
+        const int chunk = 1 << 20;
+        byte[] buf = new byte[chunk];
+        using (var fs = new FileStream(device, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, 4096, FileOptions.WriteThrough)) {
+            for (long pos = start; pos < end; pos += chunk) {
+                int n = (int)Math.Min(chunk, end - pos);
+                for (int b = 0; b < n; b += 4096) FillBlock(buf, b, (ulong)(pos + b), t, 0);
+                fs.Position = pos;
+                fs.Write(buf, 0, n);
+            }
+            fs.Flush(true);
+        }
+    }
+    static bool IsZero(byte[] b, int at) {
+        for (int i = at; i < at + 4096; i += 8) if (BitConverter.ToUInt64(b, i) != 0) return false;
+        return true;
+    }
+    // Snapshot of a disk (see the script help for the format).
+    public static long[] Snapshot(string device, long size, long limit, string path) {
+        byte[] buf = new byte[1 << 20];
+        byte[] expected = new byte[4096];
+        long dataPages = 0, patternPages = 0;
+        using (var src = new FileStream(device, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4096))
+        using (var dst = new BinaryWriter(File.Create(path))) {
+            dst.Write(System.Text.Encoding.ASCII.GetBytes("SSSNAP01"));
+            dst.Write(size);
+            // The run being collected: kind 0 = none.
+            int kind = 0; long start = 0; int pages = 0; ulong patternStart = 0; byte[] tag = new byte[16];
+            var data = new MemoryStream();
+            Action flush = () => {
+                if (kind == 1) { dst.Write((byte)1); dst.Write(start); dst.Write(pages); dst.Flush(); data.WriteTo(dst.BaseStream); }
+                if (kind == 2) { dst.Write((byte)2); dst.Write(start); dst.Write(pages); dst.Write(patternStart); dst.Write(tag); }
+                kind = 0; pages = 0; data.SetLength(0);
+            };
+            for (long pos = 0; pos < limit; pos += buf.Length) {
+                int n = (int)Math.Min(buf.Length, limit - pos);
+                src.Position = pos;
+                for (int got = 0; got < n; ) {
+                    int r = src.Read(buf, got, n - got);
+                    if (r <= 0) throw new IOException("short read at " + (pos + got));
+                    got += r;
+                }
+                for (int p = 0; p < n; p += 4096) {
+                    long at = pos + p;
+                    if (IsZero(buf, p)) { flush(); continue; }
+                    bool pattern = false;
+                    ulong po = BitConverter.ToUInt64(buf, p + 8);
+                    if (BitConverter.ToUInt64(buf, p) == BitConverter.ToUInt64(Magic, 0) && po % 4096 == 0) {
+                        FillBlock(expected, 0, po, buf, p + 16);
+                        pattern = true;
+                        for (int i = 0; i < 4096 && pattern; i += 8)
+                            if (BitConverter.ToUInt64(buf, p + i) != BitConverter.ToUInt64(expected, i)) pattern = false;
+                    }
+                    if (pattern) {
+                        bool sameTag = true;
+                        for (int i = 0; i < 16; i++) if (tag[i] != buf[p + 16 + i]) sameTag = false;
+                        if (!(kind == 2 && start + pages * 4096L == at && patternStart + (ulong)pages * 4096UL == po && sameTag)) {
+                            flush();
+                            kind = 2; start = at; patternStart = po;
+                            Buffer.BlockCopy(buf, p + 16, tag, 0, 16);
+                        }
+                        pages++; patternPages++;
+                    } else {
+                        if (!(kind == 1 && start + pages * 4096L == at)) { flush(); kind = 1; start = at; }
+                        data.Write(buf, p, 4096);
+                        pages++; dataPages++;
+                    }
+                }
+            }
+            flush();
+        }
+        return new long[] { dataPages, patternPages };
+    }
+}
+'@
+
+$dir = Join-Path $Root $Name
+$poolName = "ss-$Name"
+function Get-Image([int] $i) { Join-Path $dir ("disk{0}.vhdx" -f $i) }
+function Get-Images { @(Get-ChildItem $dir -Filter 'disk*.vhdx' | Sort-Object { [int]($_.BaseName -replace '\D', '') } | ForEach-Object FullName) }
+function Get-SpaceDevice([string] $space) {
+    $d = Get-VirtualDisk -FriendlyName $space | Get-Disk
+    if ($d.IsOffline) { $d | Set-Disk -IsOffline $false }
+    if ($d.IsReadOnly) { $d | Set-Disk -IsReadOnly $false }
+    "\\.\PhysicalDrive$($d.Number)"
+}
+function Get-State {
+    $p = Get-StoragePool -FriendlyName $poolName -ErrorAction SilentlyContinue
+    if (-not $p) { return [ordered]@{ pool = $null } }
+    [ordered]@{
+        pool   = [ordered]@{ health = "$($p.HealthStatus)"; operational = "$($p.OperationalStatus)"; read_only = $p.IsReadOnly }
+        spaces = @($p | Get-VirtualDisk | ForEach-Object {
+            $v = $_
+            [ordered]@{
+                name = $v.FriendlyName; health = "$($v.HealthStatus)"; operational = "$($v.OperationalStatus)"
+                size = $v.Size; footprint = $v.FootprintOnPool; manual_attach = $v.IsManualAttach
+                extents = @(if ($v.OperationalStatus -ne 'Detached') { $v | Get-PhysicalExtent | ForEach-Object {
+                    [ordered]@{
+                        column = $_.ColumnNumber; copy = $_.CopyNumber; size = $_.Size
+                        virtual_offset = $_.VirtualDiskOffset; physical_offset = $_.PhysicalDiskOffset
+                        disk_unique_id = $_.PhysicalDiskUniqueId; status = "$($_.OperationalStatus)"
+                    }
+                } })
+            }
+        })
+        disks  = @($p | Get-PhysicalDisk | ForEach-Object {
+            [ordered]@{
+                unique_id = $_.UniqueId; health = "$($_.HealthStatus)"; operational = "$($_.OperationalStatus)"
+                usage = "$($_.Usage)"; allocated = $_.AllocatedSize; size = $_.Size
+            }
+        })
+    }
+}
+
+$log = @()
+foreach ($step in ($Steps.Split(';') | Where-Object { $_ })) {
+    $a = $step.Split(':')
+    $started = Get-Date
+    switch ($a[0]) {
+        'snap' {
+            $out = Join-Path $dir "snap-$($a[1])"
+            if (Test-Path $out) { throw "snapshot $($a[1]) exists" }
+            New-Item -ItemType Directory $out | Out-Null
+            $images = Get-Images
+            for ($i = 0; $i -lt $images.Count; $i++) {
+                $img = Get-DiskImage -ImagePath $images[$i]
+                if (-not $img.Attached) { continue }
+                $limit = if ($a.Count -gt 2) { [Math]::Min($img.Size, [int64]$a[2] * 1MB) } else { $img.Size }
+                $pages = [SsScenario]::Snapshot("\\.\PhysicalDrive$($img.Number)", $img.Size, $limit, (Join-Path $out "disk$i.snap"))
+                "  disk$i`: $($pages[0]) data pages, $($pages[1]) pattern pages"
+            }
+            Get-State | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 (Join-Path $out 'state.json')
+        }
+        'write' {
+            $dev = Get-SpaceDevice $a[1]
+            [SsScenario]::Write($dev, [int64]$a[2] * 1KB, ([int64]$a[2] + [int64]$a[3]) * 1KB, $a[4])
+        }
+        'sleep' { Start-Sleep -Seconds ([int]$a[1]) }
+        'rename' { Set-VirtualDisk -FriendlyName $a[1] -NewFriendlyName $a[2] }
+        'resize' { Get-VirtualDisk -FriendlyName $a[1] | Resize-VirtualDisk -Size ([int64]$a[2] * 1MB) }
+        'disconnect' {
+            Set-VirtualDisk -FriendlyName $a[1] -IsManualAttach $true
+            Disconnect-VirtualDisk -FriendlyName $a[1]
+        }
+        'connect' { Connect-VirtualDisk -FriendlyName $a[1] }
+        'detachdisk' { Dismount-DiskImage -ImagePath (Get-Image $a[1]) | Out-Null }
+        'attachdisk' { Mount-DiskImage -ImagePath (Get-Image $a[1]) | Out-Null; Start-Sleep -Seconds 3 }
+        'newdisk' {
+            $f = Get-Image $a[1]
+            if (Test-Path $f) { throw "$f exists" }
+            $scriptPath = Join-Path $dir 'diskpart.txt'
+            [IO.File]::WriteAllText($scriptPath, "create vdisk file=`"$f`" maximum=8192 type=expandable`r`nselect vdisk file=`"$f`"`r`nattach vdisk`r`n")
+            $out = diskpart /s $scriptPath
+            if ($LASTEXITCODE -ne 0) { throw "diskpart failed: $out" }
+            Remove-Item $scriptPath
+            Start-Sleep -Seconds 2
+            $number = (Get-DiskImage -ImagePath $f).Number
+            $pd = Get-PhysicalDisk | Where-Object DeviceId -eq "$number"
+            Add-PhysicalDisk -StoragePoolFriendlyName $poolName -PhysicalDisks $pd
+        }
+        'retire' {
+            $number = (Get-DiskImage -ImagePath (Get-Image $a[1])).Number
+            Get-PhysicalDisk | Where-Object DeviceId -eq "$number" | Set-PhysicalDisk -Usage Retired
+        }
+        'removedisk' {
+            $number = (Get-DiskImage -ImagePath (Get-Image $a[1])).Number
+            $pd = Get-PhysicalDisk | Where-Object DeviceId -eq "$number"
+            Remove-PhysicalDisk -StoragePoolFriendlyName $poolName -PhysicalDisks $pd -Confirm:$false
+        }
+        'repair' { Repair-VirtualDisk -FriendlyName $a[1] }
+        'readonly' { Set-StoragePool -FriendlyName $poolName -IsReadOnly ([bool]::Parse($a[1])) }
+        'newspace' {
+            $p = @{ StoragePoolFriendlyName = $poolName; FriendlyName = $a[1]; ResiliencySettingName = $a[2]; Size = [int64]$a[3] * 1MB }
+            if ($a.Count -gt 4) { $p.ProvisioningType = $a[4] }
+            New-VirtualDisk @p | Out-Null
+        }
+        'removespace' { Remove-VirtualDisk -FriendlyName $a[1] -Confirm:$false }
+        'dismount' { foreach ($f in Get-Images) { if ((Get-DiskImage -ImagePath $f).Attached) { Dismount-DiskImage -ImagePath $f | Out-Null } } }
+        default { throw "unknown step $step" }
+    }
+    $log += [ordered]@{ step = $step; started = $started.ToString('o'); seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 2) }
+    "$step done"
+}
+$log | ConvertTo-Json -Depth 3 | Add-Content -Encoding UTF8 (Join-Path $dir 'scenario.log')

@@ -16,13 +16,18 @@ fn splitmix(state: &mut u64) -> u64 {
 
 /// Produces the expected content of the block at `offset`.
 pub fn fill_block(block: &mut [u8], offset: u64, tag: &str) {
+    let mut t = [0u8; 16];
+    let n = tag.len().min(16);
+    t[..n].copy_from_slice(&tag.as_bytes()[..n]);
+    fill_block_raw(block, offset, &t);
+}
+
+/// [`fill_block`] with the 16 tag bytes as stored.
+pub fn fill_block_raw(block: &mut [u8], offset: u64, tag: &[u8; 16]) {
     assert_eq!(block.len(), BLOCK);
     block[0..8].copy_from_slice(MAGIC);
     block[8..16].copy_from_slice(&offset.to_le_bytes());
-    block[16..32].fill(0);
-    let t = tag.as_bytes();
-    let n = t.len().min(16);
-    block[16..16 + n].copy_from_slice(&t[..n]);
+    block[16..32].copy_from_slice(tag);
     let mut state = offset;
     for word in block[32..].as_chunks_mut::<8>().0 {
         word.copy_from_slice(&splitmix(&mut state).to_le_bytes());

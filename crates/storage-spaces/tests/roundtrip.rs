@@ -9,9 +9,7 @@ use std::path::Path;
 use serde_json::Value;
 
 fn evidence(name: &str) -> Value {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/evidence")
-        .join(name);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/evidence").join(name);
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 

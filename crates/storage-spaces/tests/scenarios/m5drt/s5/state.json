@@ -1,0 +1,38 @@
+﻿{
+    "pool":  {
+                 "health":  "Healthy",
+                 "operational":  "OK",
+                 "read_only":  false
+             },
+    "spaces":  [
+                   {
+                       "name":  "m5drt",
+                       "health":  "Unknown",
+                       "operational":  "Detached",
+                       "size":  1073741824,
+                       "footprint":  2684354560,
+                       "manual_attach":  true,
+                       "extents":  [
+
+                                   ]
+                   }
+               ],
+    "disks":  [
+                  {
+                      "unique_id":  "60022480FB56B94339F2C7CBBB2CB791",
+                      "health":  "Healthy",
+                      "operational":  "OK",
+                      "usage":  "Auto-Select",
+                      "allocated":  2165309440,
+                      "size":  8589934592
+                  },
+                  {
+                      "unique_id":  "60022480D0F66E16D75BD5B77ED64432",
+                      "health":  "Healthy",
+                      "operational":  "OK",
+                      "usage":  "Auto-Select",
+                      "allocated":  2165309440,
+                      "size":  8589934592
+                  }
+              ]
+}

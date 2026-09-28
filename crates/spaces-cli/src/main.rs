@@ -12,6 +12,8 @@ mod fuse;
 mod nbd;
 #[cfg(target_os = "linux")]
 mod scan;
+#[cfg(unix)]
+mod snapshot;
 #[cfg(all(target_os = "linux", feature = "ublk"))]
 mod ublk;
 use clap::{Parser, Subcommand};
@@ -212,6 +214,14 @@ enum Command {
         #[arg(long)]
         without_cache_slots: bool,
     },
+    /// Turn member disk snapshots of tools/vm/Invoke-Scenario.ps1 into raw
+    /// images (disk<N>.snap -> disk<N>.img in the same directory).
+    #[cfg(unix)]
+    #[command(hide = true)]
+    SnapshotToRaw {
+        #[arg(required = true)]
+        snapshots: Vec<PathBuf>,
+    },
     /// Verify the test pattern written by tools/vm/New-TestPool.ps1.
     #[command(hide = true)]
     CheckPattern {
@@ -332,6 +342,15 @@ fn main() -> Result<()> {
             output,
             without_cache_slots,
         } => fixture(&pool_dir, &output, without_cache_slots),
+        #[cfg(unix)]
+        Command::SnapshotToRaw { snapshots } => {
+            for snap in snapshots {
+                let out = snap.with_extension("img");
+                let (stored, pattern) = snapshot::to_raw(&snap, &out)?;
+                println!("{}: {stored} stored and {pattern} pattern pages", out.display());
+            }
+            Ok(())
+        }
         Command::CheckPattern { devices, space, length } => {
             let pool = open_pool(&devices)?;
             check_pattern(&pool, find_space(&pool, &space)?, length)
