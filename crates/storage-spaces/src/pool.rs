@@ -318,6 +318,17 @@ impl<D: ReadAt> Pool<D> {
 
     /// Device index and byte offset of a physical slab, or `None` if its
     /// disk is not present.
+    /// Reads the copy of the pool database on member device `device` again
+    /// (the pool keeps only the version it uses); `None` if it has none.
+    pub fn database_copy(&self, device: usize) -> Result<Option<(DbHeader, Vec<RawRecord>)>> {
+        let m = self
+            .members
+            .iter()
+            .find(|m| m.device == device)
+            .ok_or_else(|| Error::Pool(format!("device {device} is no pool member")))?;
+        read_database(&self.devices[device], m.partition.offset + POOL_DB_OFFSET)
+    }
+
     pub fn slab_location(&self, disk_id: u64, slab: u64) -> Result<Option<(usize, u64)>> {
         let disk = self
             .disks

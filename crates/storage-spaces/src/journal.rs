@@ -24,8 +24,9 @@ use crate::guid::Guid;
 pub const SPVDT_SIGNATURE: &[u8; 8] = b"SPVDT\0\0\0";
 const SPSLOT_SIGNATURE: &[u8; 8] = b"SPSLOT\0\0";
 
+/// What a journal entry says about the stripes of an extent run.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Consistency {
+pub enum Consistency {
     All,
     /// (consistent, stripes) runs from the start of the extent run.
     Runs(Vec<(bool, u64)>),
@@ -138,6 +139,14 @@ impl ParityJournal {
         self.runs
             .get(&run_start)
             .is_some_and(|versions| versions.iter().any(|c| c.is_dirty(stripe)))
+    }
+
+    /// Every version of the entry per extent run (keyed by the owner offset
+    /// where the run starts), in offset order.
+    pub fn entries(&self) -> Vec<(u64, &[Consistency])> {
+        let mut entries: Vec<_> = self.runs.iter().map(|(k, v)| (*k, v.as_slice())).collect();
+        entries.sort_by_key(|e| e.0);
+        entries
     }
 
     /// Number of extent runs with possibly inconsistent stripes.

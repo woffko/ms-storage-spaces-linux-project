@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail};
 
 #[cfg(target_os = "linux")]
 mod attach;
+mod dump;
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 mod fuse;
 mod nbd;
@@ -155,6 +156,22 @@ enum Command {
         #[arg(long)]
         ready_file: Option<PathBuf>,
     },
+    /// Print the pool metadata (database copies and records; cache, parity
+    /// journal and dirty region logs of each space), one fact per line.
+    Dump {
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+    },
+    /// Compare the metadata of two states of a pool: lines only in the old
+    /// state start with "-", lines only in the new one with "+".
+    Diff {
+        /// Member disks or images of the old state.
+        #[arg(long, required = true, num_args = 1..)]
+        old: Vec<PathBuf>,
+        /// Member disks or images of the new state.
+        #[arg(long, required = true, num_args = 1..)]
+        new: Vec<PathBuf>,
+    },
     /// Print a device-mapper table for the space (simple and mirror spaces).
     DmTable {
         #[arg(required = true)]
@@ -284,6 +301,20 @@ fn main() -> Result<()> {
         Command::Detach { space } => cmd_detach(space.as_deref()),
         #[cfg(target_os = "linux")]
         Command::Status => cmd_status(),
+        Command::Dump { devices } => {
+            for line in dump::dump(&open_pool(&devices)?) {
+                println!("{line}");
+            }
+            Ok(())
+        }
+        Command::Diff { old, new } => {
+            let old = dump::dump(&open_pool(&old)?);
+            let new = dump::dump(&open_pool(&new)?);
+            for line in dump::diff(&old, &new) {
+                println!("{line}");
+            }
+            Ok(())
+        }
         Command::DmTable { devices, space } => {
             let pool = open_pool(&devices)?;
             dm_table(&pool, find_space(&pool, &space)?, &devices)

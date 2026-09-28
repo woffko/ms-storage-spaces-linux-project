@@ -20,7 +20,7 @@
 use std::collections::BTreeSet;
 
 use crate::crc::crc32_excluding;
-use crate::error::{Result, format_err};
+use crate::error::Result;
 
 pub const SPACEDRT_SIGNATURE: &[u8; 8] = b"SPACEDRT";
 const HEADER: usize = 0x1000;
@@ -31,41 +31,70 @@ const SECOND_COPY_FROM_END: u64 = 0x2000;
 pub struct DirtyRegions {
     /// Virtual slabs where dirty extent runs start.
     runs: BTreeSet<u64>,
+    copies: Vec<DrtCopy>,
+}
+
+/// One of the two header copies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrtCopy {
+    /// Offset of the copy in the tracking space.
+    pub offset: u64,
+    /// `None` when the copy has no signature or does not check out.
+    pub header: Option<DrtHeader>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrtHeader {
+    pub generation: u64,
+    /// Virtual slabs where the listed extent runs start, in on-disk order.
+    pub runs: Vec<u64>,
 }
 
 impl DirtyRegions {
     /// Reads both header copies of a tracking space of `size` bytes; `None`
     /// when neither is valid.
     pub fn load(size: u64, mut read: impl FnMut(u64, &mut [u8]) -> Result<()>) -> Result<Option<Self>> {
-        let mut best: Option<(u64, Vec<u64>)> = None;
+        let mut copies = Vec::new();
         for offset in [0, size.saturating_sub(SECOND_COPY_FROM_END)] {
             let mut h = vec![0u8; HEADER];
             read(offset, &mut h)?;
-            if &h[0..8] != SPACEDRT_SIGNATURE {
-                continue;
-            }
-            let generation = u64::from_le_bytes(h[8..16].try_into().unwrap());
-            let count = u32::from_le_bytes(h[0x10..0x14].try_into().unwrap()) as usize;
-            if count > (HEADER - 0x18) / 8 {
-                return Err(format_err!("dirty region tracking with {count} entries"));
-            }
-            let span = 0x18 + 8 * count;
-            if crc32_excluding(&h[..span], 0x14) != u32::from_le_bytes(h[0x14..0x18].try_into().unwrap()) {
-                continue; // torn copy
-            }
-            let entries = h[0x18..span]
+            copies.push(DrtCopy {
+                offset,
+                header: Self::parse(&h),
+            });
+        }
+        let best = copies
+            .iter()
+            .filter_map(|c| c.header.as_ref())
+            .reduce(|a, b| if b.generation > a.generation { b } else { a });
+        Ok(best.map(|h| DirtyRegions {
+            runs: h.runs.iter().copied().collect(),
+            copies: copies.clone(),
+        }))
+    }
+
+    /// A header copy, or `None` if it is missing, torn or implausible.
+    fn parse(h: &[u8]) -> Option<DrtHeader> {
+        if &h[0..8] != SPACEDRT_SIGNATURE {
+            return None;
+        }
+        let count = u32::from_le_bytes(h[0x10..0x14].try_into().unwrap()) as usize;
+        if count > (HEADER - 0x18) / 8 {
+            return None;
+        }
+        let span = 0x18 + 8 * count;
+        if crc32_excluding(&h[..span], 0x14) != u32::from_le_bytes(h[0x14..0x18].try_into().unwrap()) {
+            return None; // torn copy
+        }
+        Some(DrtHeader {
+            generation: u64::from_le_bytes(h[8..16].try_into().unwrap()),
+            runs: h[0x18..span]
                 .as_chunks::<8>()
                 .0
                 .iter()
                 .map(|&e| u64::from_le_bytes(e))
-                .collect();
-            if best.as_ref().is_none_or(|(g, _)| generation > *g) {
-                best = Some((generation, entries));
-            }
-        }
-        Ok(best.map(|(_, runs)| DirtyRegions {
-            runs: runs.into_iter().collect(),
-        }))
+                .collect(),
+        })
     }
 
     /// Whether the extent run starting at virtual slab `slab` had writes in
@@ -74,9 +103,14 @@ impl DirtyRegions {
         self.runs.contains(&slab)
     }
 
-    /// Number of dirty extent runs (0 after a clean shutdown).
+    /// Number of dirty extent runs in the current copy.
     pub fn dirty_runs(&self) -> usize {
         self.runs.len()
+    }
+
+    /// Both header copies as found on disk.
+    pub fn copies(&self) -> &[DrtCopy] {
+        &self.copies
     }
 }
 
@@ -115,10 +149,17 @@ mod tests {
         let d = load(&space).unwrap();
         assert!(d.is_dirty(0) && d.is_dirty(4) && !d.is_dirty(1));
         assert_eq!(d.dirty_runs(), 2);
+        assert_eq!(d.copies()[1].offset, 0xe000);
+        assert_eq!(d.copies()[1].header.as_ref().unwrap().runs, [0]);
         // A torn newer copy falls back to the older one.
         space[0x18] ^= 1;
         let d = load(&space).unwrap();
         assert_eq!(d.dirty_runs(), 1);
+        assert_eq!(d.copies()[0].header, None);
+        // So does one whose entry count cannot fit.
+        space[..HEADER].copy_from_slice(&header(2, &[0, 4]));
+        space[0x10] = 0xff;
+        assert_eq!(load(&space).unwrap().dirty_runs(), 1);
         // An empty log.
         let mut clean = vec![0u8; 0x10000];
         clean[..HEADER].copy_from_slice(&header(0, &[]));

@@ -162,7 +162,7 @@ pub enum Lookup {
 
 /// Which part of a cached chunk holds valid data.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Validity {
+pub enum Validity {
     Full,
     /// Runs of 512-byte sectors from the chunk start: (valid, sectors).
     Runs(Vec<(bool, u64)>),
@@ -289,6 +289,15 @@ impl CacheIndex {
     /// owner offset `offset`.
     pub fn is_ambiguous(&self, offset: u64) -> bool {
         self.conflicts.contains(&(offset / self.header.chunk_size as u64))
+    }
+
+    /// The cached chunks as (owner offset, cache block, valid part), in
+    /// offset order.
+    pub fn mappings(&self) -> Vec<(u64, u64, &Validity)> {
+        let chunk = self.header.chunk_size as u64;
+        let mut all: Vec<_> = self.chunks.iter().map(|(k, (b, v))| (k * chunk, *b, v)).collect();
+        all.sort_by_key(|m| m.0);
+        all
     }
 
     /// Number of chunks the copies of the cache disagree about.

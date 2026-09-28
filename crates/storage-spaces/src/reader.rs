@@ -515,6 +515,16 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
         self.cache.as_ref().map(|(_, index)| index)
     }
 
+    /// Dirty region tracking of a mirror space.
+    pub fn dirty_regions(&self) -> Option<&DirtyRegions> {
+        self.base.drt.as_deref()
+    }
+
+    /// Parity journal of a parity space.
+    pub fn journal(&self) -> Option<&ParityJournal> {
+        self.base.journal.as_deref()
+    }
+
     /// Fills `buf` from `offset`.
     pub fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> Result<()> {
         let end = offset.checked_add(buf.len() as u64).filter(|&e| e <= self.size);
