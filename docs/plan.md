@@ -1,6 +1,6 @@
 # Project plan
 
-Status as of 2026-09-26. The plan is split into three stages with checkable
+Status as of 2026-09-28. The plan is split into three stages with checkable
 exit criteria. ReFS is a separate track (last section) that shares the test
 infrastructure but not the milestones.
 
@@ -204,6 +204,51 @@ in this repository.
 * Not applicable: a pool created on a physical Windows machine (the test
   setup has Windows 11 VMs only, see the scope decision).
 
+### M4 (exit criteria met except the release, 2026-09-28)
+
+Tagging `v0.1.0` and publishing the crates wait for approval; everything
+else is done.
+
+* Packaging: `cargo install --locked --path crates/spaces-cli` installs
+  `spaces`; `contrib/install.sh`; Debian package script
+  (`contrib/deb/build-deb.sh`); `contrib/arch/PKGBUILD` builds and tests the
+  package with makepkg in an Arch Linux bootstrap root (bwrap; package with
+  binary, udev rule, unit with `/usr/bin/spaces`, man page, modules-load
+  file, docs); static musl build in CI; manual page `contrib/man/spaces.8`.
+* User documentation: `docs/user-guide.md` (supported configurations,
+  backends, pools with missing disks, pools after a crash, copying a space
+  out, troubleshooting), README and CHANGELOG.
+* crates.io metadata (repository github.com/woffko/ms-storage-spaces-linux-project,
+  readme, keywords, categories; the library package leaves out the test
+  fixtures; both crate names are free).
+* Security review of the parsing code: every read of metadata-controlled
+  sizes is bounded (database 64 MiB, cache and journal slot areas 64 MiB,
+  NBD requests 32 MiB, options 64 KiB); integer overflows found and fixed
+  with regression tests: GPT table and partition bounds, extent slab numbers
+  (now at most 2^32), grouped parity group counts, slab offsets, cache data
+  offsets. No `unsafe` code in either crate (the ublk and FUSE crates hold
+  their own). A mutation test of the metadata parser (200 000 corrupted
+  variants of the fixtures) runs without a panic.
+* Fuzzing: seven cargo-fuzz targets in `fuzz/` (record decoding, SDBB
+  assembly, cache header and slot log, parity journal, GPT/MBR, dirty region
+  tracking headers, whole-pool open with reads on patched fixtures); CI runs
+  each for 30 s.
+* 24 h without findings: all seven targets ran for 24 h with 4 processes
+  each (`cargo +nightly fuzz run <target> -- -fork=4 -max_total_time=86400
+  -rss_limit_mb=4096`) from 2026-09-27T14:13Z to 2026-09-28T14:14Z on
+  5f235fe: no crash, timeout or out-of-memory case, no artifacts.
+  Executions (edge coverage): record_decode 22.7 G (428), database 14.6 G
+  (656), dirty_regions 10.9 G (364), cache_index 5.9 G (531), parity_journal
+  5.5 G (467), partitions 2.5 G (279), pool_open 16.4 M (4030). Two earlier
+  attempts restarted the count: the first (4772df4, six targets) was stopped
+  after 4.6 h without findings to add the dirty region target; in the
+  second, pool_open hit a stack overflow after 1.5 h (hidden spaces whose
+  dirty region containers form a cycle), fixed in 5f235fe with a regression
+  test.
+  The only later code change, 4088d3e, replaces `chunks_exact` with
+  `as_chunks`; a 15 min run of all seven targets on 3a14cf5 with the 24 h
+  corpora (2026-09-28T14:30Z) found nothing either.
+
 ## Test infrastructure (continuous, feeds every stage)
 
 T1. **Windows 11 only.** All pools are created by Windows 11 test VMs: the
@@ -229,10 +274,9 @@ T3. **Configuration matrix** to cover: columns 1-8, interleave 16 KiB-1 MiB,
 T4. **Linux test VM.** Ubuntu 22.04 VM `codex@192.168.189.142` (kernel 6.8,
     shared with the LinuxReflect project; `tools/linux-vm.sh`). It has the
     `ublk_drv`, `nbd`, `dm-raid` and `ntfs3` modules, `dmsetup`, `nbd-client`,
-    `ntfs-3g` and cargo; `fio` still has to be installed. The corpus lives on
-    a dedicated 128 GB data disk mounted at `/srv/spaces`. WSL lacks ublk, so ublk tests run only on this VM. Next step:
-    attach the `test_ubuntu` pool disks of the Windows VM to it (VMware
-    configuration on the host) as the first real-disk case.
+    `ntfs-3g`, fio and cargo. The corpus lives on a dedicated 128 GB data
+    disk mounted at `/srv/spaces`. WSL lacks ublk, so ublk tests run only on
+    this VM.
 
 T5. **CI.** GitHub Actions: fmt, clippy, unit tests, fixture tests, fuzz
     smoke run, MSRV build. Corpus and VM tests run locally or on a self-hosted
@@ -321,34 +365,6 @@ created on a physical Windows machine. Unplugging a member of a mirror keeps
 the mount working.
 
 ### M4: stage 1 release
-
-Progress (2026-09-26): manual page, user guide (`docs/user-guide.md`),
-`contrib/install.sh`, Debian package script (`contrib/deb/build-deb.sh`),
-CI workflow on metadata fixtures, mutation test of the metadata parser
-(200 000 corrupted variants of the fixtures, no panic; corrupt headers can
-no longer request large allocations). Static musl build in CI.
-
-Progress (2026-09-27):
-* Fuzzing: six cargo-fuzz targets in `fuzz/` (record decoding, SDBB
-  assembly, cache header and slot log, parity journal, GPT/MBR, whole-pool
-  open with reads on patched fixtures); CI runs each for 30 s. A 24 h run of
-  all six (4 processes each) started 2026-09-27T05:31Z on 4772df4.
-* Security review of the parsing code: every read of metadata-controlled
-  sizes is bounded (database 64 MiB, cache and journal slot areas 64 MiB,
-  NBD requests 32 MiB, options 64 KiB); integer overflows found and fixed
-  with regression tests: GPT table and partition bounds, extent slab numbers
-  (now at most 2^32), grouped parity group counts, slab offsets, cache data
-  offsets. No `unsafe` code in either crate (the ublk and FUSE crates hold
-  their own).
-* Packaging: `contrib/arch/PKGBUILD` builds and tests the package with
-  makepkg in an Arch Linux bootstrap root (bwrap; package with binary, udev
-  rule, unit with `/usr/bin/spaces`, man page, modules-load file, docs);
-  `cargo install --locked --path crates/spaces-cli` installs `spaces`.
-* crates.io metadata (repository github.com/woffko/ms-storage-spaces-linux-project,
-  readme, keywords, categories; the library package leaves out the test
-  fixtures; both crate names are free). Pending: release tag, publishing and
-  pushing (need approval).
-
 
 1. Packaging: `cargo install`, Debian/Ubuntu and Arch packages, static
    musl binary; man pages for `spaces(8)`.
