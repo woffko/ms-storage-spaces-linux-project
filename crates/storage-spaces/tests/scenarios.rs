@@ -7,8 +7,11 @@ use std::fs::File;
 use std::path::Path;
 
 use storage_spaces::Pool;
+use storage_spaces::database::Database;
 use storage_spaces::drt::{DirtyRegions, DrtWriter};
-use storage_spaces::format::SLAB_SIZE;
+use storage_spaces::format::{
+    ExtentRecord, POOL_DB_OFFSET, SLAB_SIZE, SPACE_SECURITY_DESCRIPTOR, SpaceEdit, edit_space_record,
+};
 use storage_spaces::io::SparseImage;
 
 fn state(scenario: &str, label: &str) -> Pool<SparseImage> {
@@ -164,4 +167,117 @@ fn hex(b: &[u8]) -> String {
 fn mirror_dirty_region_log_follows_the_writes() {
     assert_eq!(replay_dirty_region_log("m5drt", Some("s0")), 7);
     assert_eq!(replay_dirty_region_log("m5drt2", None), 7);
+}
+
+/// The pool database copy of every member disk of a scenario state.
+fn databases(scenario: &str, label: &str) -> Vec<Database> {
+    let pool = state(scenario, label);
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/scenarios")
+        .join(scenario)
+        .join(label);
+    pool.members
+        .iter()
+        .map(|m| {
+            let f = File::open(dir.join(format!("disk{}.fixture", m.device))).unwrap();
+            let disk = SparseImage::read_from(f).unwrap();
+            Database::read(&disk, m.partition.offset + POOL_DB_OFFSET, 64).unwrap()
+        })
+        .collect()
+}
+
+/// Checks that every member of `label` carries `predicted`.
+fn assert_database(predicted: &Database, scenario: &str, label: &str) {
+    for (i, windows) in databases(scenario, label).iter().enumerate() {
+        let diff: Vec<usize> = (0..predicted.bytes().len())
+            .filter(|&k| predicted.bytes()[k] != windows.bytes()[k])
+            .collect();
+        assert!(diff.is_empty(), "{scenario} {label} device {i}: bytes {diff:x?} differ");
+    }
+}
+
+/// m5db: a simple space renamed, a second space created, the first one
+/// extended, the second one deleted, the pool set read-only and writable.
+/// Every member's pool database matches the model byte for byte: each
+/// update writes new record versions into the first free slots long enough
+/// (the old versions still occupying theirs), then frees the old versions,
+/// and commits with the next sequence. Changed space records carry the new
+/// sequence and, from the first change on, the default security
+/// descriptor; extent records carry the sequence they were written at. The
+/// read-only flag of the pool is not stored. Unpredictable inputs taken from
+/// Windows: the timestamps, and the record of the new space (GUID, id).
+#[test]
+fn pool_database_updates_follow_the_model() {
+    let dbs: Vec<Vec<Database>> = (0..7).map(|i| databases("m5db", &format!("s{i}"))).collect();
+    let ts = |i: usize| dbs[i][0].timestamp();
+    let extent = |space_id, virtual_slab, column, slab_count, disk_id, physical_slab| ExtentRecord {
+        space_id,
+        virtual_slab,
+        column,
+        copy: 0,
+        slab_count,
+        disk_id,
+        physical_slab,
+        flags: 0,
+        stale_marker: 0xffff_ffff,
+    };
+
+    // s0 -> s1: rename m5db to m5dbx.
+    let mut db = dbs[0][0].clone();
+    let old = db.record(21).unwrap();
+    let body = edit_space_record(
+        &old.body,
+        &SpaceEdit {
+            sequence: 3,
+            name: Some("m5dbx"),
+            security_descriptor: Some(&SPACE_SECURITY_DESCRIPTOR),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(db.update(&[(3, 16, &body)], &[21]), Some(vec![27]));
+    db.commit(3, ts(1));
+    assert_database(&db, "m5db", "s1");
+
+    // s1 -> s2: a new 2-column space of 1 GiB allocation units.
+    let new = dbs[2][0].record(21).unwrap();
+    let writes = [
+        (3, 16, new.body.clone()),
+        (4, 6, extent(37, 0, 0, 4, 1, 3).encode(4)),
+        (4, 6, extent(37, 0, 1, 4, 2, 3).encode(4)),
+    ];
+    let writes: Vec<(u8, u8, &[u8])> = writes.iter().map(|(k, v, b)| (*k, *v, b.as_slice())).collect();
+    assert_eq!(db.update(&writes, &[]), Some(vec![21, 32, 33]));
+    db.commit(4, ts(2));
+    assert_database(&db, "m5db", "s2");
+
+    // s2 -> s3: m5dbx extended from 1 to 1.5 GiB by one row.
+    let old = db.record(27).unwrap();
+    let body = edit_space_record(
+        &old.body,
+        &SpaceEdit {
+            sequence: 5,
+            size: Some(0x6000_0000),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let writes = [
+        (3, 16, body),
+        (4, 6, extent(5, 4, 0, 1, 1, 7).encode(5)),
+        (4, 6, extent(5, 4, 1, 1, 2, 7).encode(5)),
+    ];
+    let writes: Vec<(u8, u8, &[u8])> = writes.iter().map(|(k, v, b)| (*k, *v, b.as_slice())).collect();
+    assert_eq!(db.update(&writes, &[27]), Some(vec![34, 39, 40]));
+    db.commit(5, ts(3));
+    assert_database(&db, "m5db", "s3");
+
+    // s3 -> s4: the new space deleted.
+    assert_eq!(db.update(&[], &[21, 32, 33]), Some(vec![]));
+    db.commit(6, ts(4));
+    assert_database(&db, "m5db", "s4");
+
+    // s4 -> s5 -> s6: read-only and writable again change nothing.
+    assert_database(&db, "m5db", "s5");
+    assert_database(&db, "m5db", "s6");
 }

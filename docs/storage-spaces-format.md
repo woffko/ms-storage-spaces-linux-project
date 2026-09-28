@@ -72,6 +72,36 @@ Entry slot `i` (i >= 8) is at `i * entry_size`:
 Concatenated fragments form a record: `type:u8, version:u8, 2 bytes, length:u32`,
 then `length` bytes of body.
 
+How Windows updates the database (**verified** byte for byte on every
+member by the test `pool_database_updates_follow_the_model`, which replays
+the scenario `m5db` of `tools/scenarios.sh` on `database::Database`:
+rename, new space, extension, deletion):
+
+* A record's id is the number of its first slot. The pool database has 64
+  formatted slots (4 KiB); a free slot keeps "SDBB" and its own number, the
+  rest is zero.
+* An update writes the new version of every changed record, and every new
+  record, in order into the first run of free slots long enough for it,
+  while the old versions still occupy theirs; only then are the old
+  versions (and deleted records) freed. A rename or an extension therefore
+  moves the space record to new slots, and a later record may reuse the
+  freed ones (`m5db`: the renamed space moved from 21 to 27, the next new
+  space took 21).
+* The header then gets the slots up to the last one in use (0x28), the new
+  sequence at 0x38 and 0x40, the timestamp at 0x48 and its checksum.
+  Setting the pool read-only or writable changes nothing in it.
+* Records carry the sequence of the update that wrote them as their second
+  integer. A space record changed through the management API (renamed,
+  extended) also gains a security descriptor (`SPACE_SECURITY_DESCRIPTOR`:
+  owner Administrators, group SYSTEM, read for Everyone, full access for
+  SYSTEM and Administrators); new spaces are written without one.
+* A new space also gets its own database in the internal metadata space,
+  4 MiB after the previous one (sequence 1, one type 7 record); deleting
+  the space leaves it in place.
+* Not predicted yet: the object id of a new space (37 in `m5db`, where the
+  existing ones were 1-5), and which disks and slabs its extents take (see
+  slab allocation).
+
 Choosing a copy: members carry copies of the pool database, and the one
 with the highest sequence is current (**verified**: stale copies of `stale3`).
 SDBB entries carry no checksum, so a copy torn by an interrupted update can
@@ -192,8 +222,8 @@ of a tier count from the tier's start. Tier templates created with
 
 ### Type 4: extent
 ```
-vint, vint (record format: 1 metadata space, 2, 3 after a state change),
-vint, u8 flags, vint slab_count, vint space_id, vint virtual_slab,
+vint 0, vint sequence (of the database update that wrote the record),
+vint 0, u8 flags, vint slab_count, vint space_id, vint virtual_slab,
 vint column, vint copy, vint stale marker, vint disk_id, vint physical_slab
 ```
 `flags`: 0x04 on cache extents, 0x01 on a copy that is being regenerated.

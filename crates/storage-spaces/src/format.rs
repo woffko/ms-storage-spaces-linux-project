@@ -570,6 +570,137 @@ fn decode_space(c: &mut Cursor, is_child: bool, record_version: u8) -> Result<Sp
     })
 }
 
+/// Encodes an integer as the length-prefixed big-endian form [`Cursor::varint`]
+/// reads, with as few bytes as possible (0 is a lone length byte 0).
+pub fn encode_varint(v: u64) -> Vec<u8> {
+    let bytes = v.to_be_bytes();
+    let skip = bytes.iter().take_while(|&&b| b == 0).count();
+    let mut out = vec![(8 - skip) as u8];
+    out.extend_from_slice(&bytes[skip..]);
+    out
+}
+
+/// Encodes a string as [`Cursor::string`] reads it: UTF-16BE with the
+/// terminating NUL, prefixed by its length in code units; an empty string
+/// (the usual description) is a length of 0 without a terminator.
+pub fn encode_string(s: &str) -> Vec<u8> {
+    if s.is_empty() {
+        return vec![0, 0];
+    }
+    let units: Vec<u16> = s.encode_utf16().chain([0]).collect();
+    let mut out = (units.len() as u16).to_be_bytes().to_vec();
+    for u in units {
+        out.extend_from_slice(&u.to_be_bytes());
+    }
+    out
+}
+
+/// The security descriptor Windows 11 24H2 adds to a space record the first
+/// time the space is changed (renamed, resized): owner Administrators, group
+/// SYSTEM, read access for Everyone and full access for SYSTEM and
+/// Administrators. New spaces carry none.
+pub const SPACE_SECURITY_DESCRIPTOR: [u8; 0x78] = [
+    0x01, 0x00, 0x04, 0x80, 0x5c, 0x00, 0x00, 0x00, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x48, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0xa0, 0x00, 0x12, 0x00, 0x01, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0xff, 0x01, 0x1f, 0x00, 0x01,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0xff, 0x01, 0x1f, 0x00,
+    0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00, 0x01, 0x02, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x05, 0x12, 0x00, 0x00, 0x00,
+];
+
+/// Changes to a top-level space record (type 3) as Windows makes them.
+#[derive(Debug, Clone, Default)]
+pub struct SpaceEdit<'a> {
+    /// The database sequence of the update (the record's second integer).
+    pub sequence: u64,
+    pub name: Option<&'a str>,
+    pub size: Option<u64>,
+    pub security_descriptor: Option<&'a [u8]>,
+}
+
+/// Applies `edit` to the body of a type 3 space record, keeping every other
+/// byte.
+pub fn edit_space_record(body: &[u8], edit: &SpaceEdit) -> Result<Vec<u8>> {
+    let mut c = Cursor::new(body);
+    c.varint()?;
+    let sequence = c.position()..{
+        c.varint()?;
+        c.position()
+    };
+    c.guid()?;
+    let name = c.position()..{
+        c.string()?;
+        c.position()
+    };
+    c.string()?;
+    c.skip(3)?;
+    let size = c.position()..{
+        c.varint()?;
+        c.position()
+    };
+    c.varint()?;
+    c.u8()?;
+    c.varint()?;
+    c.u8()?;
+    let prefix = POLICY_PREFIXES
+        .iter()
+        .find(|p| c.remaining().starts_with(p))
+        .ok_or_else(|| format_err!("space record without a known policy"))?;
+    c.skip(prefix.len() + 1)?;
+    // Redundancy, copies, groups, columns, the interleave, then four more.
+    for _ in 0..4 {
+        c.varint()?;
+    }
+    c.u8()?;
+    for _ in 0..4 {
+        c.varint()?;
+    }
+    let security = c.position()..{
+        let len = c.u8()? as usize;
+        c.skip(len)?;
+        c.position()
+    };
+    // Splice from the end so the earlier ranges stay valid.
+    let mut out = body.to_vec();
+    if let Some(sd) = edit.security_descriptor {
+        let mut v = vec![sd.len() as u8];
+        v.extend_from_slice(sd);
+        out.splice(security, v);
+    }
+    if let Some(n) = edit.size {
+        out.splice(size, encode_varint(n));
+    }
+    if let Some(n) = edit.name {
+        out.splice(name, encode_string(n));
+    }
+    out.splice(sequence, encode_varint(edit.sequence));
+    Ok(out)
+}
+
+impl ExtentRecord {
+    /// The record body as Windows writes it at database sequence `sequence`.
+    pub fn encode(&self, sequence: u64) -> Vec<u8> {
+        let mut out = encode_varint(0);
+        out.extend(encode_varint(sequence));
+        out.extend(encode_varint(0));
+        out.push(self.flags);
+        for v in [
+            self.slab_count,
+            self.space_id,
+            self.virtual_slab,
+            self.column,
+            self.copy,
+            self.stale_marker,
+            self.disk_id,
+            self.physical_slab,
+        ] {
+            out.extend(encode_varint(v));
+        }
+        out
+    }
+}
+
 fn decode_extent(c: &mut Cursor) -> Result<ExtentRecord> {
     c.varint()?;
     c.varint()?;
@@ -609,6 +740,10 @@ impl<'a> Cursor<'a> {
 
     pub fn remaining(&self) -> &'a [u8] {
         &self.data[self.pos..]
+    }
+
+    pub fn position(&self) -> usize {
+        self.pos
     }
 
     pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
@@ -671,6 +806,19 @@ pub(crate) fn be_u64(b: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integers_and_strings_encode_as_windows_writes_them() {
+        assert_eq!(encode_varint(0), [0]);
+        assert_eq!(encode_varint(5), [1, 5]);
+        assert_eq!(encode_varint(0x4000_0000), [4, 0x40, 0, 0, 0]);
+        assert_eq!(encode_varint(0xffff_ffff), [4, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(encode_string("m5db"), [0, 5, 0, b'm', 0, b'5', 0, b'd', 0, b'b', 0, 0]);
+        assert_eq!(encode_string(""), [0, 0]);
+        for v in [0, 1, 0xff, 0x100, u64::MAX] {
+            assert_eq!(Cursor::new(&encode_varint(v)).varint().unwrap(), v);
+        }
+    }
 
     fn hex(s: &str) -> Vec<u8> {
         s.split_whitespace()
