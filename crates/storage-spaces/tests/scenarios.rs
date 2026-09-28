@@ -334,7 +334,8 @@ fn replay_allocations(scenario: &str, space_id: u64, steps: &[Allocations]) {
 /// first free slab of the disks it picks; the write at 0 found its slab
 /// allocated with the space. Which disks it picks does not follow from the
 /// metadata (not the emptiest: m5thin put the slab at 3 GiB on disk 3 while
-/// disk 2 had two slabs fewer), so the model takes them from Windows.
+/// disk 2 had two slabs fewer) and differs between identical runs (m5thin2),
+/// so the model takes them from Windows.
 #[test]
 fn thin_slabs_are_allocated_per_update_at_the_first_free_slab() {
     replay_allocations(
@@ -346,6 +347,18 @@ fn thin_slabs_are_allocated_per_update_at_the_first_free_slab() {
             ("s3", &[(12, &[3])]),
             ("s4", &[(1, &[2])]),
             ("s5", &[(4, &[2]), (5, &[1]), (6, &[2]), (7, &[2])]),
+        ],
+    );
+    // The same steps once more: other disks, the same rules.
+    replay_allocations(
+        "m5thin2",
+        6,
+        &[
+            ("s1", &[(8, &[2])]),
+            ("s2", &[]),
+            ("s3", &[(12, &[1])]),
+            ("s4", &[(1, &[1])]),
+            ("s5", &[(4, &[3]), (5, &[3]), (6, &[2]), (7, &[1])]),
         ],
     );
     replay_allocations(

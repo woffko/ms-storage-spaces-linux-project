@@ -271,6 +271,50 @@ in this repository.
   `as_chunks`; a 15 min run of all seven targets on 3a14cf5 with the 24 h
   corpora (2026-09-28T14:30Z) found nothing either.
 
+### M5 (in progress, 2026-09-28)
+
+Method: `tools/scenarios.sh` creates a pool on the Windows VM
+(`New-TestPool.ps1 -Finish Keep`) and `tools/vm/Invoke-Scenario.ps1` runs
+scripted steps on it, snapshotting the member disks between them while the
+pool stays attached (raw reads of the members; zero pages left out, pattern
+blocks stored as offset and tag). `tools/fetch-snapshot.sh` turns the
+snapshots into images, `spaces dump`/`diff` compare states, and fixtures of
+every state plus the step times (`scenario.json`) are committed under
+`crates/storage-spaces/tests/scenarios/`. Each model is checked by
+`tests/scenarios.rs` against every state of its scenarios, byte for byte.
+The format document has the specifications.
+
+* Dirty region tracking (`m5drt`, `m5drt2`; `DrtWriter`): 14 snapshots
+  predicted byte for byte, stale entries included: runs added in the next
+  generation into the older copy, runs idle for about 30 s (29 s kept,
+  35 s dropped) removed by moving the last entry into their place, a
+  disconnect resetting both copies. Not modelled: the generation jumped by
+  2 once while a mirror disk was missing.
+* Write-back cache (`m5wbc`, `m5pj`; `CacheWriter`) and parity journal
+  (`m5pj2`; `JournalWriter`): every slot of every state byte for byte. The
+  first write into a chunk takes the next block (parity caches from 64)
+  and the next slot; writes of whole stripes bypass the cache and get a
+  journal slot listing the run's consistent stripes. 24H2 ignores a zero
+  cache size for parity spaces.
+* Database update protocol (`m5db`, `m5stale`; `database::Database`): every
+  member's pool database in every state byte for byte (rename, new space,
+  extension, deletion, a disk that missed writes and came back): new
+  record versions first-fit into free slots while the old ones still hold
+  theirs, then the old ones freed, then the header; the default security
+  descriptor on the first change of a space. While a disk is away nothing
+  is written; the returning disk gets the next update first, the others at
+  the repair.
+* Extent and space health (`m5stale`, with `stale3` of the corpus): with a
+  disk to reallocate to, a missing disk's copy gets a stale marker and a
+  replacement copy; without one, missed writes are known only from the
+  dirty region log and in memory ("Need Reallocation", "Stale Metadata")
+  until the repair.
+* Slab allocation (`m5thin`, `m5thinm`, `m5thin2`): one database update
+  per slab (per copy an extent record) at the first free slab of the chosen
+  disk; the disk itself is chosen differently in two identical runs, so it
+  is an input of the model. Object ids of new spaces (`m5ids`: 37, 70,
+  99/100, 108) do not follow from the metadata either.
+
 ## Test infrastructure (continuous, feeds every stage)
 
 T1. **Windows 11 only.** All pools are created by Windows 11 test VMs: the

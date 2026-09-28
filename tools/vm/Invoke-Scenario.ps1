@@ -12,6 +12,8 @@ The pool is made by New-TestPool.ps1 -Finish Keep, so it stays attached.
                              a minute; the rest of the image stays zero)
   write:SPACE:OFFKB:LENKB:TAG  write the verification pattern tagged TAG
                              (write-through, flushed)
+  writes:SPACE:COUNT:STRIDEKB:LENKB:TAG  COUNT writes of LENKB, one every
+                             STRIDEKB from 0 (each flushed)
   sleep:SECONDS
   rename:SPACE:NEWNAME
   resize:SPACE:SIZEMB
@@ -200,6 +202,13 @@ foreach ($step in ($Steps.Split(';') | Where-Object { $_ })) {
         'write' {
             $dev = Get-SpaceDevice $a[1]
             [SsScenario]::Write($dev, [int64]$a[2] * 1KB, ([int64]$a[2] + [int64]$a[3]) * 1KB, $a[4])
+        }
+        'writes' {
+            $dev = Get-SpaceDevice $a[1]
+            for ($k = 0; $k -lt [int]$a[2]; $k++) {
+                $at = [int64]$k * [int64]$a[3] * 1KB
+                [SsScenario]::Write($dev, $at, $at + [int64]$a[4] * 1KB, $a[5])
+            }
         }
         'sleep' { Start-Sleep -Seconds ([int]$a[1]) }
         'rename' { Set-VirtualDisk -FriendlyName $a[1] -NewFriendlyName $a[2] }

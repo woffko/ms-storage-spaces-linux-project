@@ -1,0 +1,76 @@
+﻿{
+    "name":  "m5thin2",
+    "windows_build":  "10.0.26100.0",
+    "pattern":  false,
+    "pattern_size":  0,
+    "finish":  "Keep",
+    "idle_seconds":  0,
+    "pool":  {
+                 "name":  "ss-m5thin2",
+                 "guid":  "812998e0-fcff-42c0-be98-860d87a2f05c",
+                 "version":  "Windows Server vNext",
+                 "version_number":  28,
+                 "size":  24105713664,
+                 "allocated":  1073741824,
+                 "logical_sector":  512,
+                 "physical_sector":  4096
+             },
+    "space":  {
+                  "name":  "m5thin2",
+                  "guid":  "3e98a20f-c9f7-4b2a-86df-b696561319b9",
+                  "size":  4294967296,
+                  "footprint":  268435456,
+                  "resiliency":  "Simple",
+                  "copies":  1,
+                  "redundancy":  0,
+                  "columns":  1,
+                  "interleave":  262144,
+                  "provisioning":  "Thin",
+                  "logical_sector":  512,
+                  "physical_sector":  4096,
+                  "allocation_unit":  268435456,
+                  "groups":  1,
+                  "write_cache":  0,
+                  "read_cache":  0
+              },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "6002248036B04CFC358E26EF0889E98C",
+                      "spaces_guid":  "f1d649a5-8a83-4846-9619-2ef6beedcd90",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "6002248051CF20FCE115DDEBEDF60EEA",
+                      "spaces_guid":  "68b753fa-bec5-19de-9a12-bea8105513f2",
+                      "size":  8589934592
+                  },
+                  {
+                      "image":  "disk2.vhdx",
+                      "unique_id":  "60022480A9D354C7731463970ED52912",
+                      "spaces_guid":  "d43057e9-ca0b-613a-232e-c71518502d64",
+                      "size":  8589934592
+                  }
+              ],
+    "extents":  [
+                    {
+                        "column":  0,
+                        "copy":  0,
+                        "size":  268435456,
+                        "virtual_offset":  0,
+                        "physical_offset":  268435456,
+                        "disk_unique_id":  "6002248051CF20FCE115DDEBEDF60EEA",
+                        "status":  "Active"
+                    }
+                ],
+    "files":  [
+
+              ],
+    "extra_spaces":  [
+
+                     ],
+    "tiers":  [
+
+              ]
+}

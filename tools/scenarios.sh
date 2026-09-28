@@ -65,6 +65,9 @@ m5pj2 | -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -SizeMB 2048 -N
 m5thin2 | -DiskCount 3 -Resiliency Simple -Columns 1 -Provisioning Thin -SizeMB 4096 -AllocationUnitMB 256 -NoPattern | snap:s0:1100; write:m5thin2:2097152:4:a; snap:s1:1100; write:m5thin2:0:4:b; snap:s2:1100; write:m5thin2:3145728:4:c; snap:s3:1100; write:m5thin2:262144:4:d; snap:s4:1100; write:m5thin2:1048576:1048576:e; snap:s5:1100; dismount
 # Object ids of new spaces: three created, one deleted in between.
 m5ids | -DiskCount 2 -Resiliency Simple -Columns 2 -SizeMB 1024 -AllocationUnitMB 256 -NoPattern | snap:s0:1100; newspace:m5idsa:Simple:512; snap:s1:1100; newspace:m5idsb:Mirror:512; snap:s2:1100; removespace:m5idsa; newspace:m5idsc:Simple:512; snap:s3:1100; dismount
+# Destaging of the write-back cache: a disconnect, then 1500 small writes
+# into distinct chunks (73 % of the cache), then five minutes idle.
+m5wbc2 | -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -SizeMB 2048 -NoPattern | snap:s0; write:m5wbc2:0:4:a; snap:s1; disconnect:m5wbc2; snap:s2; connect:m5wbc2; snap:s3; writes:m5wbc2:1500:512:4:b; snap:s4; sleep:300; snap:s5; dismount
 LIST
 exit $status
 }
