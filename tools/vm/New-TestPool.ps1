@@ -21,6 +21,10 @@ Layout variations:
   -Member4Kn    member VHDX files with 4096-byte logical sectors (the logical
       sector size item of the VHDX metadata is set before attaching)
   -SizeMB 0     the main space takes all remaining capacity (a full pool)
+  -Finish       how the pool ends: Dismount detaches the VHDX files with the
+      pool online (default), Disconnect disconnects its spaces first, ReadOnly
+      sets the pool read-only first, Keep leaves it attached (for a restart)
+  -IdleSeconds N  wait N seconds after the last write before finishing
   -Ntfs         instead of the pattern, the main space gets a GPT with one NTFS
       partition holding real files (System32 DLLs, -NtfsFilesMB in total) and
       random files of awkward sizes; the manifest lists every file with its
@@ -54,6 +58,8 @@ param(
     [switch] $Member4Kn,
     [switch] $Ntfs,
     [int] $NtfsFilesMB = 512,
+    [ValidateSet('Dismount', 'Disconnect', 'ReadOnly', 'Keep')] [string] $Finish = 'Dismount',
+    [int] $IdleSeconds = 0,
     [string] $Root = 'C:\sstest'
 )
 $ErrorActionPreference = 'Stop'
@@ -330,6 +336,8 @@ $manifest = [ordered]@{
     windows_build = [Environment]::OSVersion.Version.ToString()
     pattern = -not $NoPattern
     pattern_size = $patternSize
+    finish = $Finish
+    idle_seconds = $IdleSeconds
     pool = [ordered]@{
         name = $poolName; guid = $poolGuid; version = "$($pool.Version)"; version_number = [int]$pool.CimInstanceProperties['Version'].Value; size = $pool.Size; allocated = $pool.AllocatedSize
         logical_sector = $pool.LogicalSectorSize; physical_sector = $pool.PhysicalSectorSize
@@ -369,7 +377,12 @@ $manifest = [ordered]@{
 }
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $dir 'manifest.json')
 
+if ($IdleSeconds -gt 0) { Start-Sleep -Seconds $IdleSeconds }
+switch ($Finish) {
+    'Disconnect' { Get-StoragePool -FriendlyName $poolName | Get-VirtualDisk | Disconnect-VirtualDisk }
+    'ReadOnly' { Set-StoragePool -FriendlyName $poolName -IsReadOnly $true }
+}
 # Detach so the VHDX files are consistent and can be copied.
-foreach ($f in $images) { Dismount-DiskImage -ImagePath $f | Out-Null }
+if ($Finish -ne 'Keep') { foreach ($f in $images) { Dismount-DiskImage -ImagePath $f | Out-Null } }
 Remove-Item (Join-Path $dir 'diskpart.txt') -ErrorAction SilentlyContinue
 "OK $dir"

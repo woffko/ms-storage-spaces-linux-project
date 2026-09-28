@@ -110,5 +110,14 @@ ntfsmapar  -DiskCount 5 -SsdDisks 2 -Tiers SSD,Mirror,1024;HDD,Parity,3072,3 -Pr
 # Batch 8: crashes with dirty write-back cache data (fetch-corpus.sh --crash)
 crashmirrorwc @New-CrashPool.ps1 -Resiliency Mirror -DataCopies 2 -DiskCount 3 -SizeMB 2048 -WriteCacheMB 256 -SsdMedia -SmallWrites -CrashAfterSeconds 30
 crashparitywc @New-CrashPool.ps1 -Resiliency Parity -Redundancy 1 -Columns 3 -DiskCount 3 -SizeMB 2048 -WriteCacheMB 256 -SmallWrites -CrashAfterSeconds 30
+# Batch 9: how the mirror dirty region log ends (drtkeep stays attached for a restart)
+drtdism    -DiskCount 2 -Resiliency Mirror -DataCopies 2 -Columns 1 -SizeMB 1024 -PatternMB 256
+drtidle1   -DiskCount 2 -Resiliency Mirror -DataCopies 2 -Columns 1 -SizeMB 1024 -PatternMB 256 -IdleSeconds 60
+drtidle5   -DiskCount 2 -Resiliency Mirror -DataCopies 2 -Columns 1 -SizeMB 1024 -PatternMB 256 -IdleSeconds 300
+drtidle15  -DiskCount 2 -Resiliency Mirror -DataCopies 2 -Columns 1 -SizeMB 1024 -PatternMB 256 -IdleSeconds 900
+drtdisc    -DiskCount 2 -Resiliency Mirror -DataCopies 2 -Columns 1 -SizeMB 1024 -PatternMB 256 -Finish Disconnect
+drtro      -DiskCount 2 -Resiliency Mirror -DataCopies 2 -Columns 1 -SizeMB 1024 -PatternMB 256 -Finish ReadOnly
+drtnowrite -DiskCount 2 -Resiliency Mirror -DataCopies 2 -Columns 1 -SizeMB 1024 -NoPattern
+drtkeep    -DiskCount 2 -Resiliency Mirror -DataCopies 2 -Columns 1 -SizeMB 1024 -PatternMB 256 -Finish Keep
 LIST
 exit $status

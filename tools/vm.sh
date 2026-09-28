@@ -7,6 +7,7 @@
 #                                             output goes to C:\sstest\logs\LOG.log, and a
 #                                             final "EXIT <code>" line marks completion
 #   tools/vm.sh -get REMOTE_PATH LOCAL_PATH   copy a file from the VM
+#   tools/vm.sh -put LOCAL_PATH REMOTE_PATH   copy a file to the VM
 #
 # The VM is DESKTOP-BQ2J4NS (Windows 11 24H2, sshuser@10.0.77.97, key login
 # as a member of Administrators). The previous VM DESKTOP-ELS4LDK (Insider
@@ -56,6 +57,14 @@ case "${1:-}" in
     # The VM drops connections under load; retry a few times.
     for attempt in 1 2 3 4 5 6; do
       if scp -q "${ssh_opts[@]}" -o ServerAliveInterval=15 "$host:$2" "$3"; then exit 0; fi
+      echo "scp attempt $attempt failed, retrying" >&2
+      sleep 10
+    done
+    exit 1
+    ;;
+  -put)
+    for attempt in 1 2 3 4 5 6; do
+      if scp -q "${ssh_opts[@]}" -o ServerAliveInterval=15 "$2" "$host:$3"; then exit 0; fi
       echo "scp attempt $attempt failed, retrying" >&2
       sleep 10
     done
