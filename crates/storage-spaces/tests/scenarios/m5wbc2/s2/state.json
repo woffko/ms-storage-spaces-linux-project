@@ -1,0 +1,46 @@
+﻿{
+    "pool":  {
+                 "health":  "Healthy",
+                 "operational":  "OK",
+                 "read_only":  false
+             },
+    "spaces":  [
+                   {
+                       "name":  "m5wbc2",
+                       "health":  "Unknown",
+                       "operational":  "Detached",
+                       "size":  2147483648,
+                       "footprint":  5905580032,
+                       "manual_attach":  true,
+                       "extents":  [
+
+                                   ]
+                   }
+               ],
+    "disks":  [
+                  {
+                      "unique_id":  "60022480B2D25464A63D835ADB18383C",
+                      "health":  "Healthy",
+                      "operational":  "OK",
+                      "usage":  "Auto-Select",
+                      "allocated":  3239051264,
+                      "size":  8589934592
+                  },
+                  {
+                      "unique_id":  "60022480AE376E9946E01875606E4A12",
+                      "health":  "Healthy",
+                      "operational":  "OK",
+                      "usage":  "Auto-Select",
+                      "allocated":  2433744896,
+                      "size":  8589934592
+                  },
+                  {
+                      "unique_id":  "6002248094B228BB2FC2B0F7B8CAA35A",
+                      "health":  "Healthy",
+                      "operational":  "OK",
+                      "usage":  "Auto-Select",
+                      "allocated":  2702180352,
+                      "size":  8589934592
+                  }
+              ]
+}

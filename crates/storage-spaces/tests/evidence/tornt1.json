@@ -1,0 +1,51 @@
+{
+ "experiment": "t1",
+ "windows_build": "10.0.26100.0",
+ "attached": {
+  "pool": {
+   "health": "Healthy",
+   "operational": "OK",
+   "read_only": false,
+   "read_only_reason": "None"
+  },
+  "spaces": [
+   [
+    "m5dbx",
+    "Healthy",
+    "OK"
+   ]
+  ],
+  "disks": [
+   [
+    "Healthy",
+    "OK"
+   ],
+   [
+    "Healthy",
+    "OK"
+   ]
+  ]
+ },
+ "connected": {
+  "spaces": [
+   [
+    "m5dbx",
+    "Healthy",
+    "OK"
+   ]
+  ]
+ },
+ "sequences_before": [
+  3,
+  3
+ ],
+ "sequences_after": [
+  3,
+  3
+ ],
+ "unchanged_after": [
+  true,
+  true
+ ],
+ "records_after_equal_device0_before": true
+}

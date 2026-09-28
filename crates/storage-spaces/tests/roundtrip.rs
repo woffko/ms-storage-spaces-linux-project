@@ -46,3 +46,68 @@ fn repair_does_not_reconcile_mirror_copies() {
     assert_eq!(e["block_8mib_before"], e["block_8mib_after"]);
     assert_ne!(e["block_8mib_after"]["copy0"], e["block_8mib_after"]["copy1"]);
 }
+
+/// A member device with some bytes replaced.
+struct Patched {
+    inner: storage_spaces::io::SparseImage,
+    offset: u64,
+    bytes: Vec<u8>,
+}
+
+impl storage_spaces::io::ReadAt for Patched {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        self.inner.read_exact_at(buf, offset)?;
+        let (start, end) = (offset, offset + buf.len() as u64);
+        let (p_start, p_end) = (self.offset, self.offset + self.bytes.len() as u64);
+        for at in start.max(p_start)..end.min(p_end) {
+            buf[(at - start) as usize] = self.bytes[(at - p_start) as usize];
+        }
+        Ok(())
+    }
+
+    fn size(&self) -> std::io::Result<u64> {
+        self.inner.size()
+    }
+}
+
+/// Diverging copies of the pool database (the m5db state s1, device 1's copy
+/// changed, attached on Windows): with equal sequences (t1: the space named
+/// m5dbT on device 1) Windows used device 0's copy and rewrote neither; a
+/// newer copy that does not decode (t2: sequence 4, a record with an
+/// inconsistent fragment) made Windows treat its disk as lost and write the
+/// good copy again with sequence 5, above every copy it had seen. spaces
+/// makes the same choice for t1.
+#[test]
+fn windows_resolves_diverging_database_copies() {
+    let t1 = evidence("tornt1.json");
+    assert_eq!(t1["connected"]["spaces"][0][0], "m5dbx");
+    assert_eq!(t1["unchanged_after"], serde_json::json!([true, true]));
+    let t2 = evidence("tornt2.json");
+    assert_eq!(t2["attached"]["disks"][1][1], "Lost Communication");
+    assert_eq!(t2["sequences_before"], serde_json::json!([3, 4]));
+    assert_eq!(t2["sequences_after"], serde_json::json!([5, 4]));
+    assert_eq!(t2["records_after_equal_device0_before"], true);
+
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scenarios/m5db/s1");
+    let disks: Vec<Patched> = (0..2)
+        .map(|i| {
+            let inner = storage_spaces::io::SparseImage::read_from(
+                std::fs::File::open(dir.join(format!("disk{i}.fixture"))).unwrap(),
+            )
+            .unwrap();
+            let offset = 0x100_1000;
+            let mut bytes = vec![0u8; 0x1000];
+            storage_spaces::io::ReadAt::read_exact_at(&inner, &mut bytes, offset).unwrap();
+            if i == 1 {
+                let name: Vec<u8> = "m5dbx".encode_utf16().flat_map(u16::to_be_bytes).collect();
+                let at = bytes.windows(name.len()).position(|w| w == name).unwrap();
+                let renamed: Vec<u8> = "m5dbT".encode_utf16().flat_map(u16::to_be_bytes).collect();
+                bytes[at..at + renamed.len()].copy_from_slice(&renamed);
+            }
+            Patched { inner, offset, bytes }
+        })
+        .collect();
+    let pool = storage_spaces::Pool::open(disks).unwrap();
+    assert_eq!(pool.user_spaces().next().unwrap().name(), "m5dbx");
+    assert!(pool.warnings.iter().any(|w| w.contains("torn")), "{:?}", pool.warnings);
+}

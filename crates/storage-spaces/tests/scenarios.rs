@@ -516,3 +516,147 @@ fn parity_journal_logs_whole_stripe_writes() {
     }
     assert_eq!(checked, 6);
 }
+
+/// Mapping entries of the cache slots of `pool`: (sequence, owner offset,
+/// block, state), in slot order (not the order of writing once the log has
+/// wrapped).
+fn cache_entries(pool: &Pool<SparseImage>) -> Vec<(u64, u64, u32, u16)> {
+    let space = pool.user_spaces().next().unwrap();
+    let reader = pool.open_space(space.id()).unwrap();
+    let mut out = Vec::new();
+    for s in reader.cache().unwrap().slots().iter().filter(|s| s.kind == 0) {
+        // The content starts at the type field (slot offset 0x20); entries at 0x38.
+        let c = &s.content;
+        let mut pos = 0x18;
+        for _ in 0..s.entries {
+            let e = |a: usize, n: usize| {
+                c.get(pos + a..pos + a + n)
+                    .map_or(0, |b| b.iter().rev().fold(0u64, |acc, &x| acc << 8 | u64::from(x)))
+            };
+            out.push((s.sequence, e(0, 8), e(8, 4) as u32, e(12, 2) as u16));
+            pos = (pos + 16 + e(14, 2) as usize).next_multiple_of(8);
+        }
+    }
+    out
+}
+
+/// m5wbc2: a parity space with the default cache written 4 KiB at 0,
+/// disconnected, connected, then written 4 KiB into 1500 distinct chunks
+/// (every 512 KiB), then left alone for five minutes. Destaging follows
+/// the log, not the clock: the disconnect destaged nothing and attaching
+/// wrote a new type 1 slot (sequence 4, one skipped); the 1500 writes took
+/// one slot each until the 1024 slots were used, and the log continued at
+/// slot 0 (after skipping one sequence again). To reuse the oldest slots
+/// Windows destaged the chunks they mapped, logging each as an entry of
+/// state 0 without a block (in batches of up to 244), writing them to the
+/// space as whole stripes through the parity journal (which lists exactly
+/// those stripes as consistent). Each flush took every chunk cached so far,
+/// so the chunks still cached are exactly those mapped after the last
+/// batch; blocks are handed out onwards, a block freed right after it was
+/// handed out going to the next chunk; five minutes without writes changed
+/// nothing.
+#[test]
+fn cache_destages_to_reuse_its_log() {
+    let scenario = "m5wbc2";
+    let s2 = cache_slots(&state(scenario, "s2"));
+    let s3 = cache_slots(&state(scenario, "s3"));
+    assert_eq!(
+        s2,
+        cache_slots(&state(scenario, "s1")),
+        "the disconnect destaged nothing"
+    );
+    assert_eq!(s3.len(), 3);
+    let pool = state(scenario, "s3");
+    let space = pool.user_spaces().next().unwrap();
+    let reader = pool.open_space(space.id()).unwrap();
+    let attach = &reader.cache().unwrap().slots()[2];
+    assert_eq!((attach.index, attach.kind, attach.sequence), (2, 1, 4));
+
+    let pool = state(scenario, "s4");
+    let space = pool.user_spaces().next().unwrap();
+    let reader = pool.open_space(space.id()).unwrap();
+    let cache = reader.cache().unwrap();
+    let slots = cache.slots();
+    assert_eq!(slots.len(), 1024);
+    // The log wrapped: slot 1023 then slot 0, the oldest slot follows the newest.
+    let seq = |i: usize| slots[i].sequence;
+    assert_eq!((seq(1023), seq(0), seq(1)), (1025, 1026, 1027));
+    let newest = (0..1024).max_by_key(|&i| seq(i)).unwrap();
+    assert_eq!(seq((newest + 1) % 1024), seq(newest) - 1024);
+
+    let mut entries = cache_entries(&pool);
+    entries.sort_by_key(|e| e.0);
+    let tombstones: Vec<_> = entries.iter().filter(|e| e.3 == 0).collect();
+    assert!(tombstones.iter().all(|e| e.2 == u32::MAX));
+    let last_batch = tombstones.iter().map(|e| e.0).max().unwrap();
+    let cached: Vec<u64> = cache.mappings().iter().map(|m| m.0).collect();
+    let mapped_after: Vec<u64> = {
+        let mut v: Vec<u64> = entries
+            .iter()
+            .filter(|e| e.0 > last_batch && e.3 != 0)
+            .map(|e| e.1)
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(cached, mapped_after);
+    assert_eq!(cached.len() + tombstones.len(), 1500);
+    // Blocks go onwards; a block is handed out again only after the chunk
+    // holding it was destaged (twice here: the chunk written last before a
+    // flush was destaged with it and its block went to the next chunk).
+    let mut holder: std::collections::HashMap<u32, u64> = Default::default();
+    let mut reused = std::collections::BTreeSet::new();
+    for &(_, offset, block, state) in &entries {
+        if state == 0 {
+            holder.retain(|_, &mut chunk| chunk != offset);
+        } else {
+            if entries.iter().any(|e| e.2 == block && e.1 != offset) {
+                reused.insert(block);
+            }
+            assert!(holder.insert(block, offset).is_none(), "block {block} still in use");
+        }
+    }
+    assert_eq!(reused.len(), 2);
+    assert_eq!(
+        entries.iter().filter(|e| e.3 != 0).map(|e| e.2).max(),
+        Some(64 + 1500 - 1 - 2)
+    );
+
+    // The journal lists exactly the destaged stripes (512 KiB each) as consistent.
+    let journal = reader.journal().unwrap();
+    let destaged: std::collections::BTreeSet<u64> = tombstones.iter().map(|e| e.1 / (512 << 10)).collect();
+    for stripe in 0..4096 {
+        assert_eq!(
+            !journal.is_dirty(0, stripe),
+            destaged.contains(&stripe),
+            "stripe {stripe}"
+        );
+    }
+    assert_eq!(cache_slots(&state(scenario, "s4")), cache_slots(&pool));
+}
+
+/// The data of m5wbc2 after destaging, from the full snapshot when it has
+/// been fetched (tools/scenarios.sh m5wbc2): every one of the 1500 blocks
+/// written reads back, whether it was destaged or is still cached.
+#[test]
+fn destaged_and_cached_blocks_read_back() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/snapshots/m5wbc2/s4");
+    if !dir.join("disk2.img").exists() {
+        eprintln!("skipping: {} not fetched", dir.display());
+        return;
+    }
+    let disks: Vec<File> = (0..3)
+        .map(|i| File::open(dir.join(format!("disk{i}.img"))).unwrap())
+        .collect();
+    let pool = Pool::open(disks).unwrap();
+    let space = pool.user_spaces().next().unwrap();
+    let reader = pool.open_space(space.id()).unwrap();
+    let mut block = vec![0u8; 4096];
+    let mut expected = vec![0u8; 4096];
+    for k in 0..1500u64 {
+        let offset = k * (512 << 10);
+        reader.read_exact_at(&mut block, offset).unwrap();
+        storage_spaces::testpattern::fill_block(&mut expected, offset, "b");
+        assert!(block == expected, "block {k}");
+    }
+}

@@ -1,0 +1,51 @@
+{
+ "experiment": "t2",
+ "windows_build": "10.0.26100.0",
+ "attached": {
+  "pool": {
+   "health": "Unknown",
+   "operational": "Read-only",
+   "read_only": false,
+   "read_only_reason": "Starting"
+  },
+  "spaces": [
+   [
+    "m5dbx",
+    "Unhealthy",
+    "Detached"
+   ]
+  ],
+  "disks": [
+   [
+    "Healthy",
+    "OK"
+   ],
+   [
+    "Warning",
+    "Lost Communication"
+   ]
+  ]
+ },
+ "connected": {
+  "spaces": [
+   [
+    "m5dbx",
+    "Unhealthy",
+    "No Redundancy Degraded"
+   ]
+  ]
+ },
+ "sequences_before": [
+  3,
+  4
+ ],
+ "sequences_after": [
+  5,
+  4
+ ],
+ "unchanged_after": [
+  false,
+  true
+ ],
+ "records_after_equal_device0_before": true
+}

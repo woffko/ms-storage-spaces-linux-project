@@ -107,9 +107,15 @@ with the highest sequence is current (**verified**: stale copies of `stale3`).
 SDBB entries carry no checksum, so a copy torn by an interrupted update can
 only be recognised by comparison. `spaces` groups identical copies, uses the
 newest version that decodes (the one most members hold when copies of one
-sequence differ) and reports the others: copies of the same sequence with
-different records as torn, newer copies that do not decode as unusable
-(unit tests on `mirror3` with one copy altered).
+sequence differ, the first member's on a tie) and reports the others:
+copies of the same sequence with different records as torn, newer copies
+that do not decode as unusable (unit tests on `mirror3` with one copy
+altered). Windows chooses the same way (**verified** by the test
+`windows_resolves_diverging_database_copies`: round trips of `m5db` with
+device 1's copy altered): with equal sequences it used device 0's copy and
+rewrote neither; a newer copy that does not decode made it treat that disk
+as lost ("Lost Communication", the space degraded) and write the good copy
+again with a sequence above every copy seen (5 after a broken 4).
 
 ## Records
 
@@ -421,11 +427,23 @@ it):
   one stale run word covering the chunk (`0084` for 512 KiB chunks, `0082`
   for 256 KiB; also in the corpus pools `paritythin` and `mirrorthin`).
 * A write into sectors already cached writes no slot; its data goes into the
-  block. Nothing was moved out of the cache within two and a half minutes
-  of idle time.
+  block.
+* Destaging follows the log, not the clock (**verified** by the tests
+  `cache_destages_to_reuse_its_log` and `destaged_and_cached_blocks_read_back`
+  on the scenario `m5wbc2`: 1500 writes of 4 KiB into distinct chunks, then
+  five minutes idle): after the last slot the log continues at slot 0, over
+  the type 1 slot. Before the oldest slots are reused, Windows flushes every
+  chunk cached so far: each is written to the space (a parity space logs it
+  in its journal like a direct write) and logged as an entry of state 0 with
+  block `0xffffffff`, in batches of up to 244 entries per slot. Blocks go
+  onwards; a block freed right after it was handed out goes to the next
+  chunk. Neither a disconnect nor two and a half or five minutes of idle
+  time destaged anything; attaching wrote a new type 1 slot at the next
+  position. Sequence numbers can skip one (at the attach, and once in the
+  second lap).
 * Not modelled: how Windows groups the entries of concurrent writes into
-  slots (the corpus shows 244 and 248 entries per slot), destaging, and
-  where the log restarts after the last slot.
+  slots (the corpus shows 244 and 248 entries per slot), and when exactly a
+  flush starts.
 
 Extent `slab_count` is always in 256 MiB units, also for spaces with a 1 GiB
 allocation unit (**verified**: pool `au1g`).

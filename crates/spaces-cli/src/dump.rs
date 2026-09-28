@@ -58,10 +58,15 @@ pub fn dump<D: ReadAt>(pool: &Pool<D>) -> Vec<String> {
     }
 
     // The records of the version the pool uses, then how the others differ.
-    let chosen = versions
-        .iter()
-        .filter(|v| v.0.sequence == pool.database.sequence)
-        .max_by_key(|v| v.2.len());
+    // The version the pool uses: of those with its sequence, the one most
+    // members hold, the first member's on a tie (as Pool::open chooses).
+    let chosen = versions.iter().filter(|v| v.0.sequence == pool.database.sequence).fold(
+        None::<&(DbHeader, Vec<RawRecord>, Vec<usize>)>,
+        |best, v| match best {
+            Some(b) if b.2.len() >= v.2.len() => Some(b),
+            _ => Some(v),
+        },
+    );
     if let Some(chosen) = chosen {
         let records = &chosen.1;
         for r in records {

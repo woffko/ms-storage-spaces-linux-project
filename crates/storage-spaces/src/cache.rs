@@ -160,7 +160,7 @@ impl CacheWriter {
     /// A write of `len` bytes at owner offset `offset`: the slots Windows
     /// writes (index and page), none if no chunk changes. A write whose
     /// entries do not fit into one slot continues in the next (where Windows
-    /// ends a slot then is not modelled).
+    /// ends a slot then is not modelled, nor is destaging).
     pub fn write(&mut self, offset: u64, len: u64) -> Vec<(usize, Vec<u8>)> {
         let chunk = self.header.chunk_size as u64;
         let sectors = (chunk / 512) as usize;
@@ -218,12 +218,9 @@ impl CacheWriter {
     fn next(&mut self, count: u32, entries: &[u8]) -> (usize, Vec<u8>) {
         self.sequence += 1;
         let index = self.next_slot;
-        // Past the last slot the log continues at slot 1 (slot 0 holds the
-        // type 1 record); where Windows restarts the log is not modelled.
-        self.next_slot += 1;
-        if self.next_slot >= self.header.slot_count as usize {
-            self.next_slot = 1;
-        }
+        // Past the last slot the log continues at slot 0, over the type 1
+        // record (m5wbc2).
+        self.next_slot = (self.next_slot + 1) % self.header.slot_count.max(1) as usize;
         (index, self.slot(0, self.sequence, count, entries))
     }
 
