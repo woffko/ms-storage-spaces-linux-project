@@ -56,9 +56,20 @@ fuzz_target!(|data: &[u8]| {
                 .unwrap()
                 .unwrap();
                 assert_eq!(again.copies()[0].header.as_ref(), Some(h));
-                // The next write predicts a header that decodes as well.
-                if let Some((_, next)) = d.after_first_write(len as u64, u64::MAX, &[]) {
-                    assert_eq!(&next[..8], b"SPACEDRT");
+                // The model's next header decodes to what it lists.
+                let mut w = d.writer();
+                w.clean(|r| r % 2 == 1);
+                if let Some((_, next)) = w.write(u64::MAX) {
+                    let listed = DirtyRegions::load(0x4000, |off, buf| {
+                        buf.fill(0);
+                        if off == 0 {
+                            buf.copy_from_slice(&next);
+                        }
+                        Ok(())
+                    })
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(listed.copies()[0].header.as_ref().unwrap().runs, w.runs());
                 }
             }
         }

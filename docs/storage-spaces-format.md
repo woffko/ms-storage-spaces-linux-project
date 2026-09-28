@@ -390,6 +390,30 @@ may have left a write on some copies only (`crashmirrorwc`, whose disks
 were pulled during small writes, lists both of its extent runs, 0 and 4, in
 generation 2 and run 0 in generation 1).
 
+How Windows writes the log (**verified** byte for byte, stale entries
+included, by the test `mirror_dirty_region_log_follows_the_writes`, which
+replays the scenarios `m5drt` and `m5drt2` of `tools/scenarios.sh` with
+their recorded step times on `DrtWriter` and compares every snapshot):
+
+* Windows keeps the log in memory as a generation and an array of 509
+  entries of which the first `count` are listed, and writes the whole array
+  into the page. Attaching a space loads the listed runs of the newest copy
+  into a zeroed array.
+* When a write reaches an extent run that is not listed, Windows first
+  removes the runs no write has reached for about 30 s (runs idle for 29 s
+  stayed, runs idle for 35 s went), scanning the array from the front and
+  moving the last listed entry into the place of each removed one, then
+  appends the run, increments the generation and writes the page. Odd
+  generations go to the copy at the end, even ones to the start, so the
+  older copy is replaced. Removed entries stay behind the listed ones,
+  outside the count and checksum (`m5drt2`: listing run 2 after runs 0 and
+  1 went clean leaves a stale 1 behind it).
+* A write into a listed run writes no header, so the log keeps listing
+  runs that went clean until the next run is added.
+* `Disconnect-VirtualDisk` removes every run and writes generation 0 into
+  both copies (after `[0, 1, 3]` the page holds the stale entries 1, 1, 3).
+* Whether the header reaches the disks before the data is not observed yet.
+
 Windows does not use the log to reconcile the copies, and it reads either
 copy (**verified** by the round trips recorded in `tests/evidence`
 and the test `roundtrip.rs`: copy 1 of `drtdism` and `drtdisc` was changed

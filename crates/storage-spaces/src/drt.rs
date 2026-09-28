@@ -78,50 +78,21 @@ impl DirtyRegions {
         }))
     }
 
-    /// The header copy Windows writes when a write reaches the extent run
-    /// starting at virtual slab `run` of a tracking space of `size` bytes
-    /// while the run is not listed: the next generation lists the runs still
-    /// dirty (those listed minus `cleaned`, the runs Windows has found clean
-    /// since the last header write) and then `run`. Odd generations go to the
-    /// copy at the end, even ones to the start, so the older copy is
-    /// replaced. `None` if the run is listed, or if the next generation or
-    /// list would not fit (what Windows does then is not known).
-    pub fn after_first_write(&self, size: u64, run: u64, cleaned: &[u64]) -> Option<(u64, Vec<u8>)> {
-        if self.runs.contains(&run) {
-            return None;
-        }
+    /// The log as Windows holds it after attaching the space: the newest
+    /// valid copy's runs, the rest of the entry array zero.
+    pub fn writer(&self) -> DrtWriter {
         let current = self
             .copies
             .iter()
-            .filter(|c| c.header.is_some())
-            .max_by_key(|c| c.header.as_ref().unwrap().generation)?;
-        let header = current.header.as_ref().unwrap();
-        let mut runs: Vec<u64> = header.runs.iter().copied().filter(|r| !cleaned.contains(r)).collect();
-        runs.push(run);
-        if runs.len() > MAX_ENTRIES {
-            return None;
+            .filter_map(|c| c.header.as_ref())
+            .max_by_key(|h| h.generation);
+        let mut w = DrtWriter::new();
+        if let Some(h) = current {
+            w.generation = h.generation;
+            w.entries[..h.runs.len()].copy_from_slice(&h.runs);
+            w.count = h.runs.len();
         }
-        let next = DrtHeader {
-            generation: header.generation.checked_add(1)?,
-            runs,
-        };
-        let offset = if next.generation % 2 == 1 {
-            size.saturating_sub(SECOND_COPY_FROM_END)
-        } else {
-            0
-        };
-        Some((offset, next.encode()))
-    }
-
-    /// The header copies after `Disconnect-VirtualDisk` (and of a new
-    /// space): generation 0 and no runs in both.
-    pub fn after_disconnect(size: u64) -> [(u64, Vec<u8>); 2] {
-        let empty = DrtHeader {
-            generation: 0,
-            runs: Vec::new(),
-        }
-        .encode();
-        [(0, empty.clone()), (size.saturating_sub(SECOND_COPY_FROM_END), empty)]
+        w
     }
 
     /// A header copy, or `None` if it is missing, torn or implausible.
@@ -162,6 +133,94 @@ impl DirtyRegions {
     /// Both header copies as found on disk.
     pub fn copies(&self) -> &[DrtCopy] {
         &self.copies
+    }
+}
+
+/// The log as Windows keeps it in memory and writes it (the model the
+/// scenario tests check byte for byte): a generation and an array of entries
+/// of which the first `count` are listed. Entries are removed by moving the
+/// last listed one into their place, and the array is written whole, so
+/// removed entries stay behind the listed ones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrtWriter {
+    generation: u64,
+    entries: Vec<u64>,
+    count: usize,
+}
+
+impl Default for DrtWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DrtWriter {
+    /// The log of a new space: generation 0, nothing listed.
+    pub fn new() -> Self {
+        DrtWriter {
+            generation: 0,
+            entries: vec![0; MAX_ENTRIES],
+            count: 0,
+        }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The listed runs (virtual slabs where they start).
+    pub fn runs(&self) -> &[u64] {
+        &self.entries[..self.count]
+    }
+
+    /// Removes the runs Windows has found clean, scanning from the front.
+    pub fn clean(&mut self, is_clean: impl Fn(u64) -> bool) {
+        let mut i = 0;
+        while i < self.count {
+            if is_clean(self.entries[i]) {
+                self.count -= 1;
+                self.entries[i] = self.entries[self.count];
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// A write reaches the extent run starting at virtual slab `run`. If it
+    /// is not listed, it is appended in the next generation, and the header
+    /// is written: returns the page and whether it goes to the copy at the
+    /// end (odd generations) rather than the start. `None` if the run is
+    /// listed or does not fit (what Windows does then is not known).
+    pub fn write(&mut self, run: u64) -> Option<(bool, Vec<u8>)> {
+        if self.runs().contains(&run) || self.count == MAX_ENTRIES {
+            return None;
+        }
+        self.generation = self.generation.checked_add(1)?;
+        self.entries[self.count] = run;
+        self.count += 1;
+        Some((self.generation % 2 == 1, self.page()))
+    }
+
+    /// `Disconnect-VirtualDisk`: every run is removed and generation 0 is
+    /// written into both copies. Returns the page.
+    pub fn disconnect(&mut self) -> Vec<u8> {
+        self.clean(|_| true);
+        self.generation = 0;
+        self.page()
+    }
+
+    /// The header page for the current state.
+    pub fn page(&self) -> Vec<u8> {
+        let mut h = vec![0u8; HEADER];
+        h[0..8].copy_from_slice(SPACEDRT_SIGNATURE);
+        h[8..16].copy_from_slice(&self.generation.to_le_bytes());
+        h[0x10..0x14].copy_from_slice(&(self.count as u32).to_le_bytes());
+        for (i, e) in self.entries.iter().enumerate() {
+            h[0x18 + 8 * i..0x20 + 8 * i].copy_from_slice(&e.to_le_bytes());
+        }
+        let crc = crc32_excluding(&h[..0x18 + 8 * self.count], 0x14);
+        h[0x14..0x18].copy_from_slice(&crc.to_le_bytes());
+        h
     }
 }
 
@@ -235,21 +294,49 @@ mod tests {
     }
 
     #[test]
-    fn no_prediction_past_the_last_generation_or_a_full_page() {
+    fn writer_stops_at_the_last_generation_and_a_full_page() {
         // Found by fuzzing: the generation after u64::MAX overflowed.
         let mut space = vec![0u8; 0x10000];
         space[..HEADER].copy_from_slice(&header(u64::MAX, &[0]));
-        assert_eq!(load(&space).unwrap().after_first_write(0x10000, 1, &[]), None);
+        assert_eq!(load(&space).unwrap().writer().write(1), None);
         let full: Vec<u64> = (0..MAX_ENTRIES as u64).collect();
         space[..HEADER].copy_from_slice(&header(3, &full));
-        let d = load(&space).unwrap();
-        assert_eq!(d.after_first_write(0x10000, 1 << 40, &[]), None);
-        // With one run gone clean the new one fits again.
-        let (offset, page) = d.after_first_write(0x10000, 1 << 40, &[0]).unwrap();
-        assert_eq!(offset, 0);
+        let mut w = load(&space).unwrap().writer();
+        assert_eq!(w.write(1 << 40), None);
+        // With one run gone clean the new one fits again: the last entry
+        // takes the place of the removed one.
+        w.clean(|r| r == 0);
+        let (at_end, page) = w.write(1 << 40).unwrap();
+        assert!(!at_end);
         assert_eq!(
             u32::from_le_bytes(page[0x10..0x14].try_into().unwrap()) as usize,
             MAX_ENTRIES
         );
+        assert_eq!(w.runs()[0], MAX_ENTRIES as u64 - 1);
+        assert_eq!(w.runs()[MAX_ENTRIES - 1], 1 << 40);
+    }
+
+    #[test]
+    fn writer_leaves_removed_entries_behind_the_listed_ones() {
+        // As in m5drt2: runs 0 and 1 go clean before run 2 is written.
+        let mut w = DrtWriter::new();
+        w.write(0);
+        w.write(1);
+        w.clean(|r| r < 2);
+        let (at_end, page) = w.write(2).unwrap();
+        assert!(at_end);
+        assert_eq!(w.runs(), [2]);
+        assert_eq!(page[0x20..0x28], 1u64.to_le_bytes());
+        // As in m5drt: a disconnect after [0, 1, 3] leaves 1, 1, 3.
+        let mut w = DrtWriter::new();
+        for r in [0, 1, 3] {
+            w.write(r);
+        }
+        let page = w.disconnect();
+        assert_eq!(page[0x10..0x14], [0; 4]);
+        let stale: Vec<u64> = (0..3)
+            .map(|i| u64::from_le_bytes(page[0x18 + 8 * i..0x20 + 8 * i].try_into().unwrap()))
+            .collect();
+        assert_eq!(stale, [1, 1, 3]);
     }
 }

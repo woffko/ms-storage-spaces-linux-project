@@ -2,11 +2,13 @@
 //! scenarios in tools/scenarios.sh (fixtures captured from the snapshots
 //! tools/vm/Invoke-Scenario.ps1 took between the steps).
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
 use storage_spaces::Pool;
-use storage_spaces::drt::DirtyRegions;
+use storage_spaces::drt::{DirtyRegions, DrtWriter};
+use storage_spaces::format::SLAB_SIZE;
 use storage_spaces::io::SparseImage;
 
 fn state(scenario: &str, label: &str) -> Pool<SparseImage> {
@@ -21,94 +23,145 @@ fn state(scenario: &str, label: &str) -> Pool<SparseImage> {
     Pool::open(disks).unwrap()
 }
 
-/// The dirty region log of the only user space, and the size of its
-/// tracking space (the second header copy sits 8 KiB before its end).
-fn log(pool: &Pool<SparseImage>) -> (DirtyRegions, u64) {
+/// The dirty region log of the only user space, the size of its tracking
+/// space (the second header copy sits 8 KiB before its end) and the virtual
+/// slab where the extent run holding each byte offset starts.
+fn log(pool: &Pool<SparseImage>) -> (DirtyRegions, u64, impl Fn(u64) -> u64 + '_) {
     let space = pool.user_spaces().next().unwrap();
     let reader = pool.open_space(space.id()).unwrap();
     let log = reader.dirty_regions().unwrap().clone();
     let size = log.copies()[1].offset + 0x2000;
-    (log, size)
+    let layout = reader.layout().clone();
+    let run_of = move |offset: u64| layout.run_start_offset(layout.locate(offset).row) / SLAB_SIZE;
+    (log, size, run_of)
 }
 
-/// The header pages of `after` are those of `before` with `written` (offset,
-/// page) replacing a copy; with `covered_only` just the part the checksum
-/// covers is compared.
-fn assert_pages(
-    before: &DirtyRegions,
-    after: &DirtyRegions,
-    written: &[(u64, Vec<u8>)],
-    step: &str,
-    covered_only: bool,
-) {
-    for (b, a) in before.copies().iter().zip(after.copies()) {
-        let expected = written
-            .iter()
-            .rev()
-            .find(|(o, _)| *o == b.offset)
-            .map_or(&b.page, |(_, p)| p);
-        let len = if covered_only {
-            covered(expected)
-        } else {
-            expected.len()
-        };
-        assert_eq!(a.page[..len], expected[..len], "{step}: copy at {:#x}", b.offset);
+/// The steps of a scenario with their start in seconds of the day (UTC).
+fn steps(scenario: &str) -> Vec<(String, f64)> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/scenarios")
+        .join(scenario)
+        .join("scenario.json");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let steps: Vec<(String, f64)> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            let t = &e["started"].as_str().unwrap()[11..];
+            let secs = t[..2].parse::<f64>().unwrap() * 3600.0
+                + t[3..5].parse::<f64>().unwrap() * 60.0
+                + t[6..].split('+').next().unwrap().parse::<f64>().unwrap();
+            (e["step"].as_str().unwrap().to_string(), secs)
+        })
+        .collect();
+    assert!(
+        steps.windows(2).all(|w| w[0].1 <= w[1].1),
+        "{scenario} crosses midnight"
+    );
+    steps
+}
+
+/// Seconds without writes after which Windows leaves a run out of the next
+/// header it writes: runs idle for 29 s were kept (m5drt), runs idle for
+/// 35 s dropped (m5drt2).
+const CLEAN_AFTER: f64 = 32.0;
+
+/// Replays the writes, disconnects and reconnects of a scenario on
+/// [`DrtWriter`], the model of the mirror dirty region log, and compares
+/// both header pages with every snapshot, byte for byte. `first` is the
+/// snapshot to start from, or `None` for a new space. Returns the number of
+/// snapshots compared.
+fn replay_dirty_region_log(scenario: &str, first: Option<&str>) -> usize {
+    let steps = steps(scenario);
+    let label = |s: &str| {
+        s.strip_prefix("snap:")
+            .map(|l| l.split(':').next().unwrap().to_string())
+    };
+    let any = steps.iter().find_map(|(s, _)| label(s)).unwrap();
+    let pool = state(scenario, &any);
+    let (_, size, run_of) = log(&pool);
+    let mut writer = match first {
+        Some(l) => log(&state(scenario, l)).0.writer(),
+        None => DrtWriter::new(),
+    };
+    let mut pages = [writer.page(), writer.page()];
+    if let Some(l) = first {
+        let (disk, _, _) = log(&state(scenario, l));
+        pages = [disk.copies()[0].page.clone(), disk.copies()[1].page.clone()];
     }
+    let mut last_write: HashMap<u64, f64> = HashMap::new();
+    let mut checked = 0;
+    let mut started = first.is_none();
+    for (step, at) in &steps {
+        let a: Vec<&str> = step.split(':').collect();
+        if !started {
+            started = label(step).as_deref() == first;
+            continue;
+        }
+        match a[0] {
+            "write" => {
+                let offset = a[2].parse::<u64>().unwrap() * 1024;
+                let len = a[3].parse::<u64>().unwrap() * 1024;
+                for run in run_of(offset)..=run_of(offset + len - 1) {
+                    if !writer.runs().contains(&run) {
+                        writer.clean(|r| last_write.get(&r).is_some_and(|&t| at - t > CLEAN_AFTER));
+                        let (at_end, page) = writer.write(run).unwrap();
+                        pages[usize::from(at_end)] = page;
+                    }
+                    last_write.insert(run, *at);
+                }
+            }
+            "disconnect" => {
+                let page = writer.disconnect();
+                pages = [page.clone(), page];
+                last_write.clear();
+            }
+            // Attaching loads the log from the newest copy.
+            "connect" => {
+                writer = DirtyRegions::load(size, |off, buf| {
+                    buf.copy_from_slice(&pages[usize::from(off != 0)]);
+                    Ok(())
+                })
+                .unwrap()
+                .unwrap()
+                .writer();
+            }
+            "snap" => {
+                let (windows, _, _) = log(&state(scenario, a[1]));
+                for (i, c) in windows.copies().iter().enumerate() {
+                    assert!(
+                        c.page == pages[i],
+                        "{scenario} {}: copy at {:#x}\n Windows {}\n model   {}",
+                        a[1],
+                        c.offset,
+                        hex(&c.page[..0x40]),
+                        hex(&pages[i][..0x40])
+                    );
+                }
+                checked += 1;
+            }
+            _ => {}
+        }
+    }
+    checked
 }
 
-/// Length of the part of a header page the checksum covers.
-fn covered(page: &[u8]) -> usize {
-    0x18 + 8 * u32::from_le_bytes(page[0x10..0x14].try_into().unwrap()) as usize
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// m5drt: a two-way mirror of four 256 MiB extent runs. Windows wrote
-/// exactly the header pages the model predicts: the first write into a run
-/// adds it in the next generation, which replaces the older copy; a write
-/// into a listed run changes nothing; runs that went clean (run 2, written
-/// two minutes before) are left out of the next generation; a disconnect
-/// resets both copies to generation 0, and after reconnecting the log starts
-/// again from there. A normal header write leaves the rest of the page zero.
+/// m5drt: a two-way mirror of four 256 MiB extent runs written in the order
+/// 0, 2, 0, 1, 3, then disconnected, reconnected and written in run 1.
+/// m5drt2: writes into runs 0 to 6 after 5 to 180 s without writes.
+/// Windows wrote exactly the header pages the model predicts, stale entries
+/// included: the first write into a run adds it in the next generation (odd
+/// generations at the end copy, even ones at the start), after the runs idle
+/// for longer than about 30 s were removed; a write into a listed run
+/// changes nothing; a disconnect removes every run and writes generation 0
+/// into both copies; attaching loads the listed runs of the newest copy.
 #[test]
 fn mirror_dirty_region_log_follows_the_writes() {
-    let s: Vec<_> = (0..8).map(|i| log(&state("m5drt", &format!("s{i}")))).collect();
-    let size = s[0].1;
-    // A new space: both copies empty.
-    assert_eq!(
-        DirtyRegions::after_disconnect(size).to_vec(),
-        [
-            (0, s[0].0.copies()[0].page.clone()),
-            (size - 0x2000, s[0].0.copies()[1].page.clone())
-        ]
-    );
-    // s0 -> s1: a write into run 0.
-    let w1 = s[0].0.after_first_write(size, 0, &[]).unwrap();
-    assert_eq!(w1.0, size - 0x2000);
-    assert_pages(&s[0].0, &s[1].0, &[w1], "s1", false);
-    // s1 -> s2: run 2.
-    let w2 = s[1].0.after_first_write(size, 2, &[]).unwrap();
-    assert_eq!(w2.0, 0);
-    assert_pages(&s[1].0, &s[2].0, &[w2], "s2", false);
-    // s2 -> s3: run 0 again, already listed.
-    assert!(s[2].0.after_first_write(size, 0, &[]).is_none());
-    assert_pages(&s[2].0, &s[3].0, &[], "s3", false);
-    // s3 -> s4: runs 1 and 3; run 2 has gone clean meanwhile.
-    let w3 = s[3].0.after_first_write(size, 1, &[2]).unwrap();
-    let mid = DirtyRegions::load(size, |off, buf| {
-        let page = if off == w3.0 { &w3.1 } else { &s[3].0.copies()[0].page };
-        buf.copy_from_slice(page);
-        Ok(())
-    })
-    .unwrap()
-    .unwrap();
-    let w4 = mid.after_first_write(size, 3, &[]).unwrap();
-    assert_pages(&s[3].0, &s[4].0, &[w3, w4], "s4", false);
-    // s4 -> s5: disconnect. Only the covered part is predicted: Windows
-    // leaves stale entries after the empty list (1, 1, 3 here).
-    assert_pages(&s[4].0, &s[5].0, &DirtyRegions::after_disconnect(size), "s5", true);
-    assert_ne!(s[5].0.copies()[0].page[0x18..0x30], [0; 24]);
-    // s5 -> s6: connect changes nothing.
-    assert_pages(&s[5].0, &s[6].0, &[], "s6", false);
-    // s6 -> s7: run 1 after reconnecting.
-    let w7 = s[6].0.after_first_write(size, 1, &[]).unwrap();
-    assert_pages(&s[6].0, &s[7].0, &[w7], "s7", false);
+    assert_eq!(replay_dirty_region_log("m5drt", Some("s0")), 7);
+    assert_eq!(replay_dirty_region_log("m5drt2", None), 7);
 }
