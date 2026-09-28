@@ -264,6 +264,31 @@ the space was written in two runs, attached again, repaired):
 A run of `slab_count` consecutive physical slabs backs column `column`, copy
 `copy`, rows `virtual_slab / data_columns ...` (**verified**).
 
+## Slab allocation
+
+How Windows allocates slabs (**verified** by the tests
+`thin_slabs_are_allocated_per_update_at_the_first_free_slab` and
+`thin_rows_are_allocated_when_the_cache_destages` on the scenarios
+`m5thin`, `m5thin2`, `m5thinm` and `m5thinwbc`, and by
+`pool_database_updates_follow_the_model` for fixed spaces):
+
+* Each slab goes to the first slab of its disk that no extent uses; the
+  copies of a mirror row and the columns of a parity row go to different
+  disks. Which disks Windows picks does not follow from the metadata (not
+  the emptiest) and differs between two identical runs (`m5thin`,
+  `m5thin2`).
+* A thin space allocates a row when a write first reaches it, as one
+  database update with one extent record per copy (or column), in the
+  order of the writes; a fixed space allocates all rows at creation and an
+  extension adds the new rows in one update.
+* With a write-back cache, a write into an unallocated row of a thin space
+  stays in the cache without allocating; the row is allocated when the
+  cache destages it (`m5thinwbc`: the row written first was allocated
+  first).
+* An extent record covers one allocation unit: 4 slabs with 1 GiB units
+  (`m5db`'s second space), 1 slab with 256 MiB units (its extension, the
+  thin spaces).
+
 ## Data layout (**verified**)
 
 Data is cut into `interleave`-sized units. Unit `u` belongs to stripe

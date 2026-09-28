@@ -317,10 +317,12 @@ The format document has the specifications.
   replacement copy; without one, missed writes are known only from the
   dirty region log and in memory ("Need Reallocation", "Stale Metadata")
   until the repair.
-* Slab allocation (`m5thin`, `m5thinm`, `m5thin2`): one database update
-  per slab (per copy an extent record) at the first free slab of the chosen
-  disk; the disk itself is chosen differently in two identical runs, so it
-  is an input of the model. Object ids of new spaces (`m5ids`: 37, 70,
+* Slab allocation (`m5thin`, `m5thinm`, `m5thin2`, `m5thinwbc`): one
+  database update per row (an extent record per copy or column) at the
+  first free slab of the chosen disks; the disks are chosen differently in
+  two identical runs, so they are an input of the model. With a cache, a
+  thin row is allocated only when the cache destages it; its data read back
+  before and after. Object ids of new spaces (`m5ids`: 37, 70,
   99/100, 108) do not follow from the metadata either.
 
 ## Test infrastructure (continuous, feeds every stage)

@@ -288,10 +288,15 @@ fn pool_database_updates_follow_the_model() {
 /// of the pool database with one extent record per copy, on the disks
 /// Windows chose (the input) and at the first free slab of each; the
 /// database of every state must match byte for byte.
-/// A state and the allocations before it: (virtual slab, disk per copy).
+/// A state and the allocations before it: (virtual slab, disk per copy, or
+/// per column for a parity space).
 type Allocations<'a> = (&'a str, &'a [(u64, &'a [u64])]);
 
 fn replay_allocations(scenario: &str, space_id: u64, steps: &[Allocations]) {
+    replay_allocations_of(scenario, space_id, steps, false)
+}
+
+fn replay_allocations_of(scenario: &str, space_id: u64, steps: &[Allocations], per_column: bool) {
     let first = databases(scenario, "s0");
     let mut db = first[0].clone();
     let mut sequence = db.sequence();
@@ -301,12 +306,13 @@ fn replay_allocations(scenario: &str, space_id: u64, steps: &[Allocations]) {
             let bodies: Vec<Vec<u8>> = disks
                 .iter()
                 .enumerate()
-                .map(|(copy, &disk_id)| {
+                .map(|(i, &disk_id)| {
+                    let (column, copy) = if per_column { (i as u64, 0) } else { (0, i as u64) };
                     ExtentRecord {
                         space_id,
                         virtual_slab: *virtual_slab,
-                        column: 0,
-                        copy: copy as u64,
+                        column,
+                        copy,
                         slab_count: 1,
                         disk_id,
                         physical_slab: db.first_free_slab(disk_id),
@@ -658,5 +664,48 @@ fn destaged_and_cached_blocks_read_back() {
         reader.read_exact_at(&mut block, offset).unwrap();
         storage_spaces::testpattern::fill_block(&mut expected, offset, "b");
         assert!(block == expected, "block {k}");
+    }
+}
+
+/// m5thinwbc: a thin 3-column parity space with the default cache, written
+/// 4 KiB into its unallocated row at 2 GiB, then 4 KiB into 1500 chunks
+/// until Windows destaged. The cached write allocated nothing; destaging
+/// allocated each row (one update, one extent per column at the first free
+/// slab of each disk) in the order it destaged: first the row at 2 GiB,
+/// then the second row of the small writes.
+#[test]
+fn thin_rows_are_allocated_when_the_cache_destages() {
+    let s1 = cache_slots(&state("m5thinwbc", "s1"));
+    assert_eq!(s1.len(), 2);
+    replay_allocations_of(
+        "m5thinwbc",
+        6,
+        &[("s1", &[]), ("s2", &[(8, &[1, 3, 2]), (2, &[1, 2, 3])])],
+        true,
+    );
+}
+
+/// The data of m5thinwbc after destaging, from the full snapshot when it
+/// has been fetched: the block at 2 GiB and the 1500 small writes.
+#[test]
+fn thin_destaged_and_cached_blocks_read_back() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/snapshots/m5thinwbc/s2");
+    if !dir.join("disk2.img").exists() {
+        eprintln!("skipping: {} not fetched", dir.display());
+        return;
+    }
+    let disks: Vec<File> = (0..3)
+        .map(|i| File::open(dir.join(format!("disk{i}.img"))).unwrap())
+        .collect();
+    let pool = Pool::open(disks).unwrap();
+    let space = pool.user_spaces().next().unwrap();
+    let reader = pool.open_space(space.id()).unwrap();
+    let mut block = vec![0u8; 4096];
+    let mut expected = vec![0u8; 4096];
+    let blocks = (0..1500u64).map(|k| (k * (512 << 10), "b")).chain([(2 << 30, "a")]);
+    for (offset, tag) in blocks {
+        reader.read_exact_at(&mut block, offset).unwrap();
+        storage_spaces::testpattern::fill_block(&mut expected, offset, tag);
+        assert!(block == expected, "block at {offset:#x}");
     }
 }
