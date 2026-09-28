@@ -11,9 +11,11 @@
 //! | 0x14 | 4 | CRC-32 (zlib) of the first `0x18 + 8 * count` bytes, this field zeroed |
 //! | 0x18 | 8 each | virtual slab where an extent run with writes in flight starts |
 //!
-//! After a clean shutdown both copies are empty. The copies of a mirror may
-//! differ inside a listed run: Windows resynchronises them when it mounts
-//! the pool, and which copy it keeps is not recorded here.
+//! Pools whose disks were removed while the pool was online list the runs
+//! written last even when the copies agree; whether a clean shutdown empties
+//! the log is not known. The copies of a mirror may differ inside a listed
+//! run: Windows resynchronises them when it mounts the pool, and which copy
+//! it keeps is not recorded here.
 
 use std::collections::BTreeSet;
 
@@ -117,7 +119,7 @@ mod tests {
         space[0x18] ^= 1;
         let d = load(&space).unwrap();
         assert_eq!(d.dirty_runs(), 1);
-        // The empty header of a cleanly shut down mirror.
+        // An empty log.
         let mut clean = vec![0u8; 0x10000];
         clean[..HEADER].copy_from_slice(&header(0, &[]));
         assert_eq!(load(&clean).unwrap().dirty_runs(), 0);

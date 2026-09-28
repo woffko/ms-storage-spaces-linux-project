@@ -206,9 +206,15 @@ in this repository.
 
 ### M4 (exit criteria met except the release, 2026-09-28)
 
-Tagging `v0.1.0` and publishing the crates wait for approval; everything
-else is done.
-
+* Release: postponed (2026-09-28). Every mirror pool of the corpus lists
+  extent runs in its dirty region log although its copies agree (see the
+  format document), so `spaces info` calls them not cleanly shut down and
+  reads there compare every copy. How the log looks after a clean detach
+  or a Windows shutdown decides whether that wording and the extra reads
+  are right; it is to be settled first. The release is then a tag
+  `v0.1.0` and a GitHub release with a static x86_64 musl build; the
+  crates go to crates.io only once a stable release is confirmed (decision
+  2026-09-28), their metadata is ready.
 * Packaging: `cargo install --locked --path crates/spaces-cli` installs
   `spaces`; `contrib/install.sh`; Debian package script
   (`contrib/deb/build-deb.sh`); `contrib/arch/PKGBUILD` builds and tests the
@@ -372,7 +378,8 @@ the mount working.
    (degraded pools, stale disks), troubleshooting.
 3. Security review of the parsing code, fuzzing run of at least 24 h without
    findings, no `unsafe` outside the ublk/NBD glue.
-4. Tag `v0.1.0`, publish crates.
+4. Tag `v0.1.0` and a GitHub release. The crates are published on
+   crates.io only once a stable release is confirmed.
 
 ## Stage 2: write support
 

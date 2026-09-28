@@ -364,9 +364,13 @@ starts with a header, and a second copy of it sits 8 KiB before the end:
 | 0x14 | 4 | CRC-32 (zlib) of the first `0x18 + 8 * count` bytes with this field zeroed |
 | 0x18 | 8 each | virtual slab where an extent run with writes in flight starts |
 
-(**verified**: clean pools have no entries; `crashmirrorwc`, whose disks were
-pulled during small writes, lists both of its extent runs, 0 and 4, in
-generation 2 and run 0 in generation 1.) The copies of a mirror may differ
+(**verified**: `crashmirrorwc`, whose disks were pulled during small
+writes, lists both of its extent runs, 0 and 4, in generation 2 and run 0
+in generation 1.) The pools made by `tools/vm/New-TestPool.ps1` list the
+extent runs they were written through as well, although their copies agree
+(the pattern tests read them without a refusal): the generator dismounts
+the VHDX files while the pool is online. Whether a clean detach or a
+Windows shutdown empties the log is not known yet. The copies of a mirror may differ
 inside a listed run, and Windows resynchronises them when it mounts the
 pool. Which copy it keeps is not recorded and not predictable: in
 `crashmirrorwc` it kept copy 1 in 8 of the 9 differing MiB and copy 0 in
@@ -413,6 +417,8 @@ recovered space.
 * SDBB entries carry no checksum of their own; how Windows itself detects
   torn entries is unknown (whether it compares copies like `spaces`).
 * Remaining record fields (provisioning type, sizes, disk attributes, tiers).
+* Whether a clean detach or a Windows shutdown empties the mirror dirty
+  region log.
 * How Windows chooses between differing mirror copies after an unclean
   shutdown; the meaning of the constant entry
   of the cache's type 1 slot; why the cache log restarts mid-area.
