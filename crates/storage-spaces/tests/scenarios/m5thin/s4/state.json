@@ -1,0 +1,81 @@
+﻿{
+    "pool":  {
+                 "health":  "Healthy",
+                 "operational":  "OK",
+                 "read_only":  false
+             },
+    "spaces":  [
+                   {
+                       "name":  "m5thin",
+                       "health":  "Healthy",
+                       "operational":  "OK",
+                       "size":  4294967296,
+                       "footprint":  1073741824,
+                       "manual_attach":  false,
+                       "extents":  [
+                                       {
+                                           "column":  0,
+                                           "copy":  0,
+                                           "size":  268435456,
+                                           "virtual_offset":  0,
+                                           "physical_offset":  268435456,
+                                           "disk_unique_id":  "60022480F391BF24D24968AAAC21A6C5",
+                                           "status":  "Active"
+                                       },
+                                       {
+                                           "column":  0,
+                                           "copy":  0,
+                                           "size":  268435456,
+                                           "virtual_offset":  268435456,
+                                           "physical_offset":  268435456,
+                                           "disk_unique_id":  "600224801C7EA9B59F7F4E752EBECB28",
+                                           "status":  "Active"
+                                       },
+                                       {
+                                           "column":  0,
+                                           "copy":  0,
+                                           "size":  268435456,
+                                           "virtual_offset":  2147483648,
+                                           "physical_offset":  268435456,
+                                           "disk_unique_id":  "60022480C7F2B28ECB3715F4129D4AAA",
+                                           "status":  "Active"
+                                       },
+                                       {
+                                           "column":  0,
+                                           "copy":  0,
+                                           "size":  268435456,
+                                           "virtual_offset":  3221225472,
+                                           "physical_offset":  536870912,
+                                           "disk_unique_id":  "60022480C7F2B28ECB3715F4129D4AAA",
+                                           "status":  "Active"
+                                       }
+                                   ]
+                   }
+               ],
+    "disks":  [
+                  {
+                      "unique_id":  "60022480F391BF24D24968AAAC21A6C5",
+                      "health":  "Healthy",
+                      "operational":  "OK",
+                      "usage":  "Auto-Select",
+                      "allocated":  1091567616,
+                      "size":  8589934592
+                  },
+                  {
+                      "unique_id":  "600224801C7EA9B59F7F4E752EBECB28",
+                      "health":  "Healthy",
+                      "operational":  "OK",
+                      "usage":  "Auto-Select",
+                      "allocated":  1091567616,
+                      "size":  8589934592
+                  },
+                  {
+                      "unique_id":  "60022480C7F2B28ECB3715F4129D4AAA",
+                      "health":  "Healthy",
+                      "operational":  "OK",
+                      "usage":  "Auto-Select",
+                      "allocated":  1360003072,
+                      "size":  8589934592
+                  }
+              ]
+}

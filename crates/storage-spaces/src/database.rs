@@ -160,6 +160,30 @@ impl Database {
         h[0x0c..0x10].copy_from_slice(&crc.to_be_bytes());
     }
 
+    /// The first slab of disk `disk_id` that no extent uses: where Windows
+    /// puts a slab it allocates on that disk.
+    pub fn first_free_slab(&self, disk_id: u64) -> u64 {
+        let records = crate::format::assemble_records(&self.bytes, self.entry_size).unwrap_or_default();
+        let mut used: Vec<(u64, u64)> = records
+            .iter()
+            .filter_map(|r| match crate::format::Record::decode(r) {
+                Ok(crate::format::Record::Extent(e)) if e.disk_id == disk_id => {
+                    Some((e.physical_slab, e.physical_slab.saturating_add(e.slab_count)))
+                }
+                _ => None,
+            })
+            .collect();
+        used.sort();
+        let mut free = 0;
+        for (start, end) in used {
+            if start > free {
+                break;
+            }
+            free = free.max(end);
+        }
+        free
+    }
+
     pub fn sequence(&self) -> u64 {
         u64::from_be_bytes(self.bytes[0x40..0x48].try_into().unwrap())
     }

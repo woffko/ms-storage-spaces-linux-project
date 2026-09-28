@@ -281,3 +281,79 @@ fn pool_database_updates_follow_the_model() {
     assert_database(&db, "m5db", "s5");
     assert_database(&db, "m5db", "s6");
 }
+
+/// Replays slab allocations of a thin space: each allocation is one update
+/// of the pool database with one extent record per copy, on the disks
+/// Windows chose (the input) and at the first free slab of each; the
+/// database of every state must match byte for byte.
+/// A state and the allocations before it: (virtual slab, disk per copy).
+type Allocations<'a> = (&'a str, &'a [(u64, &'a [u64])]);
+
+fn replay_allocations(scenario: &str, space_id: u64, steps: &[Allocations]) {
+    let first = databases(scenario, "s0");
+    let mut db = first[0].clone();
+    let mut sequence = db.sequence();
+    for (label, allocations) in steps {
+        for (virtual_slab, disks) in *allocations {
+            sequence += 1;
+            let bodies: Vec<Vec<u8>> = disks
+                .iter()
+                .enumerate()
+                .map(|(copy, &disk_id)| {
+                    ExtentRecord {
+                        space_id,
+                        virtual_slab: *virtual_slab,
+                        column: 0,
+                        copy: copy as u64,
+                        slab_count: 1,
+                        disk_id,
+                        physical_slab: db.first_free_slab(disk_id),
+                        flags: 0,
+                        stale_marker: 0xffff_ffff,
+                    }
+                    .encode(sequence)
+                })
+                .collect();
+            let writes: Vec<(u8, u8, &[u8])> = bodies.iter().map(|b| (4, 6, b.as_slice())).collect();
+            db.update(&writes, &[]).unwrap();
+        }
+        if !allocations.is_empty() {
+            let windows = databases(scenario, label);
+            db.commit(sequence, windows[0].timestamp());
+        }
+        assert_database(&db, scenario, label);
+    }
+}
+
+/// m5thin: a thin simple space on three disks written at 2 GiB, 0, 3 GiB,
+/// 256 MiB and then 1 GiB from 1 GiB on (256 MiB slabs). m5thinm: the same
+/// as a two-way mirror. Windows allocates a slab (every copy) per database
+/// update when a write first reaches it, in the order of the write, at the
+/// first free slab of the disks it picks; the write at 0 found its slab
+/// allocated with the space. Which disks it picks does not follow from the
+/// metadata (not the emptiest: m5thin put the slab at 3 GiB on disk 3 while
+/// disk 2 had two slabs fewer), so the model takes them from Windows.
+#[test]
+fn thin_slabs_are_allocated_per_update_at_the_first_free_slab() {
+    replay_allocations(
+        "m5thin",
+        6,
+        &[
+            ("s1", &[(8, &[3])]),
+            ("s2", &[]),
+            ("s3", &[(12, &[3])]),
+            ("s4", &[(1, &[2])]),
+            ("s5", &[(4, &[2]), (5, &[1]), (6, &[2]), (7, &[2])]),
+        ],
+    );
+    replay_allocations(
+        "m5thinm",
+        6,
+        &[
+            ("s1", &[(8, &[1, 3])]),
+            ("s2", &[]),
+            ("s3", &[(12, &[1, 3])]),
+            ("s4", &[(4, &[1, 3]), (5, &[1, 2]), (6, &[2, 1]), (7, &[2, 3])]),
+        ],
+    );
+}
