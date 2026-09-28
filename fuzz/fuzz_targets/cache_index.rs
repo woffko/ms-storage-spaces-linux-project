@@ -1,11 +1,13 @@
 //! The write-back cache header and slot log. The input is the cache space
 //! from its start; the harness sets signatures, the owner GUID and CRCs
 //! (when the first byte of a slot is odd) so that inputs reach the slot
-//! parser.
+//! parser. The cache model then writes a log for writes taken from the
+//! input, which must read back as exactly the sectors written.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use storage_spaces::cache::{CacheHeader, CacheIndex};
+use storage_spaces::Guid;
+use storage_spaces::cache::{CacheHeader, CacheIndex, CacheWriter, Lookup};
 
 const OWNER: [u8; 16] = [7; 16];
 
@@ -55,4 +57,49 @@ fuzz_target!(|data: &[u8]| {
             let _ = index.lookup(offset);
         }
     }
+    model_round_trip(data);
 });
+
+/// Writes of up to 128 KiB within 16 MiB, from the input, logged by the
+/// model into a 64-slot cache of 512 KiB chunks.
+fn model_round_trip(data: &[u8]) {
+    const CHUNK: u64 = 512 << 10;
+    let header = CacheHeader {
+        owner_guid: Guid::from_mixed_endian(&OWNER),
+        sequence: 1,
+        slot_offset: 0,
+        slot_size: 4096,
+        slot_count: 64,
+        data_offset: 5 << 20,
+        chunk_size: CHUNK as u32,
+        chunk_count: 2038,
+    };
+    let mut writer = CacheWriter::new(header.clone(), 64);
+    let mut area = vec![0u8; 64 * 4096];
+    area[..4096].copy_from_slice(&writer.init_slot());
+    let mut written = vec![false; (16 << 20) / 512];
+    for w in data.chunks_exact(4).take(63) {
+        let offset = u64::from(u16::from_le_bytes([w[0], w[1]]) % 32768) * 512;
+        let len = (u64::from(u16::from_le_bytes([w[2], w[3]]) % 256) + 1) * 512;
+        let len = len.min((16 << 20) - offset);
+        for (index, page) in writer.write(offset, len) {
+            area[index * 4096..(index + 1) * 4096].copy_from_slice(&page);
+        }
+        written[(offset / 512) as usize..((offset + len) / 512) as usize].fill(true);
+    }
+    let index = CacheIndex::load(header, |off: u64, buf: &mut [u8]| {
+        buf.copy_from_slice(&area[off as usize..off as usize + buf.len()]);
+        Ok(())
+    })
+    .unwrap();
+    for (sector, &w) in written.iter().enumerate().step_by(7) {
+        let offset = sector as u64 * 512;
+        match index.lookup(offset) {
+            Lookup::Hit { cache_offset, .. } => {
+                assert!(w, "sector {sector} cached but never written");
+                assert_eq!(cache_offset % CHUNK, offset % CHUNK);
+            }
+            Lookup::Miss { .. } => assert!(!w, "sector {sector} written but not cached"),
+        }
+    }
+}

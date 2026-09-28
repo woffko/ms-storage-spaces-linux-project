@@ -42,6 +42,7 @@ pub enum Consistency {
 #[derive(Debug, Clone, Default)]
 pub struct ParityJournal {
     runs: HashMap<u64, Vec<Consistency>>,
+    slots: Vec<crate::cache::Slot>,
 }
 
 impl ParityJournal {
@@ -75,7 +76,10 @@ impl ParityJournal {
                 }
             }
         }
-        Ok(Some(ParityJournal { runs }))
+        Ok(Some(ParityJournal {
+            runs,
+            slots: crate::cache::valid_slots(&merged, slot_size),
+        }))
     }
 
     /// The consistency per extent run that one version of the slot area
@@ -147,6 +151,11 @@ impl ParityJournal {
         let mut entries: Vec<_> = self.runs.iter().map(|(k, v)| (*k, v.as_slice())).collect();
         entries.sort_by_key(|e| e.0);
         entries
+    }
+
+    /// The valid slots of the slot area (the newest version of each).
+    pub fn slots(&self) -> &[crate::cache::Slot] {
+        &self.slots
     }
 
     /// Number of extent runs with possibly inconsistent stripes.

@@ -59,6 +59,12 @@ m5stale | -DiskCount 2 -Resiliency Mirror -DataCopies 2 -Columns 1 -SizeMB 1024 
 # The write path of the write-back cache and of the parity journal.
 m5wbc | -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -SizeMB 2048 -NoPattern | snap:s0; write:m5wbc:0:4:a; snap:s1; write:m5wbc:1024:64:b; snap:s2; sleep:30; snap:s3; write:m5wbc:0:4:c; snap:s4; sleep:120; snap:s5; dismount
 m5pj | -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -SizeMB 2048 -WriteCacheMB 0 -NoPattern | snap:s0; write:m5pj:0:4:a; snap:s1; write:m5pj:1024:64:b; snap:s2; sleep:30; snap:s3; write:m5pj:0:512:c; snap:s4; dismount
+# The parity journal: writes of whole stripes and more, which bypass the cache.
+m5pj2 | -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -SizeMB 2048 -NoPattern | snap:s0; write:m5pj2:0:4096:a; snap:s1; write:m5pj2:8192:512:b; snap:s2; write:m5pj2:16384:4096:c; snap:s3; sleep:60; snap:s4; write:m5pj2:0:4:d; snap:s5; dismount
+# m5thin once more: whether Windows picks the same disks.
+m5thin2 | -DiskCount 3 -Resiliency Simple -Columns 1 -Provisioning Thin -SizeMB 4096 -AllocationUnitMB 256 -NoPattern | snap:s0:1100; write:m5thin2:2097152:4:a; snap:s1:1100; write:m5thin2:0:4:b; snap:s2:1100; write:m5thin2:3145728:4:c; snap:s3:1100; write:m5thin2:262144:4:d; snap:s4:1100; write:m5thin2:1048576:1048576:e; snap:s5:1100; dismount
+# Object ids of new spaces: three created, one deleted in between.
+m5ids | -DiskCount 2 -Resiliency Simple -Columns 2 -SizeMB 1024 -AllocationUnitMB 256 -NoPattern | snap:s0:1100; newspace:m5idsa:Simple:512; snap:s1:1100; newspace:m5idsb:Mirror:512; snap:s2:1100; removespace:m5idsa; newspace:m5idsc:Simple:512; snap:s3:1100; dismount
 LIST
 exit $status
 }

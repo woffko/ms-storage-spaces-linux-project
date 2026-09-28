@@ -125,6 +125,16 @@ pub fn dump<D: ReadAt>(pool: &Pool<D>) -> Vec<String> {
             for (offset, versions) in j.entries() {
                 line(format!("{tag} journal run {offset:#x} {versions:?}"));
             }
+            for s in j.slots() {
+                line(format!(
+                    "{tag} journal slot {} type {} sequence {} entries {}: {}",
+                    s.index,
+                    s.kind,
+                    s.sequence,
+                    s.entries,
+                    hex(&s.content)
+                ));
+            }
         }
         if let Some(c) = reader.cache() {
             line(format!("{tag} cache {:?}", c.header));
@@ -133,6 +143,16 @@ pub fn dump<D: ReadAt>(pool: &Pool<D>) -> Vec<String> {
             }
             for (offset, block, valid) in c.mappings() {
                 line(format!("{tag} cache chunk {offset:#x} block {block} {valid:?}"));
+            }
+            for s in c.slots() {
+                line(format!(
+                    "{tag} cache slot {} type {} sequence {} entries {}: {}",
+                    s.index,
+                    s.kind,
+                    s.sequence,
+                    s.entries,
+                    hex(&s.content)
+                ));
             }
         }
     }

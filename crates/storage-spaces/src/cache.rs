@@ -91,6 +91,171 @@ impl<F: FnMut(u64, &mut [u8]) -> Result<()>> SlotSource for F {
     }
 }
 
+/// A valid slot ("SPSLOT") of a cache or parity journal slot area.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Slot {
+    pub index: usize,
+    /// 0 = mapping entries; the cache's slot 0 has type 1.
+    pub kind: u32,
+    pub sequence: u64,
+    pub entries: u32,
+    /// The slot from its type field on, without trailing zeros.
+    pub content: Vec<u8>,
+}
+
+/// The valid slots of a slot area.
+pub(crate) fn valid_slots(area: &[u8], slot_size: usize) -> Vec<Slot> {
+    area.chunks_exact(slot_size)
+        .enumerate()
+        .filter_map(|(index, slot)| {
+            let sequence = slot_sequence(slot)?;
+            let end = slot.iter().rposition(|&b| b != 0).map_or(0x20, |p| p + 1).max(0x20);
+            Some(Slot {
+                index,
+                kind: le_u32(&slot[0x20..]),
+                sequence,
+                entries: le_u32(&slot[0x30..]),
+                content: slot[0x20..end].to_vec(),
+            })
+        })
+        .collect()
+}
+
+/// How Windows logs writes into a write-back cache (the model the scenario
+/// tests check slot by slot): a new cache holds slot 0 of type 1; every
+/// write that changes which sectors of a chunk are cached gets the next slot
+/// with the next sequence and one mapping entry for each chunk it changes.
+/// A chunk entering the cache takes the next block (parity caches start at
+/// block 64, mirror caches at 0). A write into sectors already cached
+/// changes no slot.
+#[derive(Debug, Clone)]
+pub struct CacheWriter {
+    header: CacheHeader,
+    next_slot: usize,
+    sequence: u64,
+    next_block: u32,
+    /// Chunk number -> (block, valid sectors).
+    chunks: std::collections::BTreeMap<u64, (u32, Vec<bool>)>,
+}
+
+impl CacheWriter {
+    /// A new cache described by `header`, whose first block is `first_block`.
+    pub fn new(header: CacheHeader, first_block: u32) -> Self {
+        CacheWriter {
+            header,
+            next_slot: 1,
+            sequence: 1,
+            next_block: first_block,
+            chunks: Default::default(),
+        }
+    }
+
+    /// Slot 0 of a new cache: type 1, sequence 1, the entry (8, 1).
+    pub fn init_slot(&self) -> Vec<u8> {
+        let mut entry = 8u32.to_le_bytes().to_vec();
+        entry.extend_from_slice(&1u32.to_le_bytes());
+        self.slot(1, 1, 1, &entry)
+    }
+
+    /// A write of `len` bytes at owner offset `offset`: the slots Windows
+    /// writes (index and page), none if no chunk changes. A write whose
+    /// entries do not fit into one slot continues in the next (where Windows
+    /// ends a slot then is not modelled).
+    pub fn write(&mut self, offset: u64, len: u64) -> Vec<(usize, Vec<u8>)> {
+        let chunk = self.header.chunk_size as u64;
+        let sectors = (chunk / 512) as usize;
+        let capacity = (self.header.slot_size as usize).saturating_sub(0x38);
+        let mut slots = Vec::new();
+        let mut entries = Vec::new();
+        let mut pos = 0;
+        let mut count = 0;
+        let mut at = offset;
+        while at < offset + len {
+            let key = at / chunk;
+            let end = (offset + len).min((key + 1) * chunk);
+            let (first, last) = ((at % chunk / 512) as usize, ((end - 1) % chunk / 512) as usize);
+            let next_block = &mut self.next_block;
+            let (block, valid) = self.chunks.entry(key).or_insert_with(|| {
+                let b = *next_block;
+                *next_block += 1;
+                (b, vec![false; sectors])
+            });
+            if valid[first..=last].iter().any(|v| !v) {
+                valid[first..=last].fill(true);
+                let runs = runs_of(valid);
+                let full = runs.len() == 1;
+                let counted: u16 = if full { 0 } else { 2 * runs.len() as u16 };
+                let mut e = (key * chunk).to_le_bytes().to_vec();
+                e.extend_from_slice(&block.to_le_bytes());
+                e.extend_from_slice(&(if full { STATE_FULL } else { STATE_PARTIAL }).to_le_bytes());
+                e.extend_from_slice(&counted.to_le_bytes());
+                // The run words are always written, but counted only for a
+                // partly valid chunk; the next entry starts 8-byte aligned
+                // after the counted part and so overwrites the others.
+                for (v, n) in runs {
+                    e.extend_from_slice(&((u16::from(v) << 15) | n as u16).to_le_bytes());
+                }
+                if pos + e.len() > capacity && count > 0 {
+                    entries.truncate(pos);
+                    slots.push(self.next(count, &entries));
+                    (entries, pos, count) = (Vec::new(), 0, 0);
+                }
+                entries.truncate(pos);
+                entries.resize(pos, 0);
+                entries.extend_from_slice(&e);
+                pos = (pos + 16 + counted as usize).next_multiple_of(8);
+                count += 1;
+            }
+            at = end;
+        }
+        if count > 0 {
+            slots.push(self.next(count, &entries));
+        }
+        slots
+    }
+
+    /// The next slot with `count` entries.
+    fn next(&mut self, count: u32, entries: &[u8]) -> (usize, Vec<u8>) {
+        self.sequence += 1;
+        let index = self.next_slot;
+        // Past the last slot the log continues at slot 1 (slot 0 holds the
+        // type 1 record); where Windows restarts the log is not modelled.
+        self.next_slot += 1;
+        if self.next_slot >= self.header.slot_count as usize {
+            self.next_slot = 1;
+        }
+        (index, self.slot(0, self.sequence, count, entries))
+    }
+
+    fn slot(&self, kind: u32, sequence: u64, count: u32, entries: &[u8]) -> Vec<u8> {
+        let mut s = vec![0u8; self.header.slot_size as usize];
+        s[..8].copy_from_slice(SPSLOT_SIGNATURE);
+        s[8..24].copy_from_slice(&self.header.owner_guid.to_mixed_endian());
+        s[0x18..0x1c].copy_from_slice(&1u32.to_le_bytes());
+        s[0x1c..0x20].copy_from_slice(&self.header.slot_size.to_le_bytes());
+        s[0x20..0x24].copy_from_slice(&kind.to_le_bytes());
+        s[0x28..0x30].copy_from_slice(&sequence.to_le_bytes());
+        s[0x30..0x34].copy_from_slice(&count.to_le_bytes());
+        let n = entries.len().min(s.len().saturating_sub(0x38));
+        s[0x38..0x38 + n].copy_from_slice(&entries[..n]);
+        let crc = crc32_excluding(&s, 0x24);
+        s[0x24..0x28].copy_from_slice(&crc.to_le_bytes());
+        s
+    }
+}
+
+/// Runs of equally valid sectors, from the chunk start.
+fn runs_of(valid: &[bool]) -> Vec<(bool, usize)> {
+    let mut runs: Vec<(bool, usize)> = Vec::new();
+    for &v in valid {
+        match runs.last_mut() {
+            Some((last, n)) if *last == v => *n += 1,
+            _ => runs.push((v, 1)),
+        }
+    }
+    runs
+}
+
 /// Sequence of a slot whose signature and CRC are valid.
 pub(crate) fn slot_sequence(slot: &[u8]) -> Option<u64> {
     (slot.len() >= 0x38
@@ -179,6 +344,7 @@ pub struct CacheIndex {
     /// Chunks mapped differently by the copies of the slot area (after an
     /// unclean shutdown): which one Windows keeps is not known.
     conflicts: HashSet<u64>,
+    slots: Vec<Slot>,
 }
 
 impl CacheIndex {
@@ -198,10 +364,12 @@ impl CacheIndex {
                 }
             }
         }
+        let slots = valid_slots(&merged, slot_size);
         Ok(CacheIndex {
             header,
             chunks,
             conflicts,
+            slots,
         })
     }
 
@@ -298,6 +466,11 @@ impl CacheIndex {
         let mut all: Vec<_> = self.chunks.iter().map(|(k, (b, v))| (k * chunk, *b, v)).collect();
         all.sort_by_key(|m| m.0);
         all
+    }
+
+    /// The valid slots of the slot area (the newest version of each).
+    pub fn slots(&self) -> &[Slot] {
+        &self.slots
     }
 
     /// Number of chunks the copies of the cache disagree about.
@@ -439,6 +612,41 @@ mod tests {
             Lookup::Hit { cache_offset, .. } => Some(cache_offset),
             Lookup::Miss { .. } => None,
         }
+    }
+
+    #[test]
+    fn writer_splits_entries_that_do_not_fit_into_one_slot() {
+        let header = CacheHeader {
+            owner_guid: Guid([7; 16]),
+            sequence: 1,
+            slot_offset: 0,
+            slot_size: 0x38 + 2 * 16 + 8,
+            slot_count: 8,
+            data_offset: 1 << 20,
+            chunk_size: 64 << 10,
+            chunk_count: 100,
+        };
+        let mut w = CacheWriter::new(header.clone(), 0);
+        let slot = header.slot_size as usize;
+        let mut area = vec![0u8; 8 * slot];
+        area[..slot].copy_from_slice(&w.init_slot());
+        // Five whole chunks: two entries fit into a slot.
+        let slots = w.write(0, 5 * (64 << 10));
+        assert_eq!(slots.iter().map(|s| s.0).collect::<Vec<_>>(), [1, 2, 3]);
+        for (i, page) in slots {
+            area[i * slot..(i + 1) * slot].copy_from_slice(&page);
+        }
+        let index = CacheIndex::load(header, |off: u64, buf: &mut [u8]| {
+            buf.copy_from_slice(&area[off as usize..off as usize + buf.len()]);
+            Ok(())
+        })
+        .unwrap();
+        for c in 0..5u64 {
+            assert!(
+                matches!(index.lookup(c * (64 << 10)), Lookup::Hit { cache_offset, .. } if cache_offset == (1 << 20) + c * (64 << 10))
+            );
+        }
+        assert!(matches!(index.lookup(5 * (64 << 10)), Lookup::Miss { .. }));
     }
 
     #[test]

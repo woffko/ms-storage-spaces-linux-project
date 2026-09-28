@@ -18,6 +18,15 @@ impl Guid {
         Guid(g)
     }
 
+    /// The Microsoft mixed-endian layout (inverse of [`Guid::from_mixed_endian`]).
+    pub fn to_mixed_endian(&self) -> [u8; 16] {
+        let mut g = self.0;
+        g[0..4].reverse();
+        g[4..6].reverse();
+        g[6..8].reverse();
+        g
+    }
+
     pub fn is_nil(&self) -> bool {
         self.0 == [0; 16]
     }

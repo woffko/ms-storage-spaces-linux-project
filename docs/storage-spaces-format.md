@@ -397,7 +397,35 @@ The cache is the space's write-back cache (`WriteCacheSize` of
 smallest cache Windows creates is 512 MiB (**verified**: pools `nocache`,
 `wc64`). Writes into unallocated rows of a thin space can stay in the cache
 even after the pool is cleanly detached, so the cache must be consulted on
-every read.
+every read. Windows 11 24H2 ignores `-WriteCacheSize 0` for parity spaces
+and creates the default 1 GiB cache (`m5pj`, `lrc13`: the manifest shows
+1 GiB).
+
+How Windows writes the cache log (**verified** slot by slot, byte for byte,
+by the test `cache_log_follows_the_writes` on the scenarios `m5wbc` and
+`m5pj`, 3-column parity with the default cache; `CacheWriter` implements
+it):
+
+* A slot is "SPSLOT\0\0", the owner GUID (mixed-endian), u32 1, u32 slot
+  size, u32 type, u32 CRC-32 of the whole slot with this field zeroed, u64
+  sequence, u32 entry count, u32 0, then the entries. A new cache holds only
+  slot 0: type 1, sequence 1, one entry `u32 8, u32 1`.
+* The first write into a chunk takes the next cache block (parity caches
+  start at block 64, the mirror cache of `mirrorthin` at 0) and writes the
+  next slot with the next sequence and one mapping entry per chunk it
+  changes: state 2 with the runs of valid sectors (`u16` each, bit 15 =
+  valid), or state 3 once the whole chunk is valid.
+* The run words are always written, but counted in the entry length only
+  for state 2; the next entry starts 8-byte aligned after the counted part
+  and overwrites the rest, so the last full entry of a slot is followed by
+  one stale run word covering the chunk (`0084` for 512 KiB chunks, `0082`
+  for 256 KiB; also in the corpus pools `paritythin` and `mirrorthin`).
+* A write into sectors already cached writes no slot; its data goes into the
+  block. Nothing was moved out of the cache within two and a half minutes
+  of idle time.
+* Not modelled: how Windows groups the entries of concurrent writes into
+  slots (the corpus shows 244 and 248 entries per slot), destaging, and
+  where the log restarts after the last slot.
 
 Extent `slab_count` is always in 256 MiB units, also for spaces with a 1 GiB
 allocation unit (**verified**: pool `au1g`).

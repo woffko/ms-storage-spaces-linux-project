@@ -7,6 +7,7 @@ use std::fs::File;
 use std::path::Path;
 
 use storage_spaces::Pool;
+use storage_spaces::cache::CacheWriter;
 use storage_spaces::database::Database;
 use storage_spaces::drt::{DirtyRegions, DrtWriter};
 use storage_spaces::format::{
@@ -384,4 +385,62 @@ fn a_returning_disk_is_updated_first_and_the_others_at_repair() {
     assert_eq!(s4[0].bytes(), s1[0].bytes(), "the member that stayed");
     assert_eq!(s4[1].bytes(), db.bytes(), "the returning member");
     assert_database(&db, "m5stale", "s5");
+}
+
+/// The valid slots of the cache of the only user space: (index, content from
+/// the type field on, without trailing zeros).
+fn cache_slots(pool: &Pool<SparseImage>) -> Vec<(usize, Vec<u8>)> {
+    let space = pool.user_spaces().next().unwrap();
+    let reader = pool.open_space(space.id()).unwrap();
+    reader
+        .cache()
+        .unwrap()
+        .slots()
+        .iter()
+        .map(|s| (s.index, s.content.clone()))
+        .collect()
+}
+
+fn content(page: &[u8]) -> Vec<u8> {
+    let end = page.iter().rposition(|&b| b != 0).map_or(0x20, |p| p + 1).max(0x20);
+    page[0x20..end].to_vec()
+}
+
+/// m5wbc and m5pj: a 3-column parity space with the default 1 GiB
+/// write-back cache (Windows creates it even when asked for none), written
+/// 4 KiB at 0, 64 KiB at 1 MiB, 4 KiB at 0 again after 30 s, and (m5pj)
+/// 512 KiB at 0. Replayed on [`CacheWriter`], every slot Windows wrote
+/// matches byte for byte: the first write into a chunk takes the next block
+/// (from 64) and the next slot with the next sequence, a write into cached
+/// sectors writes nothing, filling a chunk writes it as full (with the run
+/// word Windows leaves behind the entry). Nothing was moved out of the
+/// cache within two minutes.
+#[test]
+fn cache_log_follows_the_writes() {
+    for scenario in ["m5wbc", "m5pj"] {
+        let first = state(scenario, "s0");
+        let space = first.user_spaces().next().unwrap();
+        let header = first.open_space(space.id()).unwrap().cache().unwrap().header.clone();
+        let mut writer = CacheWriter::new(header, 64);
+        let mut expected = vec![(0, content(&writer.init_slot()))];
+        let mut checked = 0;
+        for (step, _) in steps(scenario) {
+            let a: Vec<&str> = step.split(':').collect();
+            match a[0] {
+                "write" => {
+                    let offset = a[2].parse::<u64>().unwrap() * 1024;
+                    let len = a[3].parse::<u64>().unwrap() * 1024;
+                    for (index, page) in writer.write(offset, len) {
+                        expected.push((index, content(&page)));
+                    }
+                }
+                "snap" => {
+                    assert_eq!(cache_slots(&state(scenario, a[1])), expected, "{scenario} {}", a[1]);
+                    checked += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(checked >= 5, "{scenario}");
+    }
 }
