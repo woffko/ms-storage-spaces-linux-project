@@ -271,7 +271,7 @@ in this repository.
   `as_chunks`; a 15 min run of all seven targets on 3a14cf5 with the 24 h
   corpora (2026-09-28T14:30Z) found nothing either.
 
-### M5 (in progress, 2026-09-28)
+### M5 (exit criteria met, 2026-09-28)
 
 Method: `tools/scenarios.sh` creates a pool on the Windows VM
 (`New-TestPool.ps1 -Finish Keep`) and `tools/vm/Invoke-Scenario.ps1` runs
@@ -282,7 +282,18 @@ snapshots into images, `spaces dump`/`diff` compare states, and fixtures of
 every state plus the step times (`scenario.json`) are committed under
 `crates/storage-spaces/tests/scenarios/`. Each model is checked by
 `tests/scenarios.rs` against every state of its scenarios, byte for byte.
-The format document has the specifications.
+The format document has the specifications; its open questions list what
+the experiments left open (the disk and object id Windows picks, how it
+groups concurrent cache writes and when a flush starts, the order of copy
+writes within one update, a generation jump of the dirty region log).
+
+Round trip to Windows: `tools/raw2vhdx.py` turns raw images (512-byte or
+4Kn) into dynamic VHDX files, `tools/vm.sh -put` uploads them, and
+`tools/vm/Test-RoundTrip.ps1` attaches the pool and records pool, space and
+disk health before and after `Repair-VirtualDisk`, `Get-PhysicalExtent`,
+the verification pattern and, for NTFS pools, `chkdsk` and the file hashes
+(`drtdism` and `ntfstier` unchanged: healthy, pattern and all 1252 files
+intact; used for the mirror copy and diverging database experiments).
 
 * Dirty region tracking (`m5drt`, `m5drt2`; `DrtWriter`): 14 snapshots
   predicted byte for byte, stale entries included: runs added in the next
