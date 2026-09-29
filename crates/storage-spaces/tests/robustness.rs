@@ -6,7 +6,8 @@ use std::fs::{self, File};
 use std::path::Path;
 
 use storage_spaces::Pool;
-use storage_spaces::io::{ReadAt, SparseImage};
+use storage_spaces::format::SLAB_SIZE;
+use storage_spaces::io::{Overlay, ReadAt, SparseImage};
 
 struct Rng(u64);
 
@@ -38,8 +39,41 @@ fn exercise(disks: Vec<SparseImage>, rng: &mut Rng) {
     }
 }
 
-#[test]
-fn corrupted_metadata_never_panics() {
+/// Opens every space for writing, writes, discards and flushes; the
+/// writes must stay inside the pool partitions of the members.
+fn exercise_writes(disks: Vec<SparseImage>) {
+    let disks: Vec<Overlay<SparseImage>> = disks.into_iter().map(Overlay::new).collect();
+    let Ok(pool) = Pool::open(disks.iter().collect::<Vec<_>>()) else {
+        return;
+    };
+    let mut allowed = vec![None; disks.len()];
+    for m in &pool.members {
+        allowed[m.device] = Some((m.partition.offset, m.partition.offset + m.partition.length));
+    }
+    let ids: Vec<u64> = pool.spaces.keys().copied().collect();
+    let block = vec![0x5a; 64 << 10];
+    for id in ids {
+        let Ok(writer) = pool.open_space_rw(id) else { continue };
+        let size = writer.size();
+        for offset in [0, size / 3, size.saturating_sub(block.len() as u64)] {
+            let _ = writer.write_all_at(&block, offset & !4095);
+        }
+        let _ = writer.discard(0, size.min(1 << 30));
+        let _ = writer.flush();
+    }
+    drop(pool);
+    for (disk, allowed) in disks.iter().zip(allowed) {
+        for page in disk.written_pages() {
+            assert!(
+                allowed.is_some_and(|(start, end)| start <= page && page < end),
+                "write at {page:#x} outside the pool partition {allowed:x?}"
+            );
+        }
+    }
+}
+
+/// The metadata fixtures, sorted by name.
+fn fixture_pools() -> Vec<(std::path::PathBuf, Vec<SparseImage>)> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let mut pools = Vec::new();
     for dir in fs::read_dir(&root).unwrap().map(|e| e.unwrap().path()) {
@@ -52,29 +86,93 @@ fn corrupted_metadata_never_panics() {
         pools.push((dir, disks));
     }
     pools.sort_by(|a, b| a.0.cmp(&b.0));
-    let iterations: u64 = std::env::var("FUZZ_ITERATIONS")
+    pools
+}
+
+/// Changes 1 to 8 bytes of the stored metadata of `original`.
+fn mutate(original: &[SparseImage], rng: &mut Rng) -> Vec<SparseImage> {
+    let mut disks = original.to_vec();
+    let flips = 1 + rng.below(8);
+    for _ in 0..flips {
+        let disk = &mut disks[rng.below(original.len() as u64) as usize];
+        let ranges = disk.ranges();
+        let (start, len) = ranges[rng.below(ranges.len() as u64) as usize];
+        let at = start + rng.below(len as u64);
+        let mut byte = [0u8];
+        disk.read_exact_at(&mut byte, at).unwrap();
+        let value = match rng.below(3) {
+            0 => byte[0] ^ (1 << rng.below(8)),
+            1 => 0xff,
+            _ => rng.below(256) as u8,
+        };
+        disk.insert(at, &[value]);
+    }
+    disks
+}
+
+fn iterations(default: u64) -> u64 {
+    std::env::var("FUZZ_ITERATIONS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(300);
+        .unwrap_or(default)
+}
+
+/// Writing to spaces of pools whose metadata is corrupted (opened for
+/// writing or refused) never panics, and the writes never leave the pool
+/// partitions.
+#[test]
+fn writes_on_corrupted_metadata_stay_in_the_pool_partitions() {
+    let pools = fixture_pools();
+    let mut rng = Rng(0x0dd_ba11_5eed_c0de);
+    for iteration in 0..iterations(100) {
+        let (dir, original) = &pools[rng.below(pools.len() as u64) as usize];
+        let disks = mutate(original, &mut rng);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| exercise_writes(disks)));
+        assert!(result.is_ok(), "panic in iteration {iteration} on {}", dir.display());
+    }
+    // And unchanged.
+    for (dir, disks) in &pools {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| exercise_writes(disks.clone())));
+        assert!(result.is_ok(), "panic on {}", dir.display());
+    }
+}
+
+/// A user space that claims a part of an address space as tiers do (found
+/// by fuzzing pool_write: its writes started below the layout) is not
+/// written.
+#[test]
+fn a_user_space_with_a_range_is_not_written() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/simple2c");
+    let disks: Vec<Overlay<SparseImage>> = (0..)
+        .map_while(|i| File::open(dir.join(format!("disk{i}.fixture"))).ok())
+        .map(|f| Overlay::new(SparseImage::read_from(f).unwrap()))
+        .collect();
+    let mut pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+    let id = pool.user_spaces().next().unwrap().id();
+    assert!(pool.open_space_rw(id).is_ok());
+    let space = pool.spaces.get_mut(&id).unwrap();
+    space.info.range = Some((0, 1 << 30));
+    let err = pool.open_space_rw(id).err().unwrap().to_string();
+    assert!(err.contains("layout does not start"), "{err}");
+    // Starting beyond the first slabs, with the extents moved along.
+    let space = pool.spaces.get_mut(&id).unwrap();
+    space.info.range = Some((2 * SLAB_SIZE, 1 << 30));
+    for e in &mut space.extents {
+        e.virtual_slab += 2;
+    }
+    let err = pool.open_space_rw(id).err().unwrap().to_string();
+    assert!(err.contains("layout does not start"), "{err}");
+    assert!(disks.iter().all(|d| d.written_pages().is_empty()));
+}
+
+#[test]
+fn corrupted_metadata_never_panics() {
+    let pools = fixture_pools();
+    let iterations = iterations(300);
     let mut rng = Rng(0x5eed_1234_abcd_ef01);
     for iteration in 0..iterations {
         let (dir, original) = &pools[rng.below(pools.len() as u64) as usize];
-        let mut disks = original.clone();
-        let flips = 1 + rng.below(8);
-        for _ in 0..flips {
-            let disk = &mut disks[rng.below(original.len() as u64) as usize];
-            let ranges = disk.ranges();
-            let (start, len) = ranges[rng.below(ranges.len() as u64) as usize];
-            let at = start + rng.below(len as u64);
-            let mut byte = [0u8];
-            disk.read_exact_at(&mut byte, at).unwrap();
-            let value = match rng.below(3) {
-                0 => byte[0] ^ (1 << rng.below(8)),
-                1 => 0xff,
-                _ => rng.below(256) as u8,
-            };
-            disk.insert(at, &[value]);
-        }
+        let disks = mutate(original, &mut rng);
         let seed = rng.next();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| exercise(disks, &mut Rng(seed | 1))));
         assert!(result.is_ok(), "panic in iteration {iteration} on {}", dir.display());

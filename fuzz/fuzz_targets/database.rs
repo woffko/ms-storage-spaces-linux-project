@@ -9,7 +9,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use storage_spaces::database::Database;
-use storage_spaces::format::{ExtentRecord, Record, RawRecord, assemble_records, read_database};
+use storage_spaces::format::{ExtentRecord, RawRecord, Record, assemble_records, read_database};
 use storage_spaces::io::MemDevice;
 
 const ENTRY: usize = 0x40;
@@ -97,7 +97,11 @@ fn extent_round_trip(data: &[u8]) {
         disk_id: next() % (1 << 16),
         physical_slab: next() % (1 << 32),
         flags: (next() % 256) as u8,
-        stale_marker: if next() & 1 == 0 { 0xffff_ffff } else { next() % (1 << 32) },
+        stale_marker: if next() & 1 == 0 {
+            0xffff_ffff
+        } else {
+            next() % (1 << 32)
+        },
     };
     let raw = RawRecord {
         id: 8,

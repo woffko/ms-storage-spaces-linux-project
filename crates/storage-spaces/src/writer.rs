@@ -851,6 +851,11 @@ pub(crate) fn refusal<D: ReadAt>(pool: &Pool<D>, reader: &SpaceReader<'_, D>) ->
         return Some("writes to tiered spaces are not supported yet".into());
     }
     let layout = reader.layout();
+    // Only tiers (child spaces) cover a part of an address space; a user
+    // space that claims to is not understood.
+    if layout.base != 0 || reader.space.info.range.is_some() {
+        return Some("its layout does not start at the beginning of the space".into());
+    }
     match layout.resiliency {
         Resiliency::Simple => {}
         Resiliency::Mirror if reader.dirty_regions().is_none() => {
