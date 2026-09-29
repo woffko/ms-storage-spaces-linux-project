@@ -77,9 +77,14 @@ member by the test `pool_database_updates_follow_the_model`, which replays
 the scenario `m5db` of `tools/scenarios.sh` on `database::Database`:
 rename, new space, extension, deletion):
 
-* A record's id is the number of its first slot. The pool database has 64
-  formatted slots (4 KiB); a free slot keeps "SDBB" and its own number, the
-  rest is zero.
+* A record's id is the number of its first slot. The pool database starts
+  with 64 formatted slots (4 KiB); a free slot keeps "SDBB" and its own
+  number, the rest is zero. When no run of free slots is long enough for a
+  record, Windows formats another page of 64 slots after the last one
+  (**verified** by the test `the_pool_database_grows_by_a_page_of_slots`
+  on the scenario `m7grow`: 47 allocations took the database from 28 to
+  75 slots in use and 128 formatted, byte for byte as the model predicts;
+  `lrc15` and `mapar_26100` also have 128).
 * An update writes the new version of every changed record, and every new
   record, in order into the first run of free slots long enough for it,
   while the old versions still occupy theirs; only then are the old
@@ -288,10 +293,23 @@ How Windows allocates slabs (**verified** by the tests
 * An extent record covers one allocation unit: 4 slabs with 1 GiB units
   (`m5db`'s second space), 1 slab with 256 MiB units (its extension, the
   thin spaces).
+* One allocation writes nothing but the pool database page of every
+  member and the data: a page-level comparison of the member disks before
+  and after the first allocation of `m5thin` found only the database page
+  (0x1000 into the partition) changed on each disk, and the written block.
 * A new slab is not cleared (**verified** by the test
   `new_slabs_are_not_cleared` on the scenario `m7zero`): deleting a space
   leaves its data on the disks, and a thin row allocated at one of its
   slabs reads that data wherever it has not been written since.
+
+`SpaceWriter` allocates rows of thin spaces with 256 MiB allocation units
+the same way: one database update per row, written to every member in turn
+(each flushed before the next, so a crash leaves each copy whole, old or
+new), before the row's data; simple and mirror rows when a write first
+reaches them, parity rows when the cache destages them. The disk of each
+slab is the one the same column and copy use in the nearest allocated row
+if it has a free slab, else the present disk with the most free slabs; the
+slabs of a row are always on different disks.
 
 ## Data layout (**verified**)
 

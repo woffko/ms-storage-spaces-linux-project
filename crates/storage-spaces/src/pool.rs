@@ -94,7 +94,7 @@ fn decode_records(raw: &[RawRecord]) -> Result<Decoded> {
 
 /// An assembled pool.
 pub struct Pool<D> {
-    devices: Vec<D>,
+    pub(crate) devices: Vec<D>,
     pub guid: Guid,
     pub name: String,
     /// Pool version ("Version 29" in `Get-StoragePool`).
@@ -385,6 +385,35 @@ impl<D: ReadAt> Pool<D> {
         };
         self.devices[device].write_all_at(buf, start + offset)?;
         Ok(true)
+    }
+
+    /// Writes `db` as the pool database of every member that carries a
+    /// copy, one member after the other, each flushed before the next is
+    /// written, so that a crash leaves every copy whole, either old or new
+    /// (Windows reads the copy with the newest sequence).
+    pub(crate) fn write_database(&self, db: &crate::database::Database) -> Result<()>
+    where
+        D: WriteAt,
+    {
+        let mut members: Vec<&Member> = self.members.iter().filter(|m| m.db_sequence.is_some()).collect();
+        members.sort_by_key(|m| m.device);
+        for m in members {
+            let dev = &self.devices[m.device];
+            dev.write_all_at(db.bytes(), m.partition.offset + POOL_DB_OFFSET)?;
+            dev.flush()?;
+        }
+        Ok(())
+    }
+
+    /// The pool database as the model of its updates, read from a member
+    /// that carries the current copy.
+    pub(crate) fn database_model(&self) -> Result<crate::database::Database> {
+        let m = self
+            .members
+            .iter()
+            .find(|m| m.db_sequence == Some(self.database.sequence))
+            .ok_or_else(|| Error::Pool("no member carries the current pool database".into()))?;
+        crate::database::Database::read_formatted(&self.devices[m.device], m.partition.offset + POOL_DB_OFFSET)
     }
 
     /// Makes the writes to every member durable.

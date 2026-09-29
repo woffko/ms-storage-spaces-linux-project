@@ -77,6 +77,9 @@ m5pj3 | -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -SizeMB 2048 -N
 # space filled with the pattern and deleted, then 4 KiB written into an
 # unallocated row of the thin space (whose slab can be one it freed).
 m7zero | -DiskCount 2 -Resiliency Simple -Columns 1 -Provisioning Thin -SizeMB 4096 -AllocationUnitMB 256 -NoPattern | newspace:m7fill:Simple:512:Fixed; write:m7fill:0:524288:x; snap:f0:1100; removespace:m7fill; snap:s0:1100; write:m7zero:1048576:4:a; snap:s1:1100; dismount
+# M7: the pool database past its 64 formatted slots: 48 writes of 4 KiB,
+# 256 MiB apart, all but the first allocating a row of a thin space.
+m7grow | -DiskCount 3 -Resiliency Simple -Columns 1 -Provisioning Thin -SizeMB 16384 -AllocationUnitMB 256 -NoPattern | snap:s0:64; writes:m7grow:48:262144:4:g; snap:s1:64; dismount
 LIST
 exit $status
 }

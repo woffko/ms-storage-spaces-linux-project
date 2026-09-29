@@ -38,14 +38,17 @@
 //! every point either a stripe on disk matches its parity or the cache holds
 //! all of its data: the write hole stays closed.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Mutex, RwLock, RwLockReadGuard};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cache::{CacheWriter, LogWrite};
+use crate::database::Database;
 use crate::drt::DrtWriter;
 use crate::error::{Error, Result};
-use crate::format::{Resiliency, SLAB_SIZE, SpaceRole};
+use crate::format::{
+    DATA_AREA_OFFSET, DiskUsage, ExtentRecord, Policy, Provisioning, Resiliency, SLAB_SIZE, SpaceRole,
+};
 use crate::io::{ReadAt, WriteAt};
 use crate::journal::JournalWriter;
 use crate::layout::{Condition, Layout};
@@ -62,9 +65,26 @@ const DESTAGE_BATCH: u64 = 32 << 20;
 /// Writes to a space, and reads what was written.
 pub struct SpaceWriter<'p, D> {
     reader: SpaceReader<'p, D>,
+    /// The layout of the space with the rows allocated since it was opened
+    /// (the reader knows only those allocated before).
+    layout: RwLock<Layout>,
+    /// Thin spaces: allocates rows as writes first reach them.
+    alloc: Option<Mutex<Allocator>>,
     drt: Option<DrtState>,
     journal: Option<JournalState>,
     cache: Option<CacheState>,
+}
+
+/// Allocates rows of a thin space as Windows does (format document, "Slab
+/// allocation"): one update of the pool database per row, with one extent
+/// record per column and copy at the first free slab of a disk the row
+/// does not use yet, written to every member (each flushed before the
+/// next) before the row is written. New slabs are not cleared.
+struct Allocator {
+    db: Database,
+    policy: Policy,
+    base: u64,
+    extents: Vec<ExtentRecord>,
 }
 
 /// Where the log of a write-back cache or parity journal lives: the layout
@@ -162,8 +182,22 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
                 }),
             });
         }
+        let space = reader.space;
+        let alloc = match (space.info.provisioning, space.info.policy) {
+            (Provisioning::Thin, Some(policy)) if space.info.allocation_unit == SLAB_SIZE => {
+                Some(Mutex::new(Allocator {
+                    db: pool.database_model()?,
+                    policy,
+                    base: space.info.range.map_or(0, |(start, _)| start),
+                    extents: space.extents.clone(),
+                }))
+            }
+            _ => None,
+        };
         let mut writer = SpaceWriter {
+            layout: RwLock::new(reader.layout().clone()),
             reader,
+            alloc,
             drt,
             journal,
             cache,
@@ -195,6 +229,78 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
         Ok((layout, size))
     }
 
+    /// The layout of the space, with the rows allocated since it was opened.
+    fn layout(&self) -> RwLockReadGuard<'_, Layout> {
+        self.layout.read().unwrap()
+    }
+
+    /// Allocates `row` of a thin space if it is not allocated yet (see
+    /// [`Allocator`]).
+    fn allocate(&self, row: u64) -> Result<()> {
+        let Some(alloc) = &self.alloc else {
+            return Err(Error::Unsupported(format!(
+                "write into row {row}, which the space has not allocated (allocation is supported for thin spaces \
+                 with 256 MiB allocation units)"
+            )));
+        };
+        let mut a = alloc.lock().unwrap();
+        if row_allocated(&self.layout(), row) {
+            return Ok(()); // allocated while waiting for the lock
+        }
+        let pool = self.reader.pool();
+        let layout = self.layout().clone();
+        let mut used = BTreeSet::new();
+        let mut records = Vec::new();
+        for column in 0..a.policy.columns {
+            for copy in 0..a.policy.copies.max(1) {
+                let disk_id = pick_disk(pool, &a.db, &layout, column, copy, row, &used)?;
+                used.insert(disk_id);
+                records.push(ExtentRecord {
+                    space_id: self.reader.space.id(),
+                    virtual_slab: a.base / SLAB_SIZE + row * layout.data_columns,
+                    column,
+                    copy,
+                    slab_count: 1,
+                    disk_id,
+                    physical_slab: a.db.first_free_slab(disk_id),
+                    flags: 0,
+                    stale_marker: 0xffff_ffff,
+                });
+            }
+        }
+        let sequence = a.db.sequence() + 1;
+        let bodies: Vec<Vec<u8>> = records.iter().map(|r| r.encode(sequence)).collect();
+        let writes: Vec<(u8, u8, &[u8])> = bodies.iter().map(|b| (4, 6, b.as_slice())).collect();
+        let mut db = a.db.clone();
+        while db.update(&writes, &[]).is_none() {
+            // No run of free slots is long enough: format another page.
+            if a.db.bytes().len() >= 4 << 20 {
+                return Err(Error::Pool("the pool database is full".into()));
+            }
+            a.db.grow();
+            db = a.db.clone();
+        }
+        db.commit(sequence, filetime_now());
+        pool.write_database(&db)?;
+        a.db = db;
+        a.extents.extend(records);
+        *self.layout.write().unwrap() = Layout::with_base(&a.policy, &a.extents, a.base)?;
+        Ok(())
+    }
+
+    /// Allocates the rows of `offset..offset + len` a thin space has not
+    /// allocated yet, in order.
+    fn allocate_range(&self, offset: u64, len: u64) -> Result<()> {
+        let row_bytes = SLAB_SIZE * self.layout().data_columns;
+        let base = self.layout().base;
+        for row in (offset - base) / row_bytes..(offset - base + len).div_ceil(row_bytes) {
+            if !row_allocated(&self.layout(), row) {
+                self.allocate(row)?;
+            }
+        }
+        Ok(())
+    }
+
     /// The reader the writer was opened with: its layout and metadata as
     /// of the open. Its reads miss what the writer holds in the write-back
     /// cache; read through [`SpaceWriter::read_exact_at`].
@@ -211,8 +317,34 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
     pub fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
         match &self.cache {
             Some(cache) => self.read_locked(cache, &cache.log.read().unwrap(), buf, offset),
-            None => self.reader.read_exact_at(buf, offset),
+            None if offset.checked_add(buf.len() as u64).is_none_or(|end| end > self.size()) => {
+                Err(Error::Io(std::io::ErrorKind::UnexpectedEof.into()))
+            }
+            None => self.read_space(buf, offset),
         }
+    }
+
+    /// Reads the space itself (not its cache): through the reader, except
+    /// rows allocated since the space was opened, which the reader does not
+    /// know (read from their first copy).
+    fn read_space(&self, mut buf: &mut [u8], mut offset: u64) -> Result<()> {
+        if self.alloc.is_none() {
+            return self.reader.read_uncached_at(buf, offset);
+        }
+        while !buf.is_empty() {
+            let layout = self.layout();
+            let loc = layout.locate(offset);
+            let n = buf.len().min(loc.contiguous as usize);
+            if row_allocated(&layout, loc.row) && !row_allocated(self.reader.layout(), loc.row) {
+                read_first_copy(self.reader.pool(), &layout, offset, &mut buf[..n])?;
+            } else {
+                drop(layout);
+                self.reader.read_uncached_at(&mut buf[..n], offset)?;
+            }
+            offset += n as u64;
+            buf = &mut buf[n..];
+        }
+        Ok(())
     }
 
     fn read_locked(&self, cache: &CacheState, log: &CacheLog, mut buf: &mut [u8], mut offset: u64) -> Result<()> {
@@ -224,7 +356,7 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
             let n = buf.len().min(len as usize);
             match hit {
                 Some(at) => self.read_cache(cache, at, &mut buf[..n])?,
-                None => self.reader.read_uncached_at(&mut buf[..n], offset)?,
+                None => self.read_space(&mut buf[..n], offset)?,
             }
             offset += n as u64;
             buf = &mut buf[n..];
@@ -233,35 +365,12 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
     }
 
     /// Reads from the cache space (its first copy at hand).
-    fn read_cache(&self, cache: &CacheState, mut offset: u64, mut buf: &mut [u8]) -> Result<()> {
-        let pool = self.reader.pool();
-        let layout = &cache.area.layout;
-        while !buf.is_empty() {
-            let loc = layout.locate(offset);
-            let n = buf.len().min(loc.contiguous as usize);
-            let mut read = false;
-            for copy in 0..layout.copies {
-                if let Some((disk, slab)) = layout.physical(loc.column, copy, loc.row)
-                    && pool.read_slab(disk, slab, loc.offset_in_slab, &mut buf[..n])?
-                {
-                    read = true;
-                    break;
-                }
-            }
-            if !read {
-                return Err(Error::Pool(format!(
-                    "the write-back cache at {offset:#x} is not readable"
-                )));
-            }
-            offset += n as u64;
-            buf = &mut buf[n..];
-        }
-        Ok(())
+    fn read_cache(&self, cache: &CacheState, offset: u64, buf: &mut [u8]) -> Result<()> {
+        read_first_copy(self.reader.pool(), &cache.area.layout, offset, buf)
     }
 
-    /// Writes all of `buf` at `offset` of the space. A write into a row a
-    /// thin space has not allocated is refused (allocation is not
-    /// supported yet).
+    /// Writes all of `buf` at `offset` of the space. A thin space allocates
+    /// the rows the write reaches first ([`Allocator`]).
     pub fn write_all_at(&self, buf: &[u8], offset: u64) -> Result<()> {
         let size = self.size();
         if offset.checked_add(buf.len() as u64).is_none_or(|end| end > size) {
@@ -281,15 +390,19 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
 
     /// Writes to a simple or mirror space itself.
     fn write_direct(&self, mut buf: &[u8], mut offset: u64) -> Result<()> {
-        let layout = self.reader.layout();
         let pool = self.reader.pool();
         while !buf.is_empty() {
+            let row = self.layout().locate(offset).row;
+            if !row_allocated(&self.layout(), row) {
+                self.allocate(row)?;
+            }
+            let layout = self.layout();
             let loc = layout.locate(offset);
             let n = buf.len().min(loc.contiguous as usize);
             if let Some(drt) = &self.drt {
                 self.mark_dirty(drt, layout.run_start_offset(loc.row) / SLAB_SIZE)?;
             }
-            write_copies(pool, layout, offset, &buf[..n])?;
+            write_copies(pool, &layout, offset, &buf[..n])?;
             buf = &buf[n..];
             offset += n as u64;
         }
@@ -305,7 +418,7 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
         buf: &[u8],
         offset: u64,
     ) -> Result<()> {
-        let layout = self.reader.layout();
+        let layout = self.layout();
         let stripe = layout.data_columns * layout.interleave;
         let end = offset + buf.len() as u64;
         // The parts that go to the space directly (true) or to the cache,
@@ -316,18 +429,15 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
             let start = at - at % stripe;
             let next = (start + stripe).min(end);
             let loc = layout.locate(layout.base + start);
-            let run_stripes = self.run_rows(loc.row)? * (SLAB_SIZE / layout.interleave);
-            if !row_allocated(layout, loc.row) {
-                return Err(Error::Unsupported(format!(
-                    "write at {at:#x} into a row the thin space has not allocated (allocation is not supported yet)"
-                )));
-            }
-            let direct = at == start
+            // Rows not allocated yet go to the cache, allocated when it
+            // destages (as Windows does, m5thinwbc).
+            let direct = row_allocated(&layout, loc.row)
+                && at == start
                 && next == start + stripe
                 && log.writer.chunk_runs(start).is_none()
                 && !journal.writer.lock().unwrap().is_consistent(
                     layout.run_start_offset(loc.row),
-                    run_stripes,
+                    run_rows(&layout, loc.row)? * (SLAB_SIZE / layout.interleave),
                     layout.stripe_of(&loc),
                 );
             match parts.last_mut() {
@@ -336,6 +446,7 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
             }
             at = next;
         }
+        drop(layout);
         for (direct, start, end) in parts {
             let part = &buf[(start - offset) as usize..(end - offset) as usize];
             if direct {
@@ -422,7 +533,7 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
                     if valid {
                         self.read_cache(cache, base + at, part)?;
                     } else {
-                        self.reader.read_uncached_at(part, offset + at)?;
+                        self.read_space(part, offset + at)?;
                         if self.journal.is_some() {
                             write_copies(pool, &cache.area.layout, base + at, part)?;
                         }
@@ -443,6 +554,10 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
                         pool.flush_members()?;
                         self.write_log(&cache.area, &records)?;
                         pool.flush_members()?;
+                    }
+                    // Rows of a thin space are allocated as they are destaged.
+                    for &(offset, _) in &parts {
+                        self.allocate_range(offset, chunk)?;
                     }
                     self.write_stripes(journal, &parts)?;
                 }
@@ -498,7 +613,7 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
     /// recorded as not consistent first; afterwards all are recorded as
     /// consistent.
     fn write_stripes(&self, journal: &JournalState, parts: &[(u64, &[u8])]) -> Result<()> {
-        let layout = self.reader.layout();
+        let layout = self.layout();
         let pool = self.reader.pool();
         let unit = layout.interleave;
         let stripe_bytes = layout.data_columns * unit;
@@ -512,7 +627,7 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
                 let start = offset + i as u64 * stripe_bytes;
                 let loc = layout.locate(layout.base + start);
                 let run_start = layout.run_start_offset(loc.row);
-                let run_stripes = self.run_rows(loc.row)? * per_row;
+                let run_stripes = run_rows(&layout, loc.row)? * per_row;
                 stripes.push((start, data, loc, run_start, run_stripes, layout.stripe_of(&loc)));
             }
         }
@@ -540,9 +655,15 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
             for (k, d) in data.chunks(unit as usize).enumerate() {
                 let column = layout.locate(layout.base + start + k as u64 * unit).column;
                 parity.iter_mut().zip(d).for_each(|(p, d)| *p ^= d);
-                self.write_unit(column, loc.row, loc.offset_in_slab, d)?;
+                self.write_unit(&layout, column, loc.row, loc.offset_in_slab, d)?;
             }
-            self.write_unit(layout.parity_column(stripe), loc.row, loc.offset_in_slab, &parity)?;
+            self.write_unit(
+                &layout,
+                layout.parity_column(stripe),
+                loc.row,
+                loc.offset_in_slab,
+                &parity,
+            )?;
         }
         pool.flush_members()?;
         for (run_start, (run_stripes, list)) in by_run {
@@ -552,25 +673,10 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
         Ok(())
     }
 
-    /// Rows of the extent run holding `row`.
-    fn run_rows(&self, row: u64) -> Result<u64> {
-        let layout = self.reader.layout();
-        layout
-            .runs()
-            .get(&(0, 0))
-            .and_then(|runs| runs.iter().find(|r| r.first_row <= row && row < r.first_row + r.rows))
-            .map(|r| r.rows)
-            .ok_or_else(|| {
-                Error::Unsupported(format!(
-                    "write into row {row}, which the thin space has not allocated (allocation is not supported yet)"
-                ))
-            })
-    }
-
-    fn write_unit(&self, column: u64, row: u64, offset_in_slab: u64, buf: &[u8]) -> Result<()> {
-        let (disk, slab) = self.reader.layout().physical(column, 0, row).ok_or_else(|| {
-            Error::Unsupported("a stripe with an unallocated column (thin allocation is not supported yet)".into())
-        })?;
+    fn write_unit(&self, layout: &Layout, column: u64, row: u64, offset_in_slab: u64, buf: &[u8]) -> Result<()> {
+        let (disk, slab) = layout
+            .physical(column, 0, row)
+            .ok_or_else(|| Error::Pool(format!("row {row} of column {column} is not allocated")))?;
         if !self.reader.pool().write_slab(disk, slab, offset_in_slab, buf)? {
             return Err(Error::Pool(format!("disk {disk} of the space is not present")));
         }
@@ -662,10 +768,12 @@ pub(crate) fn refusal<D: ReadAt>(pool: &Pool<D>, reader: &SpaceReader<'_, D>) ->
                 index.conflicting_chunks()
             ));
         }
+        let allocates =
+            reader.space.info.provisioning == Provisioning::Thin && reader.space.info.allocation_unit == SLAB_SIZE;
         if let Some((offset, _, _)) = index
             .mappings()
             .into_iter()
-            .find(|m| !row_allocated(layout, layout.locate(layout.base + m.0).row))
+            .find(|m| !allocates && !row_allocated(layout, layout.locate(layout.base + m.0).row))
         {
             return Some(format!(
                 "its write-back cache holds data at {offset:#x}, in a row the thin space has not allocated \
@@ -677,6 +785,91 @@ pub(crate) fn refusal<D: ReadAt>(pool: &Pool<D>, reader: &SpaceReader<'_, D>) ->
         }
     }
     None
+}
+
+/// The disk for the slab of `column` and `copy` of a new `row`: the one
+/// that column and copy use in the nearest allocated row if it has a free
+/// slab (Windows' choice does not follow from the metadata), else the
+/// present disk with the most free slabs, never one of `used` (the row's
+/// other slabs).
+fn pick_disk<D: ReadAt>(
+    pool: &Pool<D>,
+    db: &Database,
+    layout: &Layout,
+    column: u64,
+    copy: u64,
+    row: u64,
+    used: &BTreeSet<u64>,
+) -> Result<u64> {
+    let free = |disk_id: u64| -> u64 {
+        let Some(m) = pool
+            .disks
+            .get(&disk_id)
+            .and_then(|d| d.member)
+            .map(|m| &pool.members[m])
+        else {
+            return 0;
+        };
+        let capacity = m.partition.length.saturating_sub(DATA_AREA_OFFSET) / SLAB_SIZE;
+        capacity.saturating_sub(db.first_free_slab(disk_id))
+    };
+    let preferred = layout
+        .runs()
+        .get(&(column, copy))
+        .and_then(|runs| runs.iter().min_by_key(|r| r.first_row.abs_diff(row)))
+        .map(|r| r.disk_id);
+    let mut candidates: Vec<(bool, u64, u64)> = pool
+        .disks
+        .values()
+        .filter(|d| d.member.is_some() && matches!(d.usage, DiskUsage::AutoSelect | DiskUsage::ManualSelect))
+        .map(|d| (Some(d.id) != preferred, u64::MAX - free(d.id), d.id))
+        .collect();
+    candidates.sort();
+    candidates
+        .into_iter()
+        .map(|c| c.2)
+        .find(|&d| !used.contains(&d) && free(d) > 0)
+        .ok_or_else(|| Error::Pool(format!("no disk has a free slab for row {row} (the pool is full)")))
+}
+
+/// The current time as a FILETIME (100 ns since 1601), as the pool database
+/// stores it.
+fn filetime_now() -> u64 {
+    let since_1970 = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    (since_1970.as_nanos() / 100) as u64 + 11_644_473_600 * 10_000_000
+}
+
+/// Rows of the extent run holding `row`.
+fn run_rows(layout: &Layout, row: u64) -> Result<u64> {
+    layout
+        .runs()
+        .get(&(0, 0))
+        .and_then(|runs| runs.iter().find(|r| r.first_row <= row && row < r.first_row + r.rows))
+        .map(|r| r.rows)
+        .ok_or_else(|| Error::Pool(format!("row {row} is not allocated")))
+}
+
+/// Reads `buf` at `offset` of a space from the first copy at hand.
+fn read_first_copy<D: ReadAt>(pool: &Pool<D>, layout: &Layout, mut offset: u64, mut buf: &mut [u8]) -> Result<()> {
+    while !buf.is_empty() {
+        let loc = layout.locate(offset);
+        let n = buf.len().min(loc.contiguous as usize);
+        let mut read = false;
+        for copy in 0..layout.copies {
+            if let Some((disk, slab)) = layout.physical(loc.column, copy, loc.row)
+                && pool.read_slab(disk, slab, loc.offset_in_slab, &mut buf[..n])?
+            {
+                read = true;
+                break;
+            }
+        }
+        if !read {
+            return Err(Error::Pool(format!("offset {offset:#x} is not readable")));
+        }
+        offset += n as u64;
+        buf = &mut buf[n..];
+    }
+    Ok(())
 }
 
 /// Whether every column of `row` is allocated.
@@ -714,9 +907,11 @@ mod tests {
     use std::fs::File;
     use std::path::Path;
 
+    use crate::format::SLAB_SIZE;
     use crate::io::{Overlay, SparseImage};
     use crate::pool::Pool;
     use crate::testpattern::{BLOCK, fill_block};
+    use std::collections::BTreeSet;
 
     fn fixture(name: &str) -> Pool<Overlay<SparseImage>> {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
@@ -1263,6 +1458,203 @@ mod tests {
             check(k);
         }
         assert!(check(events.len()).is_some(), "no checkpoint in the final state");
+    }
+
+    fn scenario(name: &str, label: &str) -> Vec<SparseImage> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/scenarios")
+            .join(name)
+            .join(label);
+        (0..)
+            .map_while(|i| File::open(dir.join(format!("disk{i}.fixture"))).ok())
+            .map(|f| SparseImage::read_from(f).unwrap())
+            .collect()
+    }
+
+    /// The pool database of every member, as the model reads it.
+    fn member_databases<D: crate::io::ReadAt>(pool: &Pool<D>) -> Vec<crate::database::Database> {
+        pool.members
+            .iter()
+            .filter(|m| m.db_sequence.is_some())
+            .map(|m| {
+                crate::database::Database::read_formatted(
+                    &pool.devices[m.device],
+                    m.partition.offset + crate::format::POOL_DB_OFFSET,
+                )
+                .unwrap()
+            })
+            .collect()
+    }
+
+    /// A write into a row a thin simple space has not allocated (m5thin
+    /// s0, 4 KiB at 2 GiB) allocates it first: one update of every
+    /// member's pool database, byte for byte the model of Windows' updates
+    /// (one extent at the first free slab of the disk chosen), then the
+    /// data; the pool reads it back.
+    #[test]
+    fn thin_rows_are_allocated_on_their_first_write() {
+        let images = scenario("m5thin", "s0");
+        let disks: Vec<Overlay<&SparseImage>> = images.iter().map(Overlay::new).collect();
+        let pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+        let id = pool.find_space("m5thin").unwrap().id();
+        let before = pool.database_model().unwrap();
+        let w = pool.open_space_rw(id).unwrap();
+        let data = pattern(2 << 30, BLOCK as u64, "a");
+        w.write_all_at(&data, 2 << 30).unwrap();
+        let mut back = vec![0u8; BLOCK];
+        w.read_exact_at(&mut back, 2 << 30).unwrap();
+        assert!(back == data);
+        w.flush().unwrap();
+        drop(w);
+        drop(pool);
+
+        let pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+        assert!(pool.warnings.is_empty(), "{:?}", pool.warnings);
+        assert_eq!(pool.database.sequence, before.sequence() + 1);
+        let r = pool.open_space(id).unwrap();
+        r.read_exact_at(&mut back, 2 << 30).unwrap();
+        assert!(back == data);
+        let (disk, slab) = r.layout().physical(0, 0, 8).unwrap();
+        assert_eq!(slab, before.first_free_slab(disk));
+        let mut model = before.clone();
+        let record = crate::format::ExtentRecord {
+            space_id: id,
+            virtual_slab: 8,
+            column: 0,
+            copy: 0,
+            slab_count: 1,
+            disk_id: disk,
+            physical_slab: slab,
+            flags: 0,
+            stale_marker: 0xffff_ffff,
+        }
+        .encode(before.sequence() + 1);
+        model.update(&[(4, 6, &record)], &[]).unwrap();
+        model.commit(before.sequence() + 1, pool.database.timestamp);
+        for db in member_databases(&pool) {
+            assert!(db.bytes() == model.bytes());
+        }
+    }
+
+    /// A thin two-way mirror (m5thinm s0) allocates both copies of a new
+    /// row on different disks, lists the run in the dirty region log
+    /// before writing it, and writes both copies.
+    #[test]
+    fn thin_mirror_rows_get_both_copies() {
+        let images = scenario("m5thinm", "s0");
+        let disks: Vec<Overlay<&SparseImage>> = images.iter().map(Overlay::new).collect();
+        let pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+        let id = pool.find_space("m5thinm").unwrap().id();
+        let w = pool.open_space_rw(id).unwrap();
+        let data = pattern(2 << 30, BLOCK as u64, "m");
+        w.write_all_at(&data, 2 << 30).unwrap();
+        w.flush().unwrap();
+        drop(w);
+        drop(pool);
+        let pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+        let r = pool.open_space(id).unwrap();
+        let layout = r.layout();
+        let copies: Vec<(u64, u64)> = (0..2).map(|c| layout.physical(0, c, 8).unwrap()).collect();
+        assert_ne!(copies[0].0, copies[1].0);
+        for (disk, slab) in copies {
+            let mut b = vec![0u8; BLOCK];
+            pool.read_slab(disk, slab, 0, &mut b).unwrap();
+            assert!(b == data);
+        }
+        assert!(r.dirty_regions().unwrap().is_dirty(8));
+    }
+
+    /// A thin parity space with a cache (m5thinwbc s0): a write into an
+    /// unallocated row stays in the cache without allocating, as Windows
+    /// does; destaging allocates the row (one extent per column) and writes
+    /// the stripe with its parity.
+    #[test]
+    fn thin_parity_rows_are_allocated_when_destaged() {
+        let images = scenario("m5thinwbc", "s0");
+        let disks: Vec<Overlay<&SparseImage>> = images.iter().map(Overlay::new).collect();
+        let pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+        let id = pool.find_space("m5thinwbc").unwrap().id();
+        let sequence = pool.database.sequence;
+        let w = pool.open_space_rw(id).unwrap();
+        let data = pattern(2 << 30, BLOCK as u64, "p");
+        w.write_all_at(&data, 2 << 30).unwrap();
+        w.flush().unwrap();
+        assert_eq!(
+            member_databases(&pool)[0].sequence(),
+            sequence,
+            "the cached write allocated"
+        );
+        w.destage().unwrap();
+        drop(w);
+        drop(pool);
+        let pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+        assert_eq!(pool.database.sequence, sequence + 1);
+        let r = pool.open_space(id).unwrap();
+        assert_eq!(r.cache().unwrap().cached_chunks(), 0);
+        let layout = r.layout().clone();
+        let row = (2u64 << 30) / (SLAB_SIZE * layout.data_columns);
+        let disks: BTreeSet<u64> = (0..layout.columns)
+            .map(|c| layout.physical(c, 0, row).unwrap().0)
+            .collect();
+        assert_eq!(disks.len(), 3);
+        let mut back = vec![0u8; BLOCK];
+        r.read_uncached_at(&mut back, 2 << 30).unwrap();
+        assert!(back == data);
+        assert!(stripe_matches(&pool, &layout, 2 << 30));
+        assert!(!r.journal().unwrap().is_dirty(2 << 30, 0));
+    }
+
+    /// Every crash state of a write that allocates a thin row: the database
+    /// copies are written one member after the other, each whole, so every
+    /// state opens (at most with a stale copy) and reads zeros or the data,
+    /// and the data once flushed.
+    #[test]
+    fn a_crash_while_allocating_leaves_a_readable_pool() {
+        use crate::io::{DeviceEvent, Recorder, WriteAt};
+        use std::sync::{Arc, Mutex};
+        let images = scenario("m5thin", "s0");
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let disks: Vec<Recorder<Overlay<&SparseImage>>> = images
+            .iter()
+            .enumerate()
+            .map(|(i, img)| Recorder::new(Overlay::new(img), i, log.clone()))
+            .collect();
+        let pool = Pool::open(disks).unwrap();
+        let id = pool.find_space("m5thin").unwrap().id();
+        let w = pool.open_space_rw(id).unwrap();
+        let data = pattern(3 << 30, BLOCK as u64, "c");
+        w.write_all_at(&data, 3 << 30).unwrap();
+        w.flush().unwrap();
+        drop(w);
+        drop(pool);
+        let events = log.lock().unwrap().clone();
+        let database_writes = events
+            .iter()
+            .filter(|e| matches!(e, DeviceEvent::Write { data, .. } if data.starts_with(b"SDBC")))
+            .count();
+        assert_eq!(database_writes, 3);
+        for k in 0..=events.len() {
+            let replay: Vec<Overlay<&SparseImage>> = images.iter().map(Overlay::new).collect();
+            for e in &events[..k] {
+                if let DeviceEvent::Write { device, offset, data } = e {
+                    replay[*device].write_all_at(data, *offset).unwrap();
+                }
+            }
+            let pool = Pool::open(replay.iter().collect::<Vec<_>>()).unwrap();
+            assert!(
+                pool.warnings.iter().all(|w| w.contains("stale pool database")),
+                "state {k}: {:?}",
+                pool.warnings
+            );
+            let r = pool.open_space(id).unwrap();
+            let mut back = vec![0u8; BLOCK];
+            r.read_exact_at(&mut back, 3 << 30).unwrap();
+            if k == events.len() {
+                assert!(back == data);
+            } else {
+                assert!(back == data || back.iter().all(|&b| b == 0), "state {k}");
+            }
+        }
     }
 
     #[test]

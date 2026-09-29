@@ -16,6 +16,10 @@ use crate::io::{ReadAt, read_vec};
 
 /// The eight header slots of 0x40 bytes.
 const HEADER_LEN: usize = 0x200;
+/// Slots are formatted a page at a time.
+const PAGE: usize = 0x1000;
+/// Pages a database is read up to (4 MiB).
+const MAX_PAGES: usize = 1024;
 const HEADER_SLOTS: usize = 8;
 /// Record header in the first fragment: type, version, two zero bytes and
 /// the body length (u32 BE).
@@ -43,6 +47,47 @@ impl Database {
         }
         let bytes = read_vec(dev, offset, entry_size * slots)?;
         Ok(Database { bytes, entry_size })
+    }
+
+    /// Reads the database whose header is at `offset` with all its
+    /// formatted slots: pages of 4 KiB whose slots carry "SDBB" and their
+    /// own number (the pool database starts with one page and grows by
+    /// pages, see [`Database::grow`]).
+    pub fn read_formatted<D: ReadAt + ?Sized>(dev: &D, offset: u64) -> Result<Self> {
+        let head = read_vec(dev, offset, HEADER_LEN)?;
+        if &head[..8] != SDBC_SIGNATURE {
+            return Err(format_err!("missing SDBC signature at {offset:#x}"));
+        }
+        let entry_size = u32::from_be_bytes(head[0x24..0x28].try_into().unwrap()) as usize;
+        if !(FRAGMENT_HEAD + RECORD_HEAD..=PAGE).contains(&entry_size) || !PAGE.is_multiple_of(entry_size) {
+            return Err(format_err!("implausible database geometry"));
+        }
+        let per_page = PAGE / entry_size;
+        let mut pages = 1;
+        while pages < MAX_PAGES {
+            let page = read_vec(dev, offset + (pages * PAGE) as u64, PAGE)?;
+            let formatted = page.chunks_exact(entry_size).enumerate().all(|(k, e)| {
+                &e[..4] == SDBB_SIGNATURE
+                    && u32::from_be_bytes(e[4..8].try_into().unwrap()) as usize == pages * per_page + k
+            });
+            if !formatted {
+                break;
+            }
+            pages += 1;
+        }
+        Self::read(dev, offset, pages * per_page)
+    }
+
+    /// Formats one more page of free slots at the end (when no run of
+    /// free slots is long enough for a record).
+    pub fn grow(&mut self) {
+        let first = self.slots();
+        self.bytes.resize(self.bytes.len() + PAGE, 0);
+        for i in first..self.slots() {
+            let e = self.slot_mut(i);
+            e[..4].copy_from_slice(SDBB_SIGNATURE);
+            e[4..8].copy_from_slice(&(i as u32).to_be_bytes());
+        }
     }
 
     pub fn bytes(&self) -> &[u8] {

@@ -399,6 +399,21 @@ rows of thin spaces not allocated yet (M7).
   mirror and parity (ublk) copies, and again read-only; mirrors are
   refused by dm read-write and dual parity by `--rw`, with the reason.
 
+### M7 (in progress, 2026-09-29)
+
+* Windows does not clear new slabs (`m7zero`), writes nothing but every
+  member's pool database page and the data for an allocation (`m5thin`,
+  page-level comparison), and grows the pool database by pages of 64
+  formatted slots (`m7grow`, reproduced byte for byte).
+* `SpaceWriter` allocates rows of thin spaces with 256 MiB allocation
+  units: simple and mirror rows on their first write, parity rows when the
+  cache destages them; one database update per row, every member written
+  and flushed in turn before the data. Unit tests: the update equals the
+  verified model byte for byte, mirror copies land on different disks and
+  the run is listed in the dirty region log, parity rows are allocated at
+  destage only, and every crash state of an allocating write opens and
+  reads the old or the new data.
+
 ## Test infrastructure (continuous, feeds every stage)
 
 T1. **Windows 11 only.** All pools are created by Windows 11 test VMs: the

@@ -1,0 +1,54 @@
+﻿{
+    "pool":  {
+                 "health":  "Healthy",
+                 "operational":  "OK",
+                 "read_only":  false
+             },
+    "spaces":  [
+                   {
+                       "name":  "m7grow",
+                       "health":  "Healthy",
+                       "operational":  "OK",
+                       "size":  17179869184,
+                       "footprint":  268435456,
+                       "manual_attach":  false,
+                       "extents":  [
+                                       {
+                                           "column":  0,
+                                           "copy":  0,
+                                           "size":  268435456,
+                                           "virtual_offset":  0,
+                                           "physical_offset":  268435456,
+                                           "disk_unique_id":  "60022480C872BD8A6E699AE33CD62C23",
+                                           "status":  "Active"
+                                       }
+                                   ]
+                   }
+               ],
+    "disks":  [
+                  {
+                      "unique_id":  "60022480C872BD8A6E699AE33CD62C23",
+                      "health":  "Healthy",
+                      "operational":  "OK",
+                      "usage":  "Auto-Select",
+                      "allocated":  1091567616,
+                      "size":  8589934592
+                  },
+                  {
+                      "unique_id":  "60022480BF5514E63B8CB22F1A796CD3",
+                      "health":  "Healthy",
+                      "operational":  "OK",
+                      "usage":  "Auto-Select",
+                      "allocated":  823132160,
+                      "size":  8589934592
+                  },
+                  {
+                      "unique_id":  "60022480D7A13E7246A09300F398123F",
+                      "health":  "Healthy",
+                      "operational":  "OK",
+                      "usage":  "Auto-Select",
+                      "allocated":  823132160,
+                      "size":  8589934592
+                  }
+              ]
+}

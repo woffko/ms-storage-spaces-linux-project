@@ -12,8 +12,7 @@ Writing, for spaces whose state is fully understood.
   chkdsk clean, every file intact in the round trips of the test suite).
   Refused, with the reason: pools that are not clean (missing disks, stale
   copies, diverging metadata), degraded spaces, dual parity, storage tiers,
-  rows a thin space has not allocated yet, write-back caches whose copies
-  disagree.
+  write-back caches whose copies disagree.
 * Mirror spaces: the dirty region log lists an extent run, durably, before
   its first write.
 * Single parity spaces: writes go through the write-back cache as Windows'
@@ -21,6 +20,10 @@ Writing, for spaces whose state is fully understood.
   the space directly); destaging rewrites whole stripes under the journal,
   so a stripe always matches its parity or is held whole by the cache: the
   write hole stays closed.
+* Thin spaces (256 MiB allocation units) allocate rows as Windows does:
+  one pool database update per row, on every member before the data;
+  parity rows when the cache destages them. The pool database grows by
+  pages of 64 slots when full.
 * The cache and journal logs wrap behind checkpoints as Windows expects;
   a cache holding data when a space is opened for writing is destaged first.
 * Writes are durable after a flush (sync, FUA) or a clean detach; the

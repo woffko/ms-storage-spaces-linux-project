@@ -183,7 +183,7 @@ fn databases(scenario: &str, label: &str) -> Vec<Database> {
         .map(|m| {
             let f = File::open(dir.join(format!("disk{}.fixture", m.device))).unwrap();
             let disk = SparseImage::read_from(f).unwrap();
-            Database::read(&disk, m.partition.offset + POOL_DB_OFFSET, 64).unwrap()
+            Database::read_formatted(&disk, m.partition.offset + POOL_DB_OFFSET).unwrap()
         })
         .collect()
 }
@@ -323,7 +323,14 @@ fn replay_allocations_of(scenario: &str, space_id: u64, steps: &[Allocations], p
                 })
                 .collect();
             let writes: Vec<(u8, u8, &[u8])> = bodies.iter().map(|b| (4, 6, b.as_slice())).collect();
-            db.update(&writes, &[]).unwrap();
+            // Without a run of free slots long enough, another page of
+            // slots is formatted (m7grow).
+            let mut next = db.clone();
+            while next.update(&writes, &[]).is_none() {
+                db.grow();
+                next = db.clone();
+            }
+            db = next;
         }
         if !allocations.is_empty() {
             let windows = databases(scenario, label);
@@ -769,4 +776,30 @@ fn new_slabs_are_not_cleared() {
     fill_block(&mut expected[..BLOCK], 1 << 30, "a");
     fill_block(&mut expected[BLOCK..], BLOCK as u64, "x");
     assert!(after == expected, "the written block, then the deleted space's data");
+}
+
+/// m7grow: a thin simple space on three disks, 48 writes of 4 KiB 256 MiB
+/// apart; all but the first (whose row the space was created with) allocate
+/// a row, one update each. The pool database starts with one page of 64
+/// formatted slots; once no run of free slots is left, Windows formats
+/// another page (128 slots in s1). Replaying the allocations on the disks
+/// Windows picked reproduces every member's database byte for byte.
+#[test]
+fn the_pool_database_grows_by_a_page_of_slots() {
+    let before = databases("m7grow", "s0");
+    assert_eq!(before[0].bytes().len(), 64 * 0x40);
+    let pool = state("m7grow", "s1");
+    let space = pool.find_space("m7grow").unwrap();
+    let mut rows: Vec<(u64, u64)> = space
+        .extents
+        .iter()
+        .filter(|e| e.virtual_slab > 0)
+        .map(|e| (e.virtual_slab, e.disk_id))
+        .collect();
+    rows.sort();
+    assert_eq!(rows.len(), 47);
+    let disks: Vec<[u64; 1]> = rows.iter().map(|&(_, d)| [d]).collect();
+    let allocations: Vec<(u64, &[u64])> = rows.iter().zip(&disks).map(|(&(slab, _), d)| (slab, &d[..])).collect();
+    replay_allocations("m7grow", space.id(), &[("s1", &allocations)]);
+    assert_eq!(databases("m7grow", "s1")[0].bytes().len(), 128 * 0x40);
 }

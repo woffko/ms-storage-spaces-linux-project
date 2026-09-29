@@ -24,8 +24,8 @@ disks are never written, unless a space is attached read-write
 | Member disks with 512-byte, 512e and 4Kn sectors | read |
 | Pools after a disk was retired, replaced or removed | read |
 | Pools created by Windows 8/10/Server | not supported |
-| Writing: simple, mirror, single parity (fixed or allocated rows) | `attach --rw` |
-| Writing: dual parity, tiers, new rows of thin spaces, degraded pools | not supported (refused) |
+| Writing: simple, mirror, single parity, fixed and thin (256 MiB allocation units) | `attach --rw` |
+| Writing: dual parity, tiers, degraded pools | not supported (refused) |
 | Pool management (creating pools and spaces, adding disks) | not supported |
 
 ## Installing
@@ -101,9 +101,19 @@ that Windows reads the result back. `attach --rw` refuses, with the reason:
   parity;
 * write-back caches whose mirrored copies disagree after a crash.
 
-Writes into rows a thin space has not allocated yet fail with an I/O error
-(allocating them is not supported yet); fixed spaces and the allocated part
-of thin spaces are written in place.
+Thin spaces allocate a row (256 MiB per column and copy) when a write first
+reaches it, as Windows does: the pool database on every member records the
+new slabs before the data is written. A slab is not cleared when it is
+allocated (Windows does not clear it either), so the parts of a new row not
+written yet read whatever the disk held there. Thin spaces with other
+allocation units can be written only where they are allocated; writes
+elsewhere fail with an I/O error. When the pool has no free slab left, so do
+writes into rows not allocated yet. In a new row of a thin parity space, the
+stripes not written yet hold whatever the disks held and their parity does
+not match it; the parity journal lists them as not consistent, as it does
+for rows Windows allocates, so `spaces` refuses to read them (I/O error)
+unless `--unclean-parity data` is given. File systems do not read what they
+have not written, but a copy of the whole device does.
 
 How the space types are written:
 
