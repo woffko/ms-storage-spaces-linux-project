@@ -9,8 +9,9 @@ use crate::format::{
 };
 use crate::gpt::{PartitionLocation, find_spaces_partition};
 use crate::guid::Guid;
-use crate::io::{ReadAt, read_vec};
+use crate::io::{ReadAt, WriteAt, read_vec};
 use crate::reader::{OpenOptions, SpaceReader};
+use crate::writer::SpaceWriter;
 
 /// A device that belongs to the pool.
 #[derive(Debug, Clone)]
@@ -350,6 +351,38 @@ impl<D: ReadAt> Pool<D> {
             ));
         };
         Ok(Some((member.device, member.partition.offset + pos)))
+    }
+
+    /// Opens a space for writing; see [`SpaceWriter`] for what it accepts.
+    pub fn open_space_rw(&self, id: u64) -> Result<SpaceWriter<'_, D>>
+    where
+        D: WriteAt,
+    {
+        SpaceWriter::new(self, id)
+    }
+
+    /// Writes into a physical slab. Returns `false` if the disk is not present.
+    pub(crate) fn write_slab(&self, disk_id: u64, slab: u64, offset: u64, buf: &[u8]) -> Result<bool>
+    where
+        D: WriteAt,
+    {
+        debug_assert!(offset + buf.len() as u64 <= SLAB_SIZE);
+        let Some((device, start)) = self.slab_location(disk_id, slab)? else {
+            return Ok(false);
+        };
+        self.devices[device].write_all_at(buf, start + offset)?;
+        Ok(true)
+    }
+
+    /// Makes the writes to every member durable.
+    pub(crate) fn flush_members(&self) -> Result<()>
+    where
+        D: WriteAt,
+    {
+        for m in &self.members {
+            self.devices[m.device].flush()?;
+        }
+        Ok(())
     }
 
     /// Reads from a physical slab. Returns `false` if the disk is not present.

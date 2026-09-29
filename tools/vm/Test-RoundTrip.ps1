@@ -12,6 +12,8 @@ The script attaches the disks and writes roundtrip.json there:
   extents    Get-PhysicalExtent of every space
   checks     the verification pattern of every pattern space, chkdsk and
              the file hashes of an NTFS space
+With -Written "OFFKB:LENKB:TAG;..." the main space must hold the pattern
+with TAG in those ranges (written from Linux) and its own tag elsewhere.
 With -ProbeStrideKB N it also reads the 4 KiB block at every N KiB of the
 main space three times (4 MiB sequential reads, 4 KiB reads, 4 MiB again)
 and counts the tags found there ("probe"): after mirror copies were made
@@ -25,7 +27,8 @@ param(
     [string] $Root = 'C:\sstest\roundtrip',
     [switch] $NoRepair,
     [int] $WaitSeconds = 0,
-    [int] $ProbeStrideKB = 0
+    [int] $ProbeStrideKB = 0,
+    [string] $Written = ''
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -54,6 +57,10 @@ public static class SsVerify {
     // Offset of the first 4 KiB block in [0, size) that does not hold the
     // pattern, or -1.
     public static long Verify(string device, long size, string tag) {
+        return VerifyRanges(device, size, tag, new long[0], new long[0], new string[0]);
+    }
+    // As Verify, with blocks in [starts[i], ends[i]) tagged tags[i].
+    public static long VerifyRanges(string device, long size, string tag, long[] starts, long[] ends, string[] tags) {
         byte[] t = System.Text.Encoding.ASCII.GetBytes(tag);
         const int chunk = 4 << 20;
         byte[] buf = new byte[chunk];
@@ -68,7 +75,10 @@ public static class SsVerify {
                     got += r;
                 }
                 for (int b = 0; b < n; b += 4096) {
-                    FillBlock(expected, (ulong)(pos + b), t);
+                    byte[] bt = t;
+                    for (int r = 0; r < starts.Length; r++)
+                        if (pos + b >= starts[r] && pos + b < ends[r]) bt = System.Text.Encoding.ASCII.GetBytes(tags[r]);
+                    FillBlock(expected, (ulong)(pos + b), bt);
                     for (int i = 0; i < 4096; i++) if (buf[b + i] != expected[i]) return pos + b;
                 }
             }
@@ -182,11 +192,19 @@ try {
     $patterned = @()
     if ($manifest.pattern) { $patterned += , @($manifest.space.name, [int64]$manifest.pattern_size) }
     foreach ($e in @($manifest.extra_spaces)) { if ($e) { $patterned += , @($e.name, [int64]$e.size) } }
+    $starts = @(); $ends = @(); $tags = @()
+    foreach ($w in ($Written.Split(';') | Where-Object { $_ })) {
+        $f = $w.Split(':')
+        $starts += [int64]$f[0] * 1KB; $ends += ([int64]$f[0] + [int64]$f[1]) * 1KB; $tags += $f[2]
+    }
     foreach ($p in $patterned) {
         $disk = Get-VirtualDisk -FriendlyName $p[0] | Get-Disk
         if ($disk.IsOffline) { $disk | Set-Disk -IsOffline $false }
-        $bad = [SsVerify]::Verify("\\.\PhysicalDrive$($disk.Number)", $p[1], $p[0])
-        $checks += [ordered]@{ space = $p[0]; kind = 'pattern'; bytes = $p[1]; first_mismatch = $bad; ok = ($bad -lt 0) }
+        $dev = "\\.\PhysicalDrive$($disk.Number)"
+        $bad = if ($p[0] -eq $manifest.space.name -and $starts) {
+            [SsVerify]::VerifyRanges($dev, $p[1], $p[0], [int64[]]$starts, [int64[]]$ends, [string[]]$tags)
+        } else { [SsVerify]::Verify($dev, $p[1], $p[0]) }
+        $checks += [ordered]@{ space = $p[0]; kind = 'pattern'; bytes = $p[1]; written = $Written; first_mismatch = $bad; ok = ($bad -lt 0) }
     }
     if ($manifest.files) {
         $disk = Get-VirtualDisk -FriendlyName $manifest.space.name | Get-Disk

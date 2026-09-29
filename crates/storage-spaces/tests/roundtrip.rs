@@ -111,3 +111,18 @@ fn windows_resolves_diverging_database_copies() {
     assert_eq!(pool.user_spaces().next().unwrap().name(), "m5dbx");
     assert!(pool.warnings.iter().any(|w| w.contains("torn")), "{:?}", pool.warnings);
 }
+
+/// Writes from Linux (SpaceWriter through spaces write-pattern) into a copy
+/// of simple2c_26100: four ranges, across interleave boundaries and in the
+/// second row. Windows found the space healthy before and after
+/// Repair-VirtualDisk, and read exactly those ranges as written and the rest
+/// of the 2 GiB unchanged (tools/rw-roundtrip.sh).
+#[test]
+fn windows_reads_what_linux_wrote_to_a_simple_space() {
+    let e = evidence("rw-simple.json");
+    assert_eq!(e["attached"][0][1], "Healthy");
+    assert_eq!(e["repaired"][0][1], "Healthy");
+    assert_eq!(e["pattern_ok"], true);
+    assert_eq!(e["bytes_checked"], 2u64 << 30);
+    assert_eq!(e["written_from_linux"].as_str().unwrap().split(';').count(), 4);
+}

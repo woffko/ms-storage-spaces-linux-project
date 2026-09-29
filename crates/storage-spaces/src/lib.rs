@@ -31,9 +31,11 @@ mod reader;
 pub mod segments;
 #[doc(hidden)]
 pub mod testpattern;
+mod writer;
 
 pub use error::{Error, Result};
 pub use guid::Guid;
 pub use layout::Condition;
 pub use pool::{Member, PhysicalDisk, Pool, Space};
 pub use reader::{OpenOptions, SpaceReader, SpaceStream, UncleanParity};
+pub use writer::SpaceWriter;

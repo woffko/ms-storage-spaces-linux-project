@@ -1,0 +1,21 @@
+{
+ "pool": "simple2c_26100 (copy)",
+ "written_from_linux": "0:64:linux;1084:16:linux;524292:1024:linux;1048568:8:linux",
+ "windows_build": "10.0.26100.0",
+ "attached": [
+  [
+   "simple2c_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "repaired": [
+  [
+   "simple2c_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "pattern_ok": true,
+ "bytes_checked": 2147483648
+}

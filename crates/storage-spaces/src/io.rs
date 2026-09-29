@@ -1,4 +1,5 @@
-//! Positional read access to pool member devices.
+//! Positional access to pool member devices: reads, and writes for the
+//! spaces a pool opens for writing.
 
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom};
@@ -40,6 +41,151 @@ impl ReadAt for File {
         // Block devices report a zero length in metadata, seeking works for both.
         let mut file = self;
         file.seek(SeekFrom::End(0))
+    }
+}
+
+/// A device that also takes writes at absolute offsets.
+pub trait WriteAt: ReadAt {
+    /// Writes all of `buf` at `offset`.
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()>;
+
+    /// Makes the writes so far durable.
+    fn flush(&self) -> io::Result<()>;
+}
+
+impl WriteAt for File {
+    #[cfg(unix)]
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        std::os::unix::fs::FileExt::write_all_at(self, buf, offset)
+    }
+
+    #[cfg(windows)]
+    fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> io::Result<()> {
+        use std::os::windows::fs::FileExt;
+        while !buf.is_empty() {
+            match self.seek_write(buf, offset) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(n) => {
+                    buf = &buf[n..];
+                    offset += n as u64;
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    fn flush(&self) -> io::Result<()> {
+        self.sync_data()
+    }
+}
+
+impl<T: WriteAt + ?Sized> WriteAt for &T {
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        (**self).write_all_at(buf, offset)
+    }
+    fn flush(&self) -> io::Result<()> {
+        (**self).flush()
+    }
+}
+
+impl<T: WriteAt + ?Sized> WriteAt for Box<T> {
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        (**self).write_all_at(buf, offset)
+    }
+    fn flush(&self) -> io::Result<()> {
+        (**self).flush()
+    }
+}
+
+impl<T: WriteAt + ?Sized> WriteAt for Arc<T> {
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        (**self).write_all_at(buf, offset)
+    }
+    fn flush(&self) -> io::Result<()> {
+        (**self).flush()
+    }
+}
+
+/// A writable view of a device that keeps every write in memory (4 KiB
+/// pages over the device's content): for tests and for trying writes on a
+/// pool without touching its disks. The device itself is never written.
+pub struct Overlay<D> {
+    base: D,
+    pages: std::sync::Mutex<std::collections::BTreeMap<u64, Box<[u8; OVERLAY_PAGE]>>>,
+    flushes: std::sync::atomic::AtomicUsize,
+}
+
+const OVERLAY_PAGE: usize = 4096;
+
+impl<D: ReadAt> Overlay<D> {
+    pub fn new(base: D) -> Self {
+        Overlay {
+            base,
+            pages: Default::default(),
+            flushes: Default::default(),
+        }
+    }
+
+    /// Byte offsets of the pages written so far.
+    pub fn written_pages(&self) -> Vec<u64> {
+        self.pages
+            .lock()
+            .unwrap()
+            .keys()
+            .map(|p| p * OVERLAY_PAGE as u64)
+            .collect()
+    }
+
+    /// Number of flushes so far.
+    pub fn flushes(&self) -> usize {
+        self.flushes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl<D: ReadAt> ReadAt for Overlay<D> {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        let end = offset
+            .checked_add(buf.len() as u64)
+            .ok_or(io::ErrorKind::UnexpectedEof)?;
+        self.base.read_exact_at(buf, offset)?;
+        let pages = self.pages.lock().unwrap();
+        let page = OVERLAY_PAGE as u64;
+        for (&p, data) in pages.range(offset / page..end.div_ceil(page)) {
+            let (start, stop) = ((p * page).max(offset), ((p + 1) * page).min(end));
+            buf[(start - offset) as usize..(stop - offset) as usize]
+                .copy_from_slice(&data[(start - p * page) as usize..(stop - p * page) as usize]);
+        }
+        Ok(())
+    }
+
+    fn size(&self) -> io::Result<u64> {
+        self.base.size()
+    }
+}
+
+impl<D: ReadAt> WriteAt for Overlay<D> {
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        let end = offset
+            .checked_add(buf.len() as u64)
+            .filter(|&e| e <= self.base.size().unwrap_or(0))
+            .ok_or(io::ErrorKind::WriteZero)?;
+        let page = OVERLAY_PAGE as u64;
+        for p in offset / page..end.div_ceil(page) {
+            let mut current = Box::new([0u8; OVERLAY_PAGE]);
+            self.read_exact_at(&mut current[..], p * page)?;
+            let (start, stop) = ((p * page).max(offset), ((p + 1) * page).min(end));
+            current[(start - p * page) as usize..(stop - p * page) as usize]
+                .copy_from_slice(&buf[(start - offset) as usize..(stop - offset) as usize]);
+            self.pages.lock().unwrap().insert(p, current);
+        }
+        Ok(())
+    }
+
+    fn flush(&self) -> io::Result<()> {
+        self.flushes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -253,6 +399,21 @@ impl ReadAt for SparseImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_keeps_writes_in_memory() {
+        let base = MemDevice(vec![1u8; 3 * 4096]);
+        let o = Overlay::new(&base);
+        o.write_all_at(&[9; 5000], 4000).unwrap();
+        let mut buf = vec![0u8; 3 * 4096];
+        o.read_exact_at(&mut buf, 0).unwrap();
+        assert!(buf[..4000].iter().all(|&b| b == 1));
+        assert!(buf[4000..9000].iter().all(|&b| b == 9));
+        assert!(buf[9000..].iter().all(|&b| b == 1));
+        assert_eq!(o.written_pages(), [0, 4096, 8192]);
+        assert!(base.0.iter().all(|&b| b == 1), "the device itself is never written");
+        assert!(o.write_all_at(&[0; 2], 3 * 4096 - 1).is_err());
+    }
 
     #[test]
     fn sparse_image_round_trip() {

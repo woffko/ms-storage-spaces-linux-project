@@ -222,6 +222,23 @@ enum Command {
         #[arg(required = true)]
         snapshots: Vec<PathBuf>,
     },
+    /// Write the verification pattern with a tag into a space (tests of
+    /// write support: the member devices are written).
+    #[command(hide = true)]
+    WritePattern {
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+        #[arg(short, long)]
+        space: String,
+        /// Byte offset (a multiple of 4096).
+        #[arg(long)]
+        offset: u64,
+        /// Bytes to write (a multiple of 4096).
+        #[arg(long)]
+        length: u64,
+        #[arg(long)]
+        tag: String,
+    },
     /// Verify the test pattern written by tools/vm/New-TestPool.ps1.
     #[command(hide = true)]
     CheckPattern {
@@ -365,6 +382,13 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::WritePattern {
+            devices,
+            space,
+            offset,
+            length,
+            tag,
+        } => write_pattern(&devices, &space, offset, length, &tag),
         Command::CheckPattern { devices, space, length } => {
             let pool = open_pool(&devices)?;
             check_pattern(&pool, find_space(&pool, &space)?, length)
@@ -382,12 +406,21 @@ fn open_pool_exclusive(paths: &[PathBuf]) -> Result<Pool<File>> {
     open_pool_with(paths, true)
 }
 
+/// Opens the members for reading and writing, exclusively (for `--rw`).
+fn open_pool_rw(paths: &[PathBuf]) -> Result<Pool<File>> {
+    open_pool_mode(paths, true, true)
+}
+
 fn open_pool_with(paths: &[PathBuf], exclusive: bool) -> Result<Pool<File>> {
+    open_pool_mode(paths, exclusive, false)
+}
+
+fn open_pool_mode(paths: &[PathBuf], exclusive: bool, write: bool) -> Result<Pool<File>> {
     let files = paths
         .iter()
         .map(|p| {
             let mut options = std::fs::OpenOptions::new();
-            options.read(true);
+            options.read(true).write(write);
             #[cfg(target_os = "linux")]
             if exclusive && p.starts_with("/dev") {
                 use std::os::unix::fs::OpenOptionsExt;
@@ -404,6 +437,28 @@ fn open_pool_with(paths: &[PathBuf], exclusive: bool) -> Result<Pool<File>> {
         eprintln!("warning: {w}");
     }
     Ok(pool)
+}
+
+fn write_pattern(devices: &[PathBuf], space: &str, offset: u64, length: u64, tag: &str) -> Result<()> {
+    let block = testpattern::BLOCK as u64;
+    if !offset.is_multiple_of(block) || !length.is_multiple_of(block) {
+        bail!("offset and length must be multiples of {block}");
+    }
+    let pool = open_pool_rw(devices)?;
+    let writer = pool.open_space_rw(find_space(&pool, space)?.id())?;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut at = offset;
+    while at < offset + length {
+        let n = (offset + length - at).min(buf.len() as u64) as usize;
+        for (i, b) in buf[..n].chunks_mut(testpattern::BLOCK).enumerate() {
+            testpattern::fill_block(b, at + (i * testpattern::BLOCK) as u64, tag);
+        }
+        writer.write_all_at(&buf[..n], at)?;
+        at += n as u64;
+    }
+    writer.flush()?;
+    println!("wrote {} at {offset:#x} with tag {tag:?}", size(length));
+    Ok(())
 }
 
 fn find_space<'p>(pool: &'p Pool<File>, key: &str) -> Result<&'p Space> {
