@@ -349,3 +349,27 @@ fn windows_reads_a_thin_space_after_linux_gave_rows_back() {
     assert!(vslabs.contains(&0) && !vslabs.contains(&2));
     assert_eq!(vslabs.len(), 42);
 }
+
+/// The same for a thin two-way mirror: fstrim gave two rows back (both
+/// copies of each), and Windows attached the pool as healthy, chkdsk clean,
+/// every file intact, with the same extents (and physical slabs) as the
+/// database written on Linux.
+#[test]
+fn windows_reads_a_thin_mirror_after_linux_gave_rows_back() {
+    let e = evidence("rw-thin-mirror-trim-ntfs3g.json");
+    assert_eq!(
+        (e["attached"][0][1].as_str(), e["repaired"][0][1].as_str()),
+        (Some("Healthy"), Some("Healthy"))
+    );
+    assert_eq!(e["attached_jobs"].as_array().unwrap().len(), 0);
+    assert_eq!((e["chkdsk_exit"].as_i64(), e["files"].as_i64()), (Some(0), Some(573)));
+    assert_eq!(e["mismatching"].as_array().unwrap().len(), 0);
+    assert!(
+        e["trim"]
+            .as_str()
+            .unwrap()
+            .ends_with("52; after deleting it and fstrim: 48")
+    );
+    assert_eq!(e["extents_windows"], e["extents_linux"]);
+    assert_eq!(e["extents_windows"].as_array().unwrap().len(), 50);
+}

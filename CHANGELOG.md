@@ -35,6 +35,9 @@ Writing, for spaces whose state is fully understood.
 * Checked by crash replays of every flush point and of unordered writes,
   fio with verification through ublk, NBD and device-mapper, and NTFS
   written on Linux and verified by Windows.
+* The write path is fuzzed (`pool_write`): whatever the metadata, a space
+  is written only if it is understood, and writes stay inside the pool
+  partitions of its members.
 
 ### Reading
 

@@ -425,8 +425,9 @@ rows of thin spaces not allocated yet (M7).
   Discards through ublk and NBD give back rows of thin simple and mirror
   spaces covered whole, in one discard or several since their last write
   (`tools/rw-trim-check.sh`: blkdiscard pieces and ext4 fstrim, e2fsck
-  clean); Windows attached a pool whose row fstrim gave back from NTFS as
-  healthy, with the same extents. Parity and fixed spaces ignore discards.
+  clean); Windows attached a thin simple and a thin mirror pool whose rows
+  fstrim gave back from NTFS as healthy, with the same extents. Parity and
+  fixed spaces ignore discards.
 * Cache destaging on Linux: a cache holding data is destaged when a space
   is opened for writing, and single parity writes destage as the cache
   fills (M6).

@@ -325,10 +325,13 @@ way. The row then reads as zeros until a write allocates it again. Parity
 and fixed spaces ignore discards: giving back a parity row would also have
 to reset what the parity journal says about its stripes, which has not been
 studied.
-Windows attached a thin simple space whose row Linux had given back this
-way (NTFS, a file deleted, fstrim) as healthy with nothing to repair, and
-listed the same extents as the database written on Linux (the test
-`windows_reads_a_thin_space_after_linux_gave_rows_back`).
+Windows attached a thin simple space and a thin mirror whose rows Linux
+had given back this way (NTFS, a file deleted, fstrim) as healthy with
+nothing to repair, and listed the same extents as the database written on
+Linux (the tests `windows_reads_a_thin_space_after_linux_gave_rows_back`
+and `windows_reads_a_thin_mirror_after_linux_gave_rows_back`).
+`Get-PhysicalExtent` of a mirror space also lists the slab of its dirty
+region log.
 
 ## Data layout (**verified**)
 
