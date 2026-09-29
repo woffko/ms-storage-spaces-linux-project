@@ -1,16 +1,19 @@
-//! Exposing a space as a ublk block device (`/dev/ublkbN`), read-only.
+//! Exposing a space as a ublk block device (`/dev/ublkbN`): read-only, or
+//! writable through a space writer (`--rw`).
 //!
 //! Each hardware queue runs in its own thread with a synchronous handler
 //! that reads the requested range through the space reader straight into
-//! the queue's I/O buffer. The device lives until the process receives
-//! SIGINT/SIGTERM or the device is deleted.
+//! the queue's I/O buffer, or writes it from there. A writable device
+//! declares a volatile cache, so the kernel sends flushes (and turns FUA
+//! writes into a write and a flush). The device lives until the process
+//! receives SIGINT/SIGTERM or the device is deleted.
 
 use std::fs::File;
 
 use anyhow::{Context, Result};
 use libublk::io::{BufDescList, UblkDev, UblkIOCtx, UblkQueue};
 use libublk::{BufDesc, UblkFlags, UblkIORes};
-use storage_spaces::{Pool, SpaceReader};
+use storage_spaces::{Pool, SpaceReader, SpaceWriter};
 
 const QUEUES: u16 = 2;
 const DEPTH: u16 = 64;
@@ -21,6 +24,7 @@ const IO_BUF_BYTES: u32 = 1 << 20;
 pub fn serve(
     pool: &'static Pool<File>,
     reader: &'static SpaceReader<'static, File>,
+    writer: Option<&'static SpaceWriter<'static, File>>,
     on_ready: impl FnOnce(&str) + Send + Sync + 'static,
 ) -> Result<()> {
     let ctrl = libublk::ctrl::UblkCtrlBuilder::default()
@@ -48,14 +52,18 @@ pub fn serve(
     let tgt_init = move |dev: &mut UblkDev| {
         dev.set_default_params(size);
         let basic = &mut dev.tgt.params.basic;
-        basic.attrs = libublk::sys::UBLK_ATTR_READ_ONLY;
+        basic.attrs = if writer.is_some() {
+            libublk::sys::UBLK_ATTR_VOLATILE_CACHE
+        } else {
+            libublk::sys::UBLK_ATTR_READ_ONLY
+        };
         basic.logical_bs_shift = logical_shift;
         basic.physical_bs_shift = physical_shift;
         basic.io_min_shift = physical_shift;
         basic.io_opt_shift = physical_shift;
         Ok(())
     };
-    let queue_fn = move |qid: u16, dev: &UblkDev| run_queue(qid, dev, reader);
+    let queue_fn = move |qid: u16, dev: &UblkDev| run_queue(qid, dev, reader, writer);
     let ready = move |ctrl: &libublk::ctrl::UblkCtrl| on_ready(&format!("/dev/ublkb{}", ctrl.dev_info().dev_id));
     ctrl.run_target(tgt_init, queue_fn, ready)
         .context("ublk device failed")?;
@@ -63,7 +71,7 @@ pub fn serve(
     Ok(())
 }
 
-fn run_queue(qid: u16, dev: &UblkDev, reader: &SpaceReader<'_, File>) {
+fn run_queue(qid: u16, dev: &UblkDev, reader: &SpaceReader<'_, File>, writer: Option<&SpaceWriter<'_, File>>) {
     let mut bufs = dev.alloc_queue_io_bufs();
     let queue = match UblkQueue::new(qid, dev)
         .and_then(|q| q.submit_fetch_commands_unified(BufDescList::Slices(Some(&bufs))))
@@ -88,7 +96,25 @@ fn run_queue(qid: u16, dev: &UblkDev, reader: &SpaceReader<'_, File>) {
                 }
             },
             libublk::sys::UBLK_IO_OP_READ => -libc_errno::EINVAL,
-            libublk::sys::UBLK_IO_OP_FLUSH => 0,
+            libublk::sys::UBLK_IO_OP_WRITE => match writer {
+                Some(_) if len > buf.len() => -libc_errno::EINVAL,
+                Some(w) => match w.write_all_at(&buf[..len], offset) {
+                    Ok(()) => len as i32,
+                    Err(e) => {
+                        eprintln!("write of {len} bytes at {offset:#x} failed: {e}");
+                        -libc_errno::EIO
+                    }
+                },
+                None => -libc_errno::EROFS,
+            },
+            libublk::sys::UBLK_IO_OP_FLUSH => match writer.map_or(Ok(()), |w| w.flush()) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("flush failed: {e}");
+                    -libc_errno::EIO
+                }
+            },
+            _ if writer.is_some() => -libc_errno::EOPNOTSUPP,
             _ => -libc_errno::EROFS,
         };
         let desc = BufDesc::Slice(bufs[tag as usize].as_slice());
@@ -103,4 +129,5 @@ mod libc_errno {
     pub const EIO: i32 = 5;
     pub const EINVAL: i32 = 22;
     pub const EROFS: i32 = 30;
+    pub const EOPNOTSUPP: i32 = 95;
 }

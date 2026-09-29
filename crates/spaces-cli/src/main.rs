@@ -128,6 +128,10 @@ enum Command {
         space: String,
         #[arg(long)]
         socket: PathBuf,
+        /// Serve the space writable (only spaces whose state is fully
+        /// understood; the member devices are written).
+        #[arg(long)]
+        rw: bool,
         /// Write the socket path here once listening.
         #[arg(long)]
         ready_file: Option<PathBuf>,
@@ -140,6 +144,10 @@ enum Command {
         devices: Vec<PathBuf>,
         #[arg(short, long)]
         space: String,
+        /// Serve the space writable (only spaces whose state is fully
+        /// understood; the member devices are written).
+        #[arg(long)]
+        rw: bool,
         /// Write the block device path here once it exists.
         #[arg(long)]
         ready_file: Option<PathBuf>,
@@ -287,20 +295,39 @@ fn main() -> Result<()> {
             devices,
             space,
             socket,
+            rw,
             ready_file,
         } => {
-            let pool = open_pool_exclusive(&devices)?;
-            serve_nbd(&pool, find_space(&pool, &space)?, &socket, ready_file.as_deref())
+            let pool = if rw {
+                open_pool_rw(&devices)?
+            } else {
+                open_pool_exclusive(&devices)?
+            };
+            serve_nbd(&pool, find_space(&pool, &space)?, &socket, ready_file.as_deref(), rw)
         }
         #[cfg(all(target_os = "linux", feature = "ublk"))]
         Command::ServeUblk {
             devices,
             space,
+            rw,
             ready_file,
         } => {
-            let pool: &'static Pool<File> = Box::leak(Box::new(open_pool_exclusive(&devices)?));
-            let reader = Box::leak(Box::new(open_space(pool, find_space(pool, &space)?.id())?));
-            ublk::serve(pool, reader, move |dev| {
+            let pool: &'static Pool<File> = Box::leak(Box::new(if rw {
+                open_pool_rw(&devices)?
+            } else {
+                open_pool_exclusive(&devices)?
+            }));
+            let id = find_space(pool, &space)?.id();
+            let writer: Option<&'static storage_spaces::SpaceWriter<'static, File>> = if rw {
+                Some(Box::leak(Box::new(pool.open_space_rw(id)?)))
+            } else {
+                None
+            };
+            let reader = match writer {
+                Some(w) => w.reader(),
+                None => Box::leak(Box::new(open_space(pool, id)?)),
+            };
+            ublk::serve(pool, reader, writer, move |dev| {
                 println!("{dev}");
                 if let Some(path) = &ready_file
                     && let Err(e) = std::fs::write(path, dev)
@@ -794,20 +821,50 @@ fn verify_pattern(
     Ok(())
 }
 
-fn serve_nbd(pool: &Pool<File>, space: &Space, socket: &PathBuf, ready_file: Option<&std::path::Path>) -> Result<()> {
-    let reader = open_space(pool, space.id())?;
+/// Writes through a space writer (`--rw`).
+impl nbd::Sink for storage_spaces::SpaceWriter<'_, File> {
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
+        storage_spaces::SpaceWriter::write_all_at(self, buf, offset).map_err(std::io::Error::other)
+    }
+    fn flush(&self) -> std::io::Result<()> {
+        storage_spaces::SpaceWriter::flush(self).map_err(std::io::Error::other)
+    }
+}
+
+fn serve_nbd(
+    pool: &Pool<File>,
+    space: &Space,
+    socket: &PathBuf,
+    ready_file: Option<&std::path::Path>,
+    rw: bool,
+) -> Result<()> {
+    let writer = if rw {
+        Some(pool.open_space_rw(space.id())?)
+    } else {
+        None
+    };
+    let reader_ro;
+    let reader = match &writer {
+        Some(w) => w.reader(),
+        None => {
+            reader_ro = open_space(pool, space.id())?;
+            &reader_ro
+        }
+    };
     let listener = std::os::unix::net::UnixListener::bind(socket)
         .with_context(|| format!("cannot listen on {}", socket.display()))?;
     let export = nbd::Export {
         name: space.name(),
-        source: &reader,
+        source: reader,
+        sink: writer.as_ref().map(|w| w as &dyn nbd::Sink),
         size: reader.size(),
         block_size: pool.logical_sector_size,
     };
     eprintln!(
-        "serving {:?} ({}) on {}",
+        "serving {:?} ({}{}) on {}",
         space.name(),
         size(reader.size()),
+        if rw { ", writable" } else { "" },
         socket.display()
     );
     if let Some(path) = ready_file {

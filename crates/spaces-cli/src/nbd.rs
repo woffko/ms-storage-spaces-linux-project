@@ -1,8 +1,9 @@
-//! A read-only NBD server (fixed newstyle handshake, simple replies).
+//! An NBD server (fixed newstyle handshake, simple replies).
 //!
 //! The kernel NBD driver is attached to it with `nbd-client`; this module
-//! only speaks the protocol over a connected stream. Writes and trims are
-//! refused with EPERM.
+//! only speaks the protocol over a connected stream. An export without a
+//! sink is read-only and refuses writes with EPERM; trims are always
+//! refused.
 
 use std::io::{self, Read, Write};
 
@@ -37,11 +38,14 @@ const INFO_BLOCK_SIZE: u16 = 3;
 const TFLAG_HAS_FLAGS: u16 = 1;
 const TFLAG_READ_ONLY: u16 = 2;
 const TFLAG_SEND_FLUSH: u16 = 4;
+const TFLAG_SEND_FUA: u16 = 8;
 const TFLAG_CAN_MULTI_CONN: u16 = 1 << 8;
 
 const CMD_READ: u16 = 0;
+const CMD_WRITE: u16 = 1;
 const CMD_DISC: u16 = 2;
 const CMD_FLUSH: u16 = 3;
+const CMD_FLAG_FUA: u16 = 1;
 
 const EPERM: u32 = 1;
 const EIO: u32 = 5;
@@ -50,10 +54,18 @@ const EINVAL: u32 = 22;
 /// Largest read request served (the kernel sends at most max_sectors).
 const MAX_REQUEST: u32 = 32 << 20;
 
-/// What is exported.
+/// Where the writes to a writable export go.
+pub trait Sink: Sync {
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()>;
+    /// Makes the writes so far durable.
+    fn flush(&self) -> io::Result<()>;
+}
+
+/// What is exported: read-only without a sink.
 pub struct Export<'a, R> {
     pub name: &'a str,
     pub source: &'a R,
+    pub sink: Option<&'a dyn Sink>,
     pub size: u64,
     pub block_size: u32,
 }
@@ -83,7 +95,7 @@ pub fn serve<R: ReadAt, S: Read + Write>(export: &Export<'_, R>, mut conn: S) ->
                     return Ok(()); // the protocol has no error reply here
                 }
                 conn.write_all(&export.size.to_be_bytes())?;
-                conn.write_all(&transmission_flags().to_be_bytes())?;
+                conn.write_all(&transmission_flags(export.sink.is_some()).to_be_bytes())?;
                 if !no_zeroes {
                     conn.write_all(&[0u8; 124])?;
                 }
@@ -110,7 +122,7 @@ pub fn serve<R: ReadAt, S: Read + Write>(export: &Export<'_, R>, mut conn: S) ->
                 }
                 let mut info = INFO_EXPORT.to_be_bytes().to_vec();
                 info.extend_from_slice(&export.size.to_be_bytes());
-                info.extend_from_slice(&transmission_flags().to_be_bytes());
+                info.extend_from_slice(&transmission_flags(export.sink.is_some()).to_be_bytes());
                 option_reply(&mut conn, option, REP_INFO, &info)?;
                 let mut bs = INFO_BLOCK_SIZE.to_be_bytes().to_vec();
                 bs.extend_from_slice(&export.block_size.to_be_bytes());
@@ -128,8 +140,9 @@ pub fn serve<R: ReadAt, S: Read + Write>(export: &Export<'_, R>, mut conn: S) ->
     transmission(export, conn)
 }
 
-fn transmission_flags() -> u16 {
-    TFLAG_HAS_FLAGS | TFLAG_READ_ONLY | TFLAG_SEND_FLUSH | TFLAG_CAN_MULTI_CONN
+fn transmission_flags(writable: bool) -> u16 {
+    let access = if writable { TFLAG_SEND_FUA } else { TFLAG_READ_ONLY };
+    TFLAG_HAS_FLAGS | access | TFLAG_SEND_FLUSH | TFLAG_CAN_MULTI_CONN
 }
 
 /// Returns the export name of an NBD_OPT_INFO/GO request.
@@ -161,6 +174,7 @@ fn transmission<R: ReadAt, S: Read + Write>(export: &Export<'_, R>, mut conn: S)
         if u32::from_be_bytes(req[0..4].try_into().unwrap()) != REQUEST_MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "bad request magic"));
         }
+        let flags = u16::from_be_bytes(req[4..6].try_into().unwrap());
         let kind = u16::from_be_bytes(req[6..8].try_into().unwrap());
         let handle = &req[8..16];
         let offset = u64::from_be_bytes(req[16..24].try_into().unwrap());
@@ -189,12 +203,39 @@ fn transmission<R: ReadAt, S: Read + Write>(export: &Export<'_, R>, mut conn: S)
                     }
                 }
             }
-            CMD_FLUSH => reply(&mut conn, 0, &[])?,
+            CMD_FLUSH => match export.sink.map_or(Ok(()), |s| s.flush()) {
+                Ok(()) => reply(&mut conn, 0, &[])?,
+                Err(e) => {
+                    eprintln!("flush failed: {e}");
+                    reply(&mut conn, EIO, &[])?;
+                }
+            },
             CMD_DISC => return Ok(()),
             // Writes carry a payload that must be consumed before replying.
-            1 => {
-                io::copy(&mut (&mut conn).take(length as u64), &mut io::sink())?;
-                reply(&mut conn, EPERM, &[])?;
+            CMD_WRITE => {
+                let in_range = offset.checked_add(length as u64).is_some_and(|end| end <= export.size);
+                let Some(sink) = export.sink.filter(|_| in_range && length <= MAX_REQUEST) else {
+                    io::copy(&mut (&mut conn).take(length as u64), &mut io::sink())?;
+                    let error = if export.sink.is_some() { EINVAL } else { EPERM };
+                    reply(&mut conn, error, &[])?;
+                    continue;
+                };
+                data.resize(length as usize, 0);
+                conn.read_exact(&mut data)?;
+                let written = sink.write_all_at(&data, offset).and_then(|()| {
+                    if flags & CMD_FLAG_FUA != 0 {
+                        sink.flush()
+                    } else {
+                        Ok(())
+                    }
+                });
+                match written {
+                    Ok(()) => reply(&mut conn, 0, &[])?,
+                    Err(e) => {
+                        eprintln!("write of {length} bytes at {offset:#x} failed: {e}");
+                        reply(&mut conn, EIO, &[])?;
+                    }
+                }
             }
             _ => reply(&mut conn, EPERM, &[])?,
         }
@@ -253,16 +294,32 @@ mod tests {
     }
 
     fn request(c: &mut UnixStream, kind: u16, offset: u64, len: u32) -> (u32, Vec<u8>) {
+        request_with(
+            c,
+            kind,
+            0,
+            offset,
+            &vec![0u8; if kind == CMD_WRITE { len as usize } else { 0 }],
+            len,
+        )
+    }
+
+    fn request_with(
+        c: &mut UnixStream,
+        kind: u16,
+        flags: u16,
+        offset: u64,
+        payload: &[u8],
+        len: u32,
+    ) -> (u32, Vec<u8>) {
         let mut req = REQUEST_MAGIC.to_be_bytes().to_vec();
-        req.extend_from_slice(&0u16.to_be_bytes());
+        req.extend_from_slice(&flags.to_be_bytes());
         req.extend_from_slice(&kind.to_be_bytes());
         req.extend_from_slice(&42u64.to_be_bytes());
         req.extend_from_slice(&offset.to_be_bytes());
         req.extend_from_slice(&len.to_be_bytes());
         c.write_all(&req).unwrap();
-        if kind == 1 {
-            c.write_all(&vec![0u8; len as usize]).unwrap();
-        }
+        c.write_all(payload).unwrap();
         let mut head = [0u8; 16];
         c.read_exact(&mut head).unwrap();
         assert_eq!(u64::from_be_bytes(head[8..16].try_into().unwrap()), 42);
@@ -287,6 +344,7 @@ mod tests {
             let export = Export {
                 name: "space",
                 source: &dev,
+                sink: None,
                 size: 8192,
                 block_size: 4096,
             };
@@ -301,6 +359,69 @@ mod tests {
         assert_eq!(request(&mut client, CMD_READ, 8190, 4).0, EINVAL);
         assert_eq!(request(&mut client, 1, 0, 512).0, EPERM);
         assert_eq!(request(&mut client, CMD_FLUSH, 0, 0).0, 0);
+        let mut disc = REQUEST_MAGIC.to_be_bytes().to_vec();
+        disc.extend_from_slice(&[0, 0, 0, 2]);
+        disc.extend_from_slice(&[0u8; 20]);
+        client.write_all(&disc).unwrap();
+        handle.join().unwrap();
+    }
+
+    /// A writable in-memory export.
+    struct Mem(std::sync::Mutex<Vec<u8>>, std::sync::atomic::AtomicUsize);
+
+    impl ReadAt for Mem {
+        fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+            let d = self.0.lock().unwrap();
+            buf.copy_from_slice(&d[offset as usize..offset as usize + buf.len()]);
+            Ok(())
+        }
+        fn size(&self) -> io::Result<u64> {
+            Ok(self.0.lock().unwrap().len() as u64)
+        }
+    }
+
+    impl Sink for Mem {
+        fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+            self.0.lock().unwrap()[offset as usize..offset as usize + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+        fn flush(&self) -> io::Result<()> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_writable_export_takes_writes_flushes_and_fua() {
+        let mem = std::sync::Arc::new(Mem(std::sync::Mutex::new(vec![0; 8192]), Default::default()));
+        let dev = mem.clone();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let handle = std::thread::spawn(move || {
+            let export = Export {
+                name: "space",
+                source: &*dev,
+                sink: Some(&*dev),
+                size: 8192,
+                block_size: 4096,
+            };
+            serve(&export, server).unwrap();
+        });
+        let (_, flags, _) = client_go(&mut client, "space");
+        assert_eq!(flags & TFLAG_READ_ONLY, 0);
+        assert_ne!(flags & TFLAG_SEND_FUA, 0);
+        assert_eq!(request_with(&mut client, CMD_WRITE, 0, 4096, &[7; 16], 16).0, 0);
+        assert_eq!(
+            request(&mut client, CMD_READ, 4090, 12).1,
+            [0, 0, 0, 0, 0, 0, 7, 7, 7, 7, 7, 7]
+        );
+        assert_eq!(mem.1.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(request_with(&mut client, CMD_WRITE, CMD_FLAG_FUA, 0, &[1; 4], 4).0, 0);
+        assert_eq!(mem.1.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(request(&mut client, CMD_FLUSH, 0, 0).0, 0);
+        assert_eq!(mem.1.load(std::sync::atomic::Ordering::Relaxed), 2);
+        // Out of range: the payload is consumed and the write refused.
+        assert_eq!(request_with(&mut client, CMD_WRITE, 0, 8190, &[1; 4], 4).0, EINVAL);
+        assert_eq!(request(&mut client, CMD_READ, 8188, 4).1, [0; 4]);
         let mut disc = REQUEST_MAGIC.to_be_bytes().to_vec();
         disc.extend_from_slice(&[0, 0, 0, 2]);
         disc.extend_from_slice(&[0u8; 20]);
