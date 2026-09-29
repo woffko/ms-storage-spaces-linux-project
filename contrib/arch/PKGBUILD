@@ -1,7 +1,7 @@
 # Arch Linux package built from this source tree.
 # Usage: cd contrib/arch && makepkg -si
 pkgname=storage-spaces
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc='Read Microsoft Storage Spaces pools (Windows 11) as read-only block devices'
 arch=('x86_64' 'aarch64')

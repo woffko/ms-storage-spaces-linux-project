@@ -444,8 +444,26 @@ rows of thin spaces not allocated yet (M7).
 * Security review of the write paths: `docs/security.md` (threat model,
   findings: checkpoint sizes capped, NBD sockets owner-only, the range
   panic above).
-* 24 h of fuzzing, all eight targets with four workers each: started
-  2026-09-29 14:11 (`pool_write` 14:41); results pending.
+* 24 h of fuzzing, all eight targets with four workers each. The first
+  hour found two failures (a parity journal checkpoint offset overflow,
+  and a read-back check in the `database` harness itself), both fixed with
+  tests; the run restarted on the fixed code at 2026-09-29 14:49
+  (commit b2e16f1). Results pending.
+
+### M8 (2026-09-29, v0.2.0-ready once the 24 h fuzzing is clean)
+
+* `spaces attach --rw` is documented in the user guide (Writing: what
+  each space type does, what is refused and why, guarantees and risks,
+  thin allocation and TRIM), the man page, the README and the CHANGELOG
+  (0.2.0).
+* Backends: device-mapper read-write tables for simple spaces that are
+  fully allocated with an empty write-back cache; everything else through
+  ublk (or NBD). Mirror spaces never qualify for dm: Windows lists every
+  run in the dirty region log before its first write, so each first write
+  to a run needs a metadata update.
+* Version 0.2.0 in `Cargo.toml` and the Arch package; the Debian package
+  builds. Nothing is pushed, tagged or released before Stage 3 is complete
+  (decision 2026-09-29).
 
 ## Test infrastructure (continuous, feeds every stage)
 
