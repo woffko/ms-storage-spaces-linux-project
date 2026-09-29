@@ -336,6 +336,30 @@ intact; used for the mirror copy and diverging database experiments).
   before and after. Object ids of new spaces (`m5ids`: 37, 70,
   99/100, 108) do not follow from the metadata either.
 
+### M6 (in progress, 2026-09-29)
+
+* Write infrastructure: `WriteAt`, `Overlay` (writes kept in memory, for
+  tests), `Pool::open_space_rw` and `SpaceWriter`, which opens a space for
+  writing only when its state is fully understood (clean pool, healthy
+  space, no cached data) and refuses everything it cannot keep consistent
+  yet with the reason; `serve-nbd --rw` and `serve-ublk --rw` (members
+  opened read-write and exclusively; NBD with FLUSH and FUA, ublk with a
+  volatile cache).
+* Simple spaces: `tools/rw-kernel-check.sh` on the Linux VM wrote 512 MiB
+  of random fio writes (4 KiB-1 MiB, crc32c verification) through ublk,
+  NBD and dm (a read-write table on loop devices), verified them, and
+  verified them again after exposing the space read-only; the pattern
+  outside stayed intact. `tools/rw-roundtrip.sh`: four ranges written by
+  `SpaceWriter` into a copy of `simple2c_26100` were read by Windows
+  exactly, the space healthy before and after `Repair-VirtualDisk`.
+  `tools/rw-ntfs-check.sh`: GPT and NTFS created on Linux, 3000 seeded
+  file operations checked against a model, read back read-only; Windows
+  (`tools/work-roundtrip.sh`) found the space healthy, chkdsk clean and all
+  files intact, with ntfs-3g and with ntfs3 without truncation. ntfs3 of
+  Linux 6.8 corrupts small files truncated to zero (chkdsk reports the
+  same four records on a plain disk image); not a matter of the space.
+  Evidence in `tests/evidence`, checked by `tests/roundtrip.rs`.
+
 ## Test infrastructure (continuous, feeds every stage)
 
 T1. **Windows 11 only.** All pools are created by Windows 11 test VMs: the

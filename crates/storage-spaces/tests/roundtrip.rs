@@ -126,3 +126,26 @@ fn windows_reads_what_linux_wrote_to_a_simple_space() {
     assert_eq!(e["bytes_checked"], 2u64 << 30);
     assert_eq!(e["written_from_linux"].as_str().unwrap().split(';').count(), 4);
 }
+
+/// NTFS written from Linux into a copy of simple2c_26100 through ublk
+/// (tools/rw-ntfs-check.sh: GPT and mkntfs, a stress run of 3000 seeded
+/// file operations checked against a model, then tools/work-roundtrip.sh):
+/// with ntfs-3g, and with ntfs3 leaving out truncation, Windows found the
+/// space healthy, chkdsk clean and every file intact. With truncation,
+/// ntfs3 (Linux 6.8) left four small files truncated to zero that chkdsk
+/// reports as corrupt; the same run on a plain disk image gave the same
+/// four records, so it is the file system driver, not the space.
+#[test]
+fn windows_accepts_ntfs_written_from_linux_to_a_simple_space() {
+    for name in ["rw-ntfs3.json", "rw-ntfs3g.json"] {
+        let e = evidence(name);
+        assert_eq!(e["attached"][0][1], "Healthy", "{name}");
+        assert_eq!(e["repaired"][0][1], "Healthy", "{name}");
+        assert_eq!(e["chkdsk_exit"], 0, "{name}");
+        assert!(e["files"].as_u64().unwrap() > 500, "{name}");
+        assert_eq!(e["mismatching"].as_array().unwrap().len(), 0, "{name}");
+    }
+    let e = evidence("rw-ntfs3-truncate.json");
+    assert_eq!(e["corrupt_records"], serde_json::json!(["39", "B6", "1A4", "258"]));
+    assert_eq!(e["mismatching"].as_array().unwrap().len(), 4);
+}

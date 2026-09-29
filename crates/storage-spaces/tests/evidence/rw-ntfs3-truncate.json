@@ -1,0 +1,32 @@
+{
+ "roundtrip": "w2ntfs",
+ "windows_build": "10.0.26100.0",
+ "attached": [
+  [
+   "simple2c_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "repaired": [
+  [
+   "simple2c_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "chkdsk_exit": 3,
+ "corrupt_records": [
+  "39",
+  "B6",
+  "1A4",
+  "258"
+ ],
+ "files": 573,
+ "mismatching": [
+  "d17/d25/d107/d140/d317/d696/d916/f924.bin",
+  "d17/d25/d29/d158/d1027/d1123/f2559.bin",
+  "d17/d40/d68/d447/d1720/f2624.bin",
+  "d17/f512.bin"
+ ]
+}
