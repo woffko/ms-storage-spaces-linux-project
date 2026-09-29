@@ -617,7 +617,9 @@ pub(crate) fn load_checkpoints(
         return Ok(newest);
     }
     for area in 0..count as usize {
-        let at = offset + area as u64 * u64::from(size);
+        let Some(at) = offset.checked_add(area as u64 * u64::from(size)) else {
+            break;
+        };
         let heads = read.read_slot_copies(at, 4096.min(size as usize))?;
         for (copy, head) in heads.iter().enumerate() {
             let used = if head.starts_with(SPCHECK_SIGNATURE) {

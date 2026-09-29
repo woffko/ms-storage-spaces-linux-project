@@ -73,8 +73,11 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(new.body, body);
     assert!(frees.iter().all(|f| back.iter().all(|r| r.id != *f)));
     if grown > 0 && slots.is_multiple_of(64) {
-        // Whole pages of formatted slots read back as they are.
-        let again = Database::read_formatted(&MemDevice(db.bytes().to_vec()), 0).unwrap();
+        // Whole pages of formatted slots read back as they are (followed
+        // by more of the partition, as on a disk).
+        let mut disk = db.bytes().to_vec();
+        disk.resize(disk.len() + 4096, 0);
+        let again = Database::read_formatted(&MemDevice(disk), 0).unwrap();
         assert_eq!(again.bytes(), db.bytes());
     }
 });

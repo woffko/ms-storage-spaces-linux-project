@@ -399,7 +399,7 @@ rows of thin spaces not allocated yet (M7).
   mirror and parity (ublk) copies, and again read-only; mirrors are
   refused by dm read-write and dual parity by `--rw`, with the reason.
 
-### M7 (met, 2026-09-29)
+### M7 (exit criteria met, 2026-09-29)
 
 * Windows does not clear new slabs (`m7zero`), writes nothing but every
   member's pool database page and the data for an allocation (`m5thin`,
@@ -430,6 +430,22 @@ rows of thin spaces not allocated yet (M7).
 * Cache destaging on Linux: a cache holding data is destaged when a space
   is opened for writing, and single parity writes destage as the cache
   fills (M6).
+
+### Hardening of the write code (2026-09-29)
+
+* Fuzz targets for every encoder (pool database updates and growth,
+  cache and journal logs with checkpoints, dirty region log) check
+  decode(encode(x)) against models; `pool_write` opens every space of a
+  pool with patched metadata for writing, writes, discards and flushes,
+  and checks that no write leaves a member's pool partition (assembly
+  after torn or hostile metadata). It found one panic within minutes (a
+  user space claiming a range, as tiers do), fixed by refusing such
+  spaces; `tests/robustness.rs` does the same on stable in CI.
+* Security review of the write paths: `docs/security.md` (threat model,
+  findings: checkpoint sizes capped, NBD sockets owner-only, the range
+  panic above).
+* 24 h of fuzzing, all eight targets with four workers each: started
+  2026-09-29 14:11 (`pool_write` 14:41); results pending.
 
 ## Test infrastructure (continuous, feeds every stage)
 

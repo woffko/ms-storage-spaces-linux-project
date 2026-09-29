@@ -83,7 +83,12 @@ impl ParityJournal {
         }
         let copies = read.read_slot_copies(slot_offset, slot_size * slot_count)?;
         let merged = merge_slot_copies(&copies, slot_size);
-        let checkpoint_geometry = (le_u64(&head[0x40..]), le_u32(&head[0x48..]), le_u32(&head[0x4c..]));
+        let mut checkpoint_geometry = (le_u64(&head[0x40..]), le_u32(&head[0x48..]), le_u32(&head[0x4c..]));
+        // As for the cache: a geometry no real journal has (Windows: two
+        // areas of 125 MiB at 6 MiB) describes no usable checkpoints.
+        if checkpoint_geometry.0 > 1 << 56 || checkpoint_geometry.2 > 4 {
+            checkpoint_geometry.2 = 0;
+        }
         let (cp_offset, cp_size, cp_count) = checkpoint_geometry;
         let checkpoints = load_checkpoints(&mut read, owner, cp_offset, cp_size, cp_count)?;
         let checkpoint = checkpoints.iter().flatten().max_by_key(|c| c.sequence).cloned();
@@ -579,6 +584,22 @@ mod tests {
         })
         .unwrap()
         .unwrap()
+    }
+
+    /// Checkpoint areas at an offset near the end of the address space
+    /// (found by fuzzing: the offset of the second area overflowed) are
+    /// not used; the slots still are.
+    #[test]
+    fn checkpoint_areas_beyond_reach_are_ignored() {
+        let mut j = journal(&[(0x3000_0000, 1, Vec::new())]);
+        j[0x40..0x48].copy_from_slice(&(u64::MAX - 0x100).to_le_bytes());
+        j[0x48..0x4c].copy_from_slice(&0x1000u32.to_le_bytes());
+        j[0x4c..0x50].copy_from_slice(&2u32.to_le_bytes());
+        set_crc(&mut j[..0x60]);
+        let pj = load(&j);
+        assert_eq!(pj.checkpoint_geometry().2, 0);
+        assert!(pj.checkpoint.is_none());
+        assert_eq!(pj.runs.len(), 1);
     }
 
     /// The slot Windows wrote when the last stripes of a run became

@@ -11,7 +11,7 @@ other) file system inside mounts like on an ordinary disk. Written in Rust, from
 on-disk format that is checked against pools created by Windows.
 
 > **Status: pools created by Windows 11; reading, and writing to simple,
-> mirror and single parity spaces (`attach --rw`, new).** Pool management is
+> mirror and single parity spaces, fixed and thin (`attach --rw`, new).** Pool management is
 > planned (see [the plan](docs/plan.md)); ReFS will follow. The pool disks
 > are written only for spaces attached read-write.
 
@@ -32,8 +32,9 @@ on-disk format that is checked against pools created by Windows.
 | Pools after a crash or power loss | read; the few parity stripes or mirror rows left inconsistent by writes in flight are refused |
 | Pools created by Windows 11 24H2 (pool version 28) and Insider builds (version 29) | yes |
 | Pools created by Windows 8, 10 or Windows Server | not supported |
-| Writing simple, mirror and single parity spaces (fixed, or allocated rows of thin ones) | `attach --rw`; Windows reads the result back |
-| Writing dual parity, tiers, new rows of thin spaces, degraded pools | refused |
+| Writing simple, mirror and single parity spaces, fixed and thin | `attach --rw`; Windows reads the result back |
+| Thin spaces: rows allocated as they are written, discards (TRIM) give them back | `attach --rw` (256 MiB allocation units) |
+| Writing dual parity, tiers, degraded pools | refused |
 | Pool management, ReFS | not yet |
 
 ## Quick start
@@ -96,13 +97,18 @@ pools and pools after a crash, and `man contrib/man/spaces.8`.
 * On a Linux VM every pool goes through every backend (sequential, random,
   O_DIRECT and fio reads), and the NTFS pools are attached by udev and
   systemd and mounted with ntfs3 to compare every file.
-* The parsers are fuzzed with cargo-fuzz (`fuzz/`).
+* Writing is checked by replaying every crash state of the member writes
+  (each flush point and unordered unflushed writes), by fio with
+  verification through every backend, and by NTFS written on Linux that
+  Windows then attaches as healthy, with chkdsk clean and every file
+  intact, also after crashes and after TRIM.
+* The parsers and the write path are fuzzed with cargo-fuzz (`fuzz/`).
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `crates/storage-spaces` | library: metadata parsing, space layouts, reader |
+| `crates/storage-spaces` | library: metadata parsing, space layouts, reader and writer |
 | `crates/spaces-cli` | the `spaces` command and its block device backends |
 | `docs/` | format description, user guide, project plan, prior art |
 | `tools/` | test pool generators for the Windows VM, corpus and VM test scripts |
@@ -114,8 +120,8 @@ pools and pools after a crash, and `man contrib/man/spaces.8`.
 1. **Read-only** access that behaves like a normal disk (done for Windows 11
    pools).
 2. **Writes** to the exposed block devices, with Windows accepting the pool
-   afterwards (simple, mirror and single parity spaces done; thin
-   allocation and TRIM next).
+   afterwards (done: simple, mirror and single parity spaces, thin
+   allocation and TRIM).
 3. **Pool management**: creating, extending and repairing pools and spaces.
 
 ReFS support is planned as a separate track. Details in
