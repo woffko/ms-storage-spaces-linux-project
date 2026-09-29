@@ -189,6 +189,55 @@ impl<D: ReadAt> WriteAt for Overlay<D> {
     }
 }
 
+/// One write or flush that reached a member device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceEvent {
+    Write { device: usize, offset: u64, data: Vec<u8> },
+    Flush { device: usize },
+}
+
+/// A device that records its writes and flushes, in one order across all
+/// the devices sharing `log` (for replaying every state a crash could
+/// leave).
+pub struct Recorder<D> {
+    inner: D,
+    device: usize,
+    log: Arc<std::sync::Mutex<Vec<DeviceEvent>>>,
+}
+
+impl<D> Recorder<D> {
+    pub fn new(inner: D, device: usize, log: Arc<std::sync::Mutex<Vec<DeviceEvent>>>) -> Self {
+        Recorder { inner, device, log }
+    }
+}
+
+impl<D: ReadAt> ReadAt for Recorder<D> {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        self.inner.read_exact_at(buf, offset)
+    }
+    fn size(&self) -> io::Result<u64> {
+        self.inner.size()
+    }
+}
+
+impl<D: WriteAt> WriteAt for Recorder<D> {
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        self.log.lock().unwrap().push(DeviceEvent::Write {
+            device: self.device,
+            offset,
+            data: buf.to_vec(),
+        });
+        self.inner.write_all_at(buf, offset)
+    }
+    fn flush(&self) -> io::Result<()> {
+        self.log
+            .lock()
+            .unwrap()
+            .push(DeviceEvent::Flush { device: self.device });
+        self.inner.flush()
+    }
+}
+
 /// An in-memory device, mainly for tests.
 #[derive(Debug, Clone, Default)]
 pub struct MemDevice(pub Vec<u8>);
