@@ -9,6 +9,9 @@
 //! * slot area: `slot_count` log records of `slot_size` bytes ("SPSLOT\0\0").
 //!   Slots of type 0 map chunks of the owner space to cache blocks; other
 //!   types carry state that is not decoded yet.
+//! * checkpoint areas ("SPCHECK\0"): the whole chunk map as of a sequence,
+//!   written before the log overwrites slots newer than the last checkpoint
+//!   (see [`Checkpoint`]).
 //!
 //! Entries with block `0xffffffff` remove a chunk from the cache (written
 //! when the chunk is destaged).
@@ -19,7 +22,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::crc::crc32_excluding;
+use crate::crc::{crc32, crc32_excluding};
 use crate::error::{Result, format_err};
 use crate::guid::Guid;
 
@@ -121,13 +124,36 @@ pub(crate) fn valid_slots(area: &[u8], slot_size: usize) -> Vec<Slot> {
         .collect()
 }
 
+/// A write to the log of a cache: a slot, or a checkpoint (which must
+/// reach the disks after everything before it and before anything after
+/// it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogWrite {
+    /// Slot `index` of the slot area.
+    Slot(usize, Vec<u8>),
+    /// Checkpoint area `area`, from its start.
+    Checkpoint(usize, Vec<u8>),
+}
+
+impl LogWrite {
+    /// The slot index and page of a slot.
+    pub fn slot(&self) -> Option<(usize, &[u8])> {
+        match self {
+            LogWrite::Slot(i, page) => Some((*i, page)),
+            LogWrite::Checkpoint(..) => None,
+        }
+    }
+}
+
 /// How Windows logs writes into a write-back cache (the model the scenario
 /// tests check slot by slot): a new cache holds slot 0 of type 1; every
 /// write that changes which sectors of a chunk are cached gets the next slot
 /// with the next sequence and one mapping entry for each chunk it changes.
 /// A chunk entering the cache takes the next block (parity caches start at
 /// block 64, mirror caches at 0). A write into sectors already cached
-/// changes no slot.
+/// changes no slot. Before a slot newer than the last checkpoint is
+/// overwritten, a checkpoint of the whole map goes into the other
+/// checkpoint area with a sequence of its own ([`Checkpoint`]).
 #[derive(Debug, Clone)]
 pub struct CacheWriter {
     header: CacheHeader,
@@ -139,11 +165,17 @@ pub struct CacheWriter {
     chunks: std::collections::BTreeMap<u64, (u32, Vec<bool>)>,
     /// Slots written since the cache was last empty.
     slots_in_use: usize,
+    /// Sequence of the valid slot at each index (0: none).
+    slot_seq: Vec<u64>,
+    /// Sequence, area and next slot of the newest checkpoint.
+    checkpoint: Option<(u64, usize, usize)>,
 }
 
 impl CacheWriter {
     /// A new cache described by `header`, whose first block is `first_block`.
     pub fn new(header: CacheHeader, first_block: u32) -> Self {
+        // Slot 0 holds the type 1 record.
+        let slot_seq = (0..header.slot_count).map(|i| u64::from(i == 0)).collect();
         CacheWriter {
             header,
             next_slot: 1,
@@ -152,6 +184,8 @@ impl CacheWriter {
             first_block,
             chunks: Default::default(),
             slots_in_use: 0,
+            slot_seq,
+            checkpoint: None,
         }
     }
 
@@ -216,13 +250,14 @@ impl CacheWriter {
         let reserve = 2 * (self.chunks.len() + new as usize).div_ceil(200) + 2;
         self.slots_in_use + reserve + 2 >= self.header.slot_count as usize
             || self.next_block as u64 + new > self.header.chunk_count as u64
+            || (self.header.checkpoint_count > 0 && self.checkpoint_may_overflow(new))
     }
 
     /// Destaging `offsets` (owner offsets of cached chunks, whose data is in
     /// the space now): the slots with their entries of state 0 without a
     /// block, as Windows logs them. Once the cache is empty its blocks are
     /// handed out from the first again.
-    pub fn destage(&mut self, offsets: &[u64]) -> Vec<(usize, Vec<u8>)> {
+    pub fn destage(&mut self, offsets: &[u64]) -> Vec<LogWrite> {
         let chunk = self.header.chunk_size as u64;
         let capacity = (self.header.slot_size as usize).saturating_sub(0x38) / 16;
         let mut slots = Vec::new();
@@ -235,7 +270,7 @@ impl CacheWriter {
                 entries.extend_from_slice(&STATE_EMPTY.to_le_bytes());
                 entries.extend_from_slice(&0u16.to_le_bytes());
             }
-            slots.push(self.next(batch.len() as u32, &entries));
+            self.next(&mut slots, batch.len() as u32, &entries);
         }
         if self.chunks.is_empty() {
             self.next_block = self.first_block;
@@ -255,7 +290,7 @@ impl CacheWriter {
     /// writes (index and page), none if no chunk changes. A write whose
     /// entries do not fit into one slot continues in the next (where Windows
     /// ends a slot then is not modelled).
-    pub fn write(&mut self, offset: u64, len: u64) -> Vec<(usize, Vec<u8>)> {
+    pub fn write(&mut self, offset: u64, len: u64) -> Vec<LogWrite> {
         let chunk = self.header.chunk_size as u64;
         let sectors = (chunk / 512) as usize;
         let mut changed = Vec::new();
@@ -281,7 +316,7 @@ impl CacheWriter {
 
     /// Makes the cached chunks at owner offsets `offsets` wholly valid
     /// (their missing sectors are in their blocks now): the slots to write.
-    pub fn fill(&mut self, offsets: &[u64]) -> Vec<(usize, Vec<u8>)> {
+    pub fn fill(&mut self, offsets: &[u64]) -> Vec<LogWrite> {
         let chunk = self.header.chunk_size as u64;
         let mut changed = Vec::new();
         for &offset in offsets {
@@ -297,54 +332,98 @@ impl CacheWriter {
 
     /// Slots with one mapping entry for each of the chunks `keys`, as many
     /// entries per slot as fit.
-    fn log_chunks(&mut self, keys: &[u64]) -> Vec<(usize, Vec<u8>)> {
-        let chunk = self.header.chunk_size as u64;
+    fn log_chunks(&mut self, keys: &[u64]) -> Vec<LogWrite> {
         let capacity = (self.header.slot_size as usize).saturating_sub(0x38);
         let mut slots = Vec::new();
         let mut entries = Vec::new();
         let mut pos = 0;
         let mut count = 0;
         for &key in keys {
-            let (block, valid) = &self.chunks[&key];
-            let runs = runs_of(valid);
-            let full = runs.len() == 1;
-            let counted: u16 = if full { 0 } else { 2 * runs.len() as u16 };
-            let mut e = (key * chunk).to_le_bytes().to_vec();
-            e.extend_from_slice(&block.to_le_bytes());
-            e.extend_from_slice(&(if full { STATE_FULL } else { STATE_PARTIAL }).to_le_bytes());
-            e.extend_from_slice(&counted.to_le_bytes());
-            // The run words are always written, but counted only for a
-            // partly valid chunk; the next entry starts 8-byte aligned
-            // after the counted part and so overwrites the others.
-            for (v, n) in runs {
-                e.extend_from_slice(&((u16::from(v) << 15) | n as u16).to_le_bytes());
-            }
+            let (e, counted) = self.entry(key);
             if pos + e.len() > capacity && count > 0 {
                 entries.truncate(pos);
-                slots.push(self.next(count, &entries));
+                self.next(&mut slots, count, &entries);
                 (entries, pos, count) = (Vec::new(), 0, 0);
             }
             entries.truncate(pos);
             entries.resize(pos, 0);
             entries.extend_from_slice(&e);
-            pos = (pos + 16 + counted as usize).next_multiple_of(8);
+            pos = (pos + 16 + counted).next_multiple_of(8);
             count += 1;
         }
         if count > 0 {
-            slots.push(self.next(count, &entries));
+            self.next(&mut slots, count, &entries);
         }
         slots
     }
 
-    /// The next slot with `count` entries.
-    fn next(&mut self, count: u32, entries: &[u8]) -> (usize, Vec<u8>) {
-        self.sequence += 1;
-        self.slots_in_use += 1;
+    /// The mapping entry of cached chunk `key` and the length it counts:
+    /// state 3 for a whole chunk, else state 2 with the runs of valid
+    /// sectors. The run words are always written, but counted only for a
+    /// partly valid chunk; the next entry starts 8-byte aligned after the
+    /// counted part and so overwrites the others.
+    fn entry(&self, key: u64) -> (Vec<u8>, usize) {
+        let (block, valid) = &self.chunks[&key];
+        let runs = runs_of(valid);
+        let full = runs.len() == 1;
+        let counted = if full { 0 } else { 2 * runs.len() };
+        let mut e = (key * self.header.chunk_size as u64).to_le_bytes().to_vec();
+        e.extend_from_slice(&block.to_le_bytes());
+        e.extend_from_slice(&(if full { STATE_FULL } else { STATE_PARTIAL }).to_le_bytes());
+        e.extend_from_slice(&(counted as u16).to_le_bytes());
+        for (v, n) in runs {
+            e.extend_from_slice(&((u16::from(v) << 15) | n as u16).to_le_bytes());
+        }
+        (e, counted)
+    }
+
+    /// The entries of a checkpoint of the whole map, in offset order, and
+    /// their count.
+    fn checkpoint_entries(&self) -> (Vec<u8>, u32) {
+        let mut entries = Vec::new();
+        for &key in self.chunks.keys() {
+            let (e, counted) = self.entry(key);
+            let start = entries.len();
+            entries.extend_from_slice(&e);
+            entries.resize((start + 16 + counted).next_multiple_of(8), 0);
+        }
+        (entries, self.chunks.len() as u32)
+    }
+
+    /// Whether a checkpoint of the map with `new` more chunks (and every
+    /// chunk gaining runs) might not fit into a checkpoint area.
+    fn checkpoint_may_overflow(&self, new: u64) -> bool {
+        let (entries, count) = self.checkpoint_entries();
+        let bound = CHECKPOINT_ENTRIES as u64 + entries.len() as u64 + (u64::from(count) + new) * 24;
+        bound > u64::from(self.header.checkpoint_size)
+    }
+
+    /// Appends the next slot with `count` entries, after a checkpoint where
+    /// it would overwrite the slot the newest checkpoint continues at (the
+    /// log has come round to it).
+    fn next(&mut self, out: &mut Vec<LogWrite>, count: u32, entries: &[u8]) {
         let index = self.next_slot;
+        let (cp_seq, cp_area, cp_next) = self.checkpoint.unwrap_or((0, usize::MAX, 0));
+        let overwritten = self.slot_seq.get(index).copied().unwrap_or(0);
+        if index == cp_next && overwritten > cp_seq && self.header.checkpoint_count > 0 {
+            self.sequence += 1;
+            let area = cp_area.wrapping_add(1) % self.header.checkpoint_count as usize;
+            let (e, n) = self.checkpoint_entries();
+            out.push(LogWrite::Checkpoint(
+                area,
+                Checkpoint::encode(self.header.owner_guid, 1, self.sequence, index as u32, n, &e),
+            ));
+            self.checkpoint = Some((self.sequence, area, index));
+        }
+        self.sequence += 1;
+        if let Some(s) = self.slot_seq.get_mut(index) {
+            *s = self.sequence;
+        }
+        self.slots_in_use += 1;
         // Past the last slot the log continues at slot 0, over the type 1
         // record (m5wbc2).
         self.next_slot = (self.next_slot + 1) % self.header.slot_count.max(1) as usize;
-        (index, self.slot(0, self.sequence, count, entries))
+        out.push(LogWrite::Slot(index, self.slot(0, self.sequence, count, entries)));
     }
 
     fn slot(&self, kind: u32, sequence: u64, count: u32, entries: &[u8]) -> Vec<u8> {
@@ -407,6 +486,138 @@ pub(crate) fn slot_sequence(slot: &[u8]) -> Option<u64> {
     .then(|| le_u64(&slot[0x28..]))
 }
 
+pub const SPCHECK_SIGNATURE: &[u8; 8] = b"SPCHECK\0";
+const CHECKPOINT_HEADER: usize = 0x50;
+/// Where a checkpoint's entries start.
+const CHECKPOINT_ENTRIES: usize = 0x200;
+
+/// A checkpoint of the chunk map ("SPCHECK\0", in one of the checkpoint
+/// areas after the slot area): the owner GUID (mixed-endian), u32 1, u32
+/// 0x50 (header size), u32 kind (0 when attaching, 1 otherwise), CRC-32 of
+/// the header with its field zeroed, u64 sequence, u32 CRC-32 of the
+/// entries, u32 size used (0x200 plus the entries), u32 the slot the log
+/// continues at after the checkpoint, u32 0, u32 0x200 (where the entries
+/// start), u32 0, u32 bytes of entries, u32 entry count; the entries are
+/// encoded as in mapping slots (**verified**: parity4, lrc12, m5wbc2).
+///
+/// How Windows loads the log (**verified** with logs written from Linux
+/// and read back by Windows 11 24H2): it takes the newest checkpoint and
+/// replays the slots from the one the checkpoint names on, in slot order,
+/// while their sequences increase; without a checkpoint it replays from
+/// slot 0. So before the log comes round to that slot again, Windows writes
+/// a new checkpoint into the other area, with a sequence of its own (the
+/// sequence is a counter of slots and checkpoints): at the first wrap of a
+/// log (parity4, lrc12: before slot 0) or before the slot that followed the
+/// checkpoint written when the pool was attached (m5wbc2: 1028, before
+/// slot 2). A checkpoint holds the map as of its sequence (Windows includes
+/// the write that makes it wrap).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkpoint {
+    /// Which checkpoint area holds it.
+    pub area: usize,
+    pub kind: u32,
+    pub sequence: u64,
+    /// The slot the log continues at.
+    pub next_slot: u32,
+    pub count: u32,
+    /// The entries, encoded as in mapping slots.
+    pub entries: Vec<u8>,
+}
+
+impl Checkpoint {
+    /// The checkpoint in checkpoint area `area` (its bytes `b`), if it holds
+    /// a valid one of the space `owner`.
+    fn parse(area: usize, b: &[u8], owner: Guid) -> Option<Self> {
+        if b.len() < CHECKPOINT_ENTRIES
+            || &b[..8] != SPCHECK_SIGNATURE
+            || Guid::from_mixed_endian(b[8..24].try_into().unwrap()) != owner
+            || le_u32(&b[0x1c..]) as usize != CHECKPOINT_HEADER
+            || crc32_excluding(&b[..CHECKPOINT_HEADER], 0x24) != le_u32(&b[0x24..])
+        {
+            return None;
+        }
+        let start = le_u32(&b[0x40..]) as usize;
+        let len = le_u32(&b[0x48..]) as usize;
+        let entries = b.get(start..start.checked_add(len)?)?;
+        if le_u32(&b[0x34..]) as usize != start + len || crc32(entries) != le_u32(&b[0x30..]) {
+            return None;
+        }
+        Some(Checkpoint {
+            area,
+            kind: le_u32(&b[0x20..]),
+            sequence: le_u64(&b[0x28..]),
+            next_slot: le_u32(&b[0x38..]),
+            count: le_u32(&b[0x4c..]),
+            entries: entries.to_vec(),
+        })
+    }
+
+    /// The bytes of a checkpoint (header and entries, whole pages).
+    pub fn encode(owner: Guid, kind: u32, sequence: u64, next_slot: u32, count: u32, entries: &[u8]) -> Vec<u8> {
+        let used = CHECKPOINT_ENTRIES + entries.len();
+        let mut b = vec![0u8; used.next_multiple_of(4096)];
+        b[..8].copy_from_slice(SPCHECK_SIGNATURE);
+        b[8..24].copy_from_slice(&owner.to_mixed_endian());
+        b[0x18..0x1c].copy_from_slice(&1u32.to_le_bytes());
+        b[0x1c..0x20].copy_from_slice(&(CHECKPOINT_HEADER as u32).to_le_bytes());
+        b[0x20..0x24].copy_from_slice(&kind.to_le_bytes());
+        b[0x28..0x30].copy_from_slice(&sequence.to_le_bytes());
+        b[0x30..0x34].copy_from_slice(&crc32(entries).to_le_bytes());
+        b[0x34..0x38].copy_from_slice(&(used as u32).to_le_bytes());
+        b[0x38..0x3c].copy_from_slice(&next_slot.to_le_bytes());
+        b[0x40..0x44].copy_from_slice(&(CHECKPOINT_ENTRIES as u32).to_le_bytes());
+        b[0x48..0x4c].copy_from_slice(&(entries.len() as u32).to_le_bytes());
+        b[0x4c..0x50].copy_from_slice(&count.to_le_bytes());
+        b[CHECKPOINT_ENTRIES..used].copy_from_slice(entries);
+        let crc = crc32_excluding(&b[..CHECKPOINT_HEADER], 0x24);
+        b[0x24..0x28].copy_from_slice(&crc.to_le_bytes());
+        b
+    }
+}
+
+/// The newest valid checkpoint of `owner` in each copy of the `count`
+/// checkpoint areas of `size` bytes from `offset` (of a cache or parity
+/// journal space), reading only what each checkpoint uses.
+pub(crate) fn load_checkpoints(
+    read: &mut impl SlotSource,
+    owner: Guid,
+    offset: u64,
+    size: u32,
+    count: u32,
+) -> Result<Vec<Option<Checkpoint>>> {
+    let mut newest: Vec<Option<Checkpoint>> = Vec::new();
+    if count > 4 || (size as usize) < CHECKPOINT_ENTRIES {
+        return Ok(newest);
+    }
+    for area in 0..count as usize {
+        let at = offset + area as u64 * u64::from(size);
+        let heads = read.read_slot_copies(at, 4096.min(size as usize))?;
+        for (copy, head) in heads.iter().enumerate() {
+            let used = if head.starts_with(SPCHECK_SIGNATURE) {
+                le_u32(&head[0x34..]) as usize
+            } else {
+                0
+            };
+            let checkpoint = if used > head.len() && used <= size as usize {
+                read.read_slot_copies(at, used)?
+                    .get(copy)
+                    .and_then(|b| Checkpoint::parse(area, b, owner))
+            } else {
+                Checkpoint::parse(area, head, owner)
+            };
+            if newest.len() <= copy {
+                newest.resize(copy + 1, None);
+            }
+            if let Some(c) = checkpoint
+                && newest[copy].as_ref().is_none_or(|n| c.sequence > n.sequence)
+            {
+                newest[copy] = Some(c);
+            }
+        }
+    }
+    Ok(newest)
+}
+
 /// Block number of an entry that removes a chunk from the cache (destaged).
 const NO_BLOCK: u32 = u32::MAX;
 
@@ -417,6 +628,11 @@ pub struct CacheHeader {
     pub slot_offset: u64,
     pub slot_size: u32,
     pub slot_count: u32,
+    /// Checkpoint areas: where the first starts, the size of each and how
+    /// many there are (0 if the header does not describe usable ones).
+    pub checkpoint_offset: u64,
+    pub checkpoint_size: u32,
+    pub checkpoint_count: u32,
     pub data_offset: u64,
     pub chunk_size: u32,
     pub chunk_count: u32,
@@ -439,6 +655,9 @@ impl CacheHeader {
             slot_offset: le_u64(&b[0x30..]),
             slot_size: le_u32(&b[0x38..]),
             slot_count: le_u32(&b[0x3c..]),
+            checkpoint_offset: le_u64(&b[0x40..]),
+            checkpoint_size: le_u32(&b[0x48..]),
+            checkpoint_count: le_u32(&b[0x4c..]),
             data_offset: le_u64(&b[0x50..]),
             chunk_size: le_u32(&b[0x58..]),
             chunk_count: le_u32(&b[0x5c..]),
@@ -453,6 +672,13 @@ impl CacheHeader {
             || (h.chunk_size as u64) * (h.chunk_count as u64) > 1 << 56
         {
             return Err(format_err!("implausible cache geometry: {h:?}"));
+        }
+        let mut h = h;
+        if h.checkpoint_count > 4
+            || !(CHECKPOINT_ENTRIES as u32..=16 << 20).contains(&h.checkpoint_size)
+            || h.checkpoint_offset > 1 << 56
+        {
+            h.checkpoint_count = 0;
         }
         Ok(Some(h))
     }
@@ -487,19 +713,37 @@ pub struct CacheIndex {
     /// unclean shutdown): which one Windows keeps is not known.
     conflicts: HashSet<u64>,
     slots: Vec<Slot>,
+    checkpoint: Option<Checkpoint>,
 }
 
 impl CacheIndex {
-    /// Builds the index from the cache header and slot area. `read` reads
-    /// from the cache space; `unit` is the owner space interleave.
+    /// Builds the index from the cache header, the slot area and the
+    /// checkpoints. `read` reads from the cache space.
     pub fn load(header: CacheHeader, mut read: impl SlotSource) -> Result<Self> {
         let slot_size = header.slot_size as usize;
         let copies = read.read_slot_copies(header.slot_offset, slot_size * header.slot_count as usize)?;
         let merged = merge_slot_copies(&copies, slot_size);
-        let chunks = Self::map(&header, &merged)?;
+        let checkpoints = load_checkpoints(
+            &mut read,
+            header.owner_guid,
+            header.checkpoint_offset,
+            header.checkpoint_size,
+            header.checkpoint_count,
+        )?;
+        let checkpoint = checkpoints.iter().flatten().max_by_key(|c| c.sequence).cloned();
+        let chunks = Self::map(&header, &merged, checkpoint.as_ref())?;
         let mut conflicts = HashSet::new();
-        for copy in copies.iter().filter(|c| **c != merged) {
-            let other = Self::map(&header, copy)?;
+        for (i, copy) in copies.iter().enumerate() {
+            // Each copy with its own checkpoint, where the copies line up.
+            let own = if checkpoints.len() == copies.len() {
+                checkpoints[i].as_ref()
+            } else {
+                checkpoint.as_ref()
+            };
+            if *copy == merged && own == checkpoint.as_ref() {
+                continue;
+            }
+            let other = Self::map(&header, copy, own)?;
             for key in chunks.keys().chain(other.keys()) {
                 if chunks.get(key) != other.get(key) {
                     conflicts.insert(*key);
@@ -512,70 +756,39 @@ impl CacheIndex {
             chunks,
             conflicts,
             slots,
+            checkpoint,
         })
     }
 
-    /// The chunk mapping one version of the slot area describes.
-    fn map(header: &CacheHeader, area: &[u8]) -> Result<ChunkMap> {
-        let chunk = header.chunk_size as u64;
+    /// The chunk mapping one version of the slot area and checkpoint
+    /// describes, read as Windows does (see [`Checkpoint`]): the
+    /// checkpoint, then the slots from the one it names on while their
+    /// sequences increase (from slot 0 without a checkpoint).
+    fn map(header: &CacheHeader, area: &[u8], checkpoint: Option<&Checkpoint>) -> Result<ChunkMap> {
         let slot_size = header.slot_size as usize;
+        let valid = |slot: &[u8]| {
+            &slot[0..8] == SPSLOT_SIGNATURE
+                && Guid::from_mixed_endian(slot[8..24].try_into().unwrap()) == header.owner_guid
+                && le_u32(&slot[0x1c..]) as usize == slot_size
+                && crc32_excluding(slot, 0x24) == le_u32(&slot[0x24..])
+        };
+        let slots: Vec<&[u8]> = area.chunks_exact(slot_size).collect();
 
         // A mapping is current if it is the newest entry for its owner chunk
         // (a newer entry may be a tombstone written when the chunk was
         // destaged) and the newest assignment of its cache block (blocks are
-        // reused for other chunks). Entries are ordered by (slot sequence,
-        // position in the slot).
+        // reused for other chunks). Entries are ordered by (sequence,
+        // position in the slot or checkpoint).
         type Version = (u64, usize);
         let mut newest_for_chunk: HashMap<u64, (Version, Option<(u64, Validity)>)> = HashMap::new();
         let mut newest_for_block: HashMap<u64, Version> = HashMap::new();
-        for slot in area.chunks_exact(slot_size) {
-            if &slot[0..8] != SPSLOT_SIGNATURE
-                || Guid::from_mixed_endian(slot[8..24].try_into().unwrap()) != header.owner_guid
-                || le_u32(&slot[0x1c..]) as usize != slot_size
-                || crc32_excluding(slot, 0x24) != le_u32(&slot[0x24..])
-            {
-                continue; // unused, stale or torn slot
-            }
-            if le_u32(&slot[0x20..]) != SLOT_TYPE_MAPPING {
-                continue;
-            }
-            let sequence = le_u64(&slot[0x28..]);
-            let count = le_u32(&slot[0x30..]) as usize;
-            let mut pos = 0x38;
-            for index in 0..count {
-                let e = slot
-                    .get(pos..pos + 16)
-                    .ok_or_else(|| format_err!("cache slot with {count} entries overflows"))?;
-                let provisional = le_u64(e) & ENTRY_OFFSET_FLAG != 0;
-                let offset = le_u64(e) & !ENTRY_OFFSET_FLAG;
-                let block = le_u32(&e[8..]);
-                let state = u16::from_le_bytes([e[12], e[13]]);
-                // The high half is the length of the data that follows the
-                // entry, in bytes; the next entry starts 8-byte aligned.
-                let len = u16::from_le_bytes([e[14], e[15]]) as usize;
-                let extra = slot
-                    .get(pos + 16..pos + 16 + len)
-                    .ok_or_else(|| format_err!("cache entry overflows its slot"))?;
-                pos += 16 + len.next_multiple_of(8);
-                if !offset.is_multiple_of(chunk) {
-                    return Err(format_err!("bad cache entry: offset {offset:#x}"));
-                }
-                let validity = match state {
-                    STATE_EMPTY => Validity::Runs(Vec::new()),
-                    STATE_PARTIAL => Validity::Runs(parse_runs(extra, chunk)?),
-                    STATE_FULL => Validity::Full,
-                    other => return Err(crate::Error::Unsupported(format!("cache entry state {other}"))),
+        let mut apply = |sequence: u64, entries: &[u8], count: usize| -> Result<()> {
+            for (index, entry) in decode_entries(header, entries, count)?.into_iter().enumerate() {
+                let Some((offset, target)) = entry else {
+                    continue; // provisional
                 };
-                let target = match block {
-                    NO_BLOCK => None,
-                    b if (b as u64) < header.chunk_count as u64 => Some((b as u64, validity)),
-                    b => return Err(format_err!("bad cache entry: block {b}")),
-                };
-                if provisional {
-                    continue;
-                }
                 let version = (sequence, index);
-                let key = offset / chunk;
+                let key = offset / header.chunk_size as u64;
                 if let Some((b, _)) = &target
                     && newest_for_block.get(b).is_none_or(|&v| version > v)
                 {
@@ -585,6 +798,25 @@ impl CacheIndex {
                     newest_for_chunk.insert(key, (version, target));
                 }
             }
+            Ok(())
+        };
+        let (mut last, start) = match checkpoint {
+            Some(c) => {
+                apply(c.sequence, &c.entries, c.count as usize)?;
+                (c.sequence, c.next_slot as usize)
+            }
+            None => (0, 0),
+        };
+        for k in 0..slots.len() {
+            let slot = slots[(start + k) % slots.len()];
+            let sequence = le_u64(&slot[0x28..]);
+            if !valid(slot) || sequence <= last {
+                break; // the end of the log
+            }
+            last = sequence;
+            if le_u32(&slot[0x20..]) == SLOT_TYPE_MAPPING {
+                apply(sequence, &slot[0x38..], le_u32(&slot[0x30..]) as usize)?;
+            }
         }
         Ok(newest_for_chunk
             .into_iter()
@@ -593,6 +825,11 @@ impl CacheIndex {
                 (newest_for_block.get(&block) == Some(&version)).then_some((key, (block, valid)))
             })
             .collect())
+    }
+
+    /// The newest valid checkpoint.
+    pub fn checkpoint(&self) -> Option<&Checkpoint> {
+        self.checkpoint.as_ref()
     }
 
     /// Whether the copies of the cache disagree about the chunk holding
@@ -623,7 +860,24 @@ impl CacheIndex {
         let mut w = CacheWriter::new(self.header.clone(), first_block);
         w.next_slot = 0;
         w.sequence = 0;
-        if let Some(newest) = self.slots.iter().max_by_key(|s| s.sequence) {
+        w.slot_seq.fill(0);
+        w.checkpoint = self
+            .checkpoint
+            .as_ref()
+            .map(|c| (c.sequence, c.area, c.next_slot as usize));
+        for s in &self.slots {
+            if let Some(v) = w.slot_seq.get_mut(s.index) {
+                *v = s.sequence;
+            }
+        }
+        // A checkpoint newer than every slot continues at the slot it names.
+        if let Some(c) = &self.checkpoint {
+            w.sequence = c.sequence;
+            w.next_slot = c.next_slot as usize % self.header.slot_count.max(1) as usize;
+        }
+        if let Some(newest) = self.slots.iter().max_by_key(|s| s.sequence)
+            && newest.sequence > w.sequence
+        {
             w.sequence = newest.sequence;
             w.next_slot = (newest.index + 1) % self.header.slot_count.max(1) as usize;
         }
@@ -686,6 +940,49 @@ impl CacheIndex {
     }
 }
 
+/// The entries of a mapping slot or checkpoint (`count` of them, encoded
+/// from the start of `bytes`): owner offset and block with the valid part,
+/// or no block for a tombstone; `None` for a provisional entry.
+type Entry = Option<(u64, Option<(u64, Validity)>)>;
+
+fn decode_entries(header: &CacheHeader, bytes: &[u8], count: usize) -> Result<Vec<Entry>> {
+    let chunk = header.chunk_size as u64;
+    let mut out = Vec::with_capacity(count.min(4096));
+    let mut pos = 0;
+    for _ in 0..count {
+        let e = bytes
+            .get(pos..pos + 16)
+            .ok_or_else(|| format_err!("cache slot with {count} entries overflows"))?;
+        let provisional = le_u64(e) & ENTRY_OFFSET_FLAG != 0;
+        let offset = le_u64(e) & !ENTRY_OFFSET_FLAG;
+        let block = le_u32(&e[8..]);
+        let state = u16::from_le_bytes([e[12], e[13]]);
+        // The high half is the length of the data that follows the entry,
+        // in bytes; the next entry starts 8-byte aligned.
+        let len = u16::from_le_bytes([e[14], e[15]]) as usize;
+        let extra = bytes
+            .get(pos + 16..pos + 16 + len)
+            .ok_or_else(|| format_err!("cache entry overflows its slot"))?;
+        pos += 16 + len.next_multiple_of(8);
+        if !offset.is_multiple_of(chunk) {
+            return Err(format_err!("bad cache entry: offset {offset:#x}"));
+        }
+        let validity = match state {
+            STATE_EMPTY => Validity::Runs(Vec::new()),
+            STATE_PARTIAL => Validity::Runs(parse_runs(extra, chunk)?),
+            STATE_FULL => Validity::Full,
+            other => return Err(crate::Error::Unsupported(format!("cache entry state {other}"))),
+        };
+        let target = match block {
+            NO_BLOCK => None,
+            b if (b as u64) < header.chunk_count as u64 => Some((b as u64, validity)),
+            b => return Err(format_err!("bad cache entry: block {b}")),
+        };
+        out.push((!provisional).then_some((offset, target)));
+    }
+    Ok(out)
+}
+
 fn le_u32(b: &[u8]) -> u32 {
     u32::from_le_bytes(b[..4].try_into().unwrap())
 }
@@ -734,6 +1031,9 @@ mod tests {
             slot_offset: 0,
             slot_size: 0x1000,
             slot_count: 4,
+            checkpoint_offset: 0,
+            checkpoint_size: 0,
+            checkpoint_count: 0,
             data_offset: 0x10_0000,
             chunk_size: CHUNK as u32,
             chunk_count: 16,
@@ -796,6 +1096,9 @@ mod tests {
             slot_offset: 0,
             slot_size: 0x38 + 2 * 16 + 8,
             slot_count: 8,
+            checkpoint_offset: 0,
+            checkpoint_size: 0,
+            checkpoint_count: 0,
             data_offset: 1 << 20,
             chunk_size: 64 << 10,
             chunk_count: 100,
@@ -805,7 +1108,11 @@ mod tests {
         let mut area = vec![0u8; 8 * slot];
         area[..slot].copy_from_slice(&w.init_slot());
         // Five whole chunks: two entries fit into a slot.
-        let slots = w.write(0, 5 * (64 << 10));
+        let slots: Vec<(usize, Vec<u8>)> = w
+            .write(0, 5 * (64 << 10))
+            .iter()
+            .map(|r| r.slot().map(|(i, p)| (i, p.to_vec())).unwrap())
+            .collect();
         assert_eq!(slots.iter().map(|s| s.0).collect::<Vec<_>>(), [1, 2, 3]);
         for (i, page) in slots {
             area[i * slot..(i + 1) * slot].copy_from_slice(&page);
@@ -821,6 +1128,73 @@ mod tests {
             );
         }
         assert!(matches!(index.lookup(5 * (64 << 10)), Lookup::Miss { .. }));
+    }
+
+    /// m5wbc2's log as the model continues it: attached with a checkpoint
+    /// of sequence 3 that continues at slot 2 (s3), the log wraps after
+    /// slot 1023 (sequence 1025); slots 0 and 1 take 1026 and 1027, and
+    /// before slot 2 comes round a checkpoint of sequence 1028 goes into
+    /// the second area, then slot 2 takes 1029, as Windows wrote them (s4,
+    /// up to slot 490 at 1517).
+    #[test]
+    fn the_log_writes_a_checkpoint_where_the_last_one_continues() {
+        use crate::io::SparseImage;
+        use crate::pool::Pool;
+        use std::fs::File;
+        use std::path::Path;
+        let index = |label: &str| {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/scenarios/m5wbc2")
+                .join(label);
+            let disks: Vec<SparseImage> = (0..3)
+                .map(|i| SparseImage::read_from(File::open(dir.join(format!("disk{i}.fixture"))).unwrap()).unwrap())
+                .collect();
+            let pool = Pool::open(disks).unwrap();
+            let space = pool.user_spaces().next().unwrap();
+            pool.open_space(space.id()).unwrap().cache().unwrap().clone()
+        };
+        let (s3, s4) = (index("s3"), index("s4"));
+        let c = s3.checkpoint().unwrap();
+        assert_eq!((c.sequence, c.area, c.kind, c.next_slot, c.count), (3, 0, 0, 2, 1));
+        let mut w = s3.writer(64);
+        // The rest of the first lap as Windows wrote it.
+        let first_lap: Vec<u64> = s4
+            .slots()
+            .iter()
+            .filter(|s| s.index > 490)
+            .map(|s| s.sequence)
+            .collect();
+        assert_eq!(first_lap[0], 493);
+        for (i, seq) in (3..1024).zip(5..) {
+            w.slot_seq[i] = seq;
+        }
+        (w.sequence, w.next_slot) = (1025, 0);
+        let mut records = Vec::new();
+        for _ in 0..491 {
+            w.next(&mut records, 0, &[]);
+        }
+        let windows: Vec<(usize, u64)> = s4
+            .slots()
+            .iter()
+            .filter(|s| s.index <= 490)
+            .map(|s| (s.index, s.sequence))
+            .collect();
+        let ours: Vec<(usize, u64)> = records
+            .iter()
+            .filter_map(|r| r.slot())
+            .map(|(i, page)| (i, u64::from_le_bytes(page[0x28..0x30].try_into().unwrap())))
+            .collect();
+        assert_eq!(ours, windows);
+        let checkpoints: Vec<usize> = records
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r, LogWrite::Checkpoint(1, _)))
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(checkpoints, [2]);
+        let c = s4.checkpoint().unwrap();
+        assert_eq!((c.sequence, c.area, c.next_slot), (1028, 1, 2));
+        assert_eq!(w.checkpoint.map(|c| (c.0, c.1, c.2)), Some((1028, 1, 2)));
     }
 
     /// A slot of tombstones Windows wrote when it destaged (m5wbc2, its
@@ -868,14 +1242,28 @@ mod tests {
         let mut w = cache.writer(64);
         w.next_slot = slot.index;
         w.sequence = slot.sequence - 1;
+        // The writer continues from the checkpoint Windows wrote when the
+        // log wrapped, which does not come due in this slot.
+        let checkpoint = cache.checkpoint().unwrap();
+        assert_eq!(
+            (
+                checkpoint.sequence,
+                checkpoint.area,
+                checkpoint.kind,
+                checkpoint.next_slot,
+                checkpoint.count
+            ),
+            (1028, 1, 1, 2, 479)
+        );
+        assert_eq!(w.checkpoint, Some((1028, 1, 2)));
         let chunk = cache.header.chunk_size as u64;
         for &o in &offsets {
             w.chunks.insert(o / chunk, (0, vec![true; (chunk / 512) as usize]));
         }
         let written = w.destage(&offsets);
         assert_eq!(written.len(), 1);
-        assert_eq!(written[0].0, slot.index);
-        let page = &written[0].1;
+        let (index, page) = written[0].slot().unwrap();
+        assert_eq!(index, slot.index);
         let end = page.iter().rposition(|&b| b != 0).unwrap() + 1;
         let ours = &page[0x20..end];
         let first = ours.iter().zip(&slot.content).position(|(a, b)| a != b);

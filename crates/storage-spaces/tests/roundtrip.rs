@@ -193,3 +193,26 @@ fn in_place_parity_writes_leave_windows_a_stale_stripe_after_a_crash() {
     assert_eq!(e["repaired"][0][1], "Healthy");
     assert!(e["after_windows"].as_str().unwrap().contains("still inconsistent"));
 }
+
+/// Cache logs written from Linux and read by Windows (the rule the reader
+/// and CacheWriter follow, see cache::Checkpoint): without a checkpoint
+/// Windows reads a wrapped log from slot 0 only and loses every chunk mapped
+/// before it; a checkpoint naming the wrong slot to continue at loses the
+/// slots in between; with the checkpoint Windows itself writes, every chunk
+/// is read from the cache. NTFS written through the cache before the fix
+/// lost 7 files this way.
+#[test]
+fn windows_reads_a_wrapped_cache_log_from_its_checkpoint() {
+    let e = evidence("rw-cache-log.json");
+    let runs = e["runs"].as_array().unwrap();
+    let cached = |i: usize, set: &str| runs[i]["windows_reads_cached"][set].as_u64().unwrap();
+    for i in [0, 1] {
+        assert_eq!((cached(i, "B"), cached(i, "F"), cached(i, "E")), (0, 0, 30));
+    }
+    assert_eq!((cached(2, "F"), cached(2, "E")), (921, 29));
+    assert_eq!(runs[2]["windows_reads_space"]["E"], 1);
+    for (set, n) in [("A", 50), ("B", 50), ("F", 921), ("E", 30)] {
+        assert_eq!(cached(3, set), n, "{set}");
+    }
+    assert_eq!(e["ntfs_before_the_fix"]["mismatching"], 7);
+}

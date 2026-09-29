@@ -118,9 +118,11 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
-    /// Serve a space read-only over NBD on a Unix socket (foreground).
+    /// Serve a space over NBD on a Unix socket, read-only unless --rw
+    /// (foreground; SIGINT/SIGTERM flush and stop it).
     ///
-    /// Attach it with `nbd-client -unix SOCKET /dev/nbdN -b SECTOR -readonly`.
+    /// Attach it with `nbd-client -unix SOCKET /dev/nbdN -b SECTOR -readonly`
+    /// (without `-readonly` for --rw).
     ServeNbd {
         #[arg(required = true)]
         devices: Vec<PathBuf>,
@@ -136,8 +138,9 @@ enum Command {
         #[arg(long)]
         ready_file: Option<PathBuf>,
     },
-    /// Expose a space read-only as a ublk block device (foreground; stop with
-    /// SIGINT/SIGTERM). Needs root and the ublk_drv kernel module.
+    /// Expose a space as a ublk block device, read-only unless --rw
+    /// (foreground; stop with SIGINT/SIGTERM). Needs root and the ublk_drv
+    /// kernel module.
     #[cfg(all(target_os = "linux", feature = "ublk"))]
     ServeUblk {
         #[arg(required = true)]
@@ -955,7 +958,23 @@ fn serve_nbd(
     if let Some(path) = ready_file {
         std::fs::write(path, socket.display().to_string())?;
     }
+    // SIGINT/SIGTERM: what was written becomes durable before the process
+    // ends (the log slots of cached writes wait for a flush).
+    let mut signals = signal_hook::iterator::Signals::new([signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM])?;
     std::thread::scope(|scope| {
+        let writer = writer.as_ref();
+        scope.spawn(move || {
+            if signals.forever().next().is_some() {
+                let code = match writer.map_or(Ok(()), |w| w.flush()) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        eprintln!("flush failed: {e}");
+                        1
+                    }
+                };
+                std::process::exit(code);
+            }
+        });
         for conn in listener.incoming() {
             let conn = conn?;
             let export = &export;

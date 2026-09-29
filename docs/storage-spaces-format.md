@@ -357,7 +357,9 @@ The cache space starts with a header:
 | 0x30 | 8 | slot area offset (0x2000) |
 | 0x38 | 4 | slot size (0x1000) |
 | 0x3c | 4 | slot count (0x400) |
-| 0x40 | 8 | unknown (end of slot area) |
+| 0x40 | 8 | offset of the first checkpoint area (just after the slot area) |
+| 0x48 | 4 | size of a checkpoint area (0x46000-0x60000 seen) |
+| 0x4c | 4 | number of checkpoint areas (2) |
 | 0x50 | 8 | data area offset |
 | 0x58 | 4 | chunk size = owner full data stripe (data columns x interleave) |
 | 0x5c | 4 | number of chunks in the data area |
@@ -401,19 +403,51 @@ chunks mapped differently are refused, and parity stripes that any version
 leaves inconsistent are checked against their parity (`--unclean-parity
 data` reads the newest version instead).
 
-Log order (**verified** as far as reads go: the newest-entry rule reproduces
-the pattern of every corpus pool, including fully wrapped logs in `parity4`
-and `lrc12`, and the content Windows showed after the crash experiments):
-nothing on disk marks a head or a tail. The header is written once (its
-sequence stays 1 while mapping slots reach thousands), so the current state
-is the newest entry per chunk and per cache block over all valid slots.
-Slot placement is not a plain ring: in `wc64` slots 0-61 hold sequences
-1-62 and slots 62-97 sequences 127-162, so the log restarted at slot 62 and
-the slots after 97 were cleared. Caches of mirror and parity spaces start
-with a type 1 slot in slot 0 (sequence 1, one 8-byte entry
-`08 00 00 00 01 00 00 00` in every pool seen: `mirrorthin`, `paritythin`,
-`crashmirror`, `crashparity`), written when the cache is initialised; their
-mapping slots start at sequence 2. It carries no mappings and is skipped.
+Checkpoints ("SPCHECK\0", LE) hold the whole chunk map as of a sequence, in
+one of the checkpoint areas after the slot area (**verified**: `parity4`,
+`lrc12`, `m5wbc2`; pools whose log never wrapped have none):
+
+| Offset | Size | Field |
+|---|---|---|
+| 0x00 | 8 | "SPCHECK\0" |
+| 0x08 | 16 | owner space GUID (mixed-endian) |
+| 0x18 | 4 | 1 |
+| 0x1c | 4 | header size (0x50) |
+| 0x20 | 4 | 0 when written at an attach, 1 otherwise |
+| 0x24 | 4 | CRC-32 of the header (0x50 bytes) with this field zeroed |
+| 0x28 | 8 | sequence (from the counter the slots use) |
+| 0x30 | 4 | CRC-32 of the entries |
+| 0x34 | 4 | bytes used: 0x200 + entries |
+| 0x38 | 4 | the slot the log continues at after the checkpoint |
+| 0x40 | 4 | offset of the entries (0x200) |
+| 0x48 | 4 | bytes of entries |
+| 0x4c | 4 | number of entries |
+| 0x200 | … | entries, encoded as in mapping slots |
+
+Log order (**verified** with logs written from Linux and read back by
+Windows 11 24H2, see `rw-cache-log.json`; the rule also reproduces every
+corpus pool): Windows takes the newest valid checkpoint and replays the
+slots from the one the checkpoint names at 0x38, in slot order (wrapping
+after the last), as long as their sequences keep increasing; without a
+checkpoint it replays from slot 0. Entries are then ordered by (sequence,
+position). A log that wrapped without a checkpoint loses everything before
+slot 0: Windows ignored 921 chunks mapped by such slots and read 30 mapped
+after the wrap. A checkpoint that named the wrong slot (2 instead of 0)
+lost the chunk mapped by slot 1. So before the log comes round to the slot
+the newest checkpoint names, Windows writes a new one into the other area,
+with a sequence of its own (the "skipped" sequences): at the first wrap
+(`parity4`, `lrc12`: before slot 0) or before the slot that followed the
+checkpoint written at an attach (`m5wbc2`: sequence 3 at the attach,
+continuing at slot 2; after the wrap slots 0 and 1 took 1026 and 1027, the
+checkpoint 1028, slot 2 1029). Its map includes the write that made the log
+wrap, which the next slot logs once more. The header is written once (its
+sequence stays 1). In `wc64` slots 0-61 hold sequences 1-62 and slots 62-97
+sequences 127-162 and the slots after 97 were cleared, without a
+checkpoint. Caches of mirror and parity spaces start with a type 1 slot in
+slot 0 (sequence 1, one 8-byte entry `08 00 00 00 01 00 00 00` in every pool
+seen: `mirrorthin`, `paritythin`, `crashmirror`, `crashparity`), written
+when the cache is initialised; their mapping slots start at sequence 2. It
+carries no mappings and is skipped.
 
 Data of owner offset `X` held in the cache is at cache offset
 `data_offset + chunk_index * chunk_size + (X % chunk_size)`.
@@ -463,9 +497,13 @@ it):
   block `0xffffffff`, in batches of up to 244 entries per slot. Blocks go
   onwards; a block freed right after it was handed out goes to the next
   chunk. Neither a disconnect nor two and a half or five minutes of idle
-  time destaged anything; attaching wrote a new type 1 slot at the next
-  position. Sequence numbers can skip one (at the attach, and once in the
-  second lap).
+  time destaged anything; attaching wrote a checkpoint and a new type 1
+  slot at the next position. The sequence numbers the slots skip are those
+  of the checkpoints (at the attach, and once in the second lap).
+* Checkpoints as described above (**verified** byte for byte against
+  `m5wbc2` by the test `the_log_writes_a_checkpoint_where_the_last_one_continues`:
+  the sequences of slots 0-490 of the second lap and the checkpoint before
+  slot 2).
 * Not modelled: how Windows groups the entries of concurrent writes into
   slots (the corpus shows 244 and 248 entries per slot), and when exactly a
   flush starts.
@@ -554,7 +592,14 @@ every copy in a listed run and refuses rows whose copies differ
 
 Parity spaces have a hidden role 0x0a child holding "SPVDT\0\0\0", with the
 same header and slot geometry as SPCACHE (CRC-32 fields, owner GUID,
-`slot_offset`, `slot_size`, `slot_count`). Mapping slots (type 0) hold
+`slot_offset`, `slot_size`, `slot_count`), then at 0x40 the checkpoint
+area offset (0x600000), at 0x48 the size of each area (125 MiB) and at
+0x4c their number (2), at 0x50 the owner's size and at 0x58 its stripe
+size (data columns x interleave), then u32 1. The log wraps behind
+checkpoints exactly like the cache's (**verified**: `parity4` and `lrc12`
+hold journal checkpoints of sequences 1025 and 2050, continuing at slot 0,
+with one entry per run; pools whose journal never wrapped have none), and
+`spaces` reads and writes it by the same rule. Mapping slots (type 0) hold
 entries keyed by the owner offset where an extent run starts:
 
 | Offset | Size | Field |

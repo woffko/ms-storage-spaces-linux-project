@@ -450,8 +450,9 @@ fn cache_log_follows_the_writes() {
                 "write" => {
                     let offset = a[2].parse::<u64>().unwrap() * 1024;
                     let len = a[3].parse::<u64>().unwrap() * 1024;
-                    for (index, page) in writer.write(offset, len) {
-                        expected.push((index, content(&page)));
+                    for record in writer.write(offset, len) {
+                        let (index, page) = record.slot().expect("no checkpoint before the log wraps");
+                        expected.push((index, content(page)));
                     }
                 }
                 "snap" => {
@@ -496,11 +497,13 @@ fn parity_journal_logs_whole_stripe_writes() {
                 while at < offset + len {
                     let n = (offset + len - at).min(1 << 20);
                     if at % stripe == 0 && n % stripe == 0 {
-                        let (i, page) = journal.write(0, stripes, at / stripe, n / stripe);
-                        journal_slots.push((i, content(&page)));
+                        let records = journal.write(0, stripes, at / stripe, n / stripe);
+                        let (i, page) = records[0].slot().expect("no checkpoint before the log wraps");
+                        journal_slots.push((i, content(page)));
                     } else {
-                        for (i, page) in cache.write(at, n) {
-                            cached.push((i, content(&page)));
+                        for record in cache.write(at, n) {
+                            let (i, page) = record.slot().expect("no checkpoint before the log wraps");
+                            cached.push((i, content(page)));
                         }
                     }
                     at += n;

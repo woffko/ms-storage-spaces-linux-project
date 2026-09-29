@@ -7,6 +7,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use storage_spaces::Guid;
+use storage_spaces::cache::LogWrite;
 use storage_spaces::journal::{JournalWriter, ParityJournal};
 
 const OWNER: [u8; 16] = [9; 16];
@@ -68,25 +69,42 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
-/// Up to 8 writes into a run of 40000 stripes (so that runs of stripes
-/// longer than a run word can hold occur), logged by the model.
+/// Up to 100 writes into a run of 40000 stripes (so that runs of stripes
+/// longer than a run word can hold occur), logged by the model into 32
+/// slots with two checkpoint areas, so that the log wraps behind
+/// checkpoints; loading it must give the stripes written as consistent.
 fn model_round_trip(data: &[u8], owner: Guid) {
     const STRIPES: u64 = 40000;
     const SLOT: usize = 0x2000;
-    let mut journal = JournalWriter::new(owner, SLOT as u32, 32);
-    let mut space = vec![0u8; 0x60 + 32 * SLOT];
+    const CP: usize = 0x2000;
+    let cp_offset = 0x60 + 32 * SLOT;
+    let mut journal = JournalWriter::new(owner, SLOT as u32, 32).with_checkpoint_areas(2);
+    let mut space = vec![0u8; cp_offset + 2 * CP];
     space[0..8].copy_from_slice(b"SPVDT\0\0\0");
     space[8..24].copy_from_slice(&owner.to_mixed_endian());
     space[0x30..0x38].copy_from_slice(&0x60u64.to_le_bytes());
     space[0x38..0x3c].copy_from_slice(&(SLOT as u32).to_le_bytes());
     space[0x3c..0x40].copy_from_slice(&32u32.to_le_bytes());
+    space[0x40..0x48].copy_from_slice(&(cp_offset as u64).to_le_bytes());
+    space[0x48..0x4c].copy_from_slice(&(CP as u32).to_le_bytes());
+    space[0x4c..0x50].copy_from_slice(&2u32.to_le_bytes());
     set_crc(&mut space[..0x60], 0x24);
     let mut written = vec![false; STRIPES as usize];
-    for w in data.chunks_exact(6).take(8) {
+    for w in data.chunks_exact(6).take(100) {
         let first = u64::from(u32::from_le_bytes(w[..4].try_into().unwrap())) % STRIPES;
         let count = (u64::from(u16::from_le_bytes([w[4], w[5]])) + 1).min(STRIPES - first);
-        let (index, page) = journal.write(0, STRIPES, first, count);
-        space[0x60 + index * SLOT..0x60 + (index + 1) * SLOT].copy_from_slice(&page);
+        for record in journal.write(0, STRIPES, first, count) {
+            match record {
+                LogWrite::Slot(index, page) => {
+                    space[0x60 + index * SLOT..0x60 + (index + 1) * SLOT].copy_from_slice(&page)
+                }
+                LogWrite::Checkpoint(area, page) => {
+                    let at = cp_offset + area * CP;
+                    let n = page.len().min(CP);
+                    space[at..at + n].copy_from_slice(&page[..n]);
+                }
+            }
+        }
         written[first as usize..(first + count) as usize].fill(true);
     }
     if !written.contains(&true) {

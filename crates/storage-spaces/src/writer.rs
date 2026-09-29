@@ -25,7 +25,10 @@
 //! so a stripe recorded as consistent is never rewritten while its new
 //! content exists nowhere else. A cached write puts its data into the
 //! chunk's cache block (a chunk is one stripe); the log slots that map new
-//! sectors are written at the next flush, once that data is durable. When
+//! sectors are written at the next flush, once that data is durable, with a
+//! checkpoint of the whole map before the log comes round to the slot the
+//! last checkpoint continues at (flushed after everything before it and
+//! before anything after it, see `cache::Checkpoint`). When
 //! the log or the blocks run out, every cached chunk is destaged: chunks
 //! with sectors missing are made whole in the cache first (the rest of the
 //! stripe is read from the space and logged), then written as whole stripes
@@ -39,7 +42,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use crate::cache::CacheWriter;
+use crate::cache::{CacheWriter, LogWrite};
 use crate::drt::DrtWriter;
 use crate::error::{Error, Result};
 use crate::format::{Resiliency, SLAB_SIZE, SpaceRole};
@@ -64,12 +67,19 @@ pub struct SpaceWriter<'p, D> {
     cache: Option<CacheState>,
 }
 
-/// The parity journal of a parity space being written.
-struct JournalState {
-    /// Layout of the journal space.
+/// Where the log of a write-back cache or parity journal lives: the layout
+/// of its space, its slots and its checkpoint areas.
+struct LogArea {
     layout: Layout,
     slot_offset: u64,
     slot_size: u64,
+    checkpoint_offset: u64,
+    checkpoint_size: u64,
+}
+
+/// The parity journal of a parity space being written.
+struct JournalState {
+    area: LogArea,
     writer: Mutex<JournalWriter>,
 }
 
@@ -83,10 +93,8 @@ struct DrtState {
 
 /// The write-back cache of a space being written.
 struct CacheState {
-    /// Layout of the cache space.
-    layout: Layout,
-    slot_offset: u64,
-    slot_size: u64,
+    /// The cache space (its layout also locates the data blocks).
+    area: LogArea,
     /// Held for writing by every write of a parity space and while
     /// destaging, for reading by reads (a cache block may be handed to
     /// another chunk once its chunk is destaged).
@@ -95,9 +103,9 @@ struct CacheState {
 
 struct CacheLog {
     writer: CacheWriter,
-    /// Slots of cached writes whose data may not be durable yet, written
-    /// at the next flush.
-    pending: Vec<(usize, Vec<u8>)>,
+    /// Log writes of cached writes whose data may not be durable yet,
+    /// written at the next flush.
+    pending: Vec<LogWrite>,
 }
 
 impl<'p, D: WriteAt> SpaceWriter<'p, D> {
@@ -142,9 +150,13 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
                 let (jlayout, _) = Self::child_space(pool, id, SpaceRole::Other(0x0a))?;
                 let (slot_offset, slot_size, _) = pj.geometry();
                 journal = Some(JournalState {
-                    slot_offset: jlayout.base + slot_offset,
-                    layout: jlayout,
-                    slot_size: slot_size as u64,
+                    area: LogArea {
+                        slot_offset: jlayout.base + slot_offset,
+                        slot_size: slot_size as u64,
+                        checkpoint_offset: jlayout.base + pj.checkpoint_geometry().0,
+                        checkpoint_size: pj.checkpoint_geometry().1 as u64,
+                        layout: jlayout,
+                    },
                     writer: Mutex::new(pj.writer(reader.space.info.guid)),
                 });
             }
@@ -170,13 +182,20 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
                          (allocation is not supported yet)"
                     ));
                 }
+                if index.header.checkpoint_count == 0 {
+                    return refuse("its write-back cache has no checkpoint areas".into());
+                }
                 let (clayout, _) = Self::child_space(pool, id, SpaceRole::Cache)?;
                 // Parity caches hand out blocks from 64, mirror caches from 0.
                 let first_block = if journal.is_some() { 64 } else { 0 };
                 cache = Some(CacheState {
-                    layout: clayout,
-                    slot_offset: index.header.slot_offset,
-                    slot_size: index.header.slot_size as u64,
+                    area: LogArea {
+                        layout: clayout,
+                        slot_offset: index.header.slot_offset,
+                        slot_size: index.header.slot_size as u64,
+                        checkpoint_offset: index.header.checkpoint_offset,
+                        checkpoint_size: index.header.checkpoint_size as u64,
+                    },
                     log: RwLock::new(CacheLog {
                         writer: index.writer(first_block),
                         pending: Vec::new(),
@@ -261,7 +280,7 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
     /// Reads from the cache space (its first copy at hand).
     fn read_cache(&self, cache: &CacheState, mut offset: u64, mut buf: &mut [u8]) -> Result<()> {
         let pool = self.reader.pool();
-        let layout = &cache.layout;
+        let layout = &cache.area.layout;
         while !buf.is_empty() {
             let loc = layout.locate(offset);
             let n = buf.len().min(loc.contiguous as usize);
@@ -406,7 +425,12 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
         while at < end {
             let n = end.min((at / chunk + 1) * chunk) - at;
             let target = log.writer.lookup(at).expect("sectors just cached");
-            write_copies(pool, &cache.layout, target, &buf[(at - start) as usize..][..n as usize])?;
+            write_copies(
+                pool,
+                &cache.area.layout,
+                target,
+                &buf[(at - start) as usize..][..n as usize],
+            )?;
             at += n;
         }
         log.pending.extend(slots);
@@ -445,7 +469,7 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
                     } else {
                         self.reader.read_uncached_at(part, offset + at)?;
                         if self.journal.is_some() {
-                            write_copies(pool, &cache.layout, base + at, part)?;
+                            write_copies(pool, &cache.area.layout, base + at, part)?;
                         }
                     }
                     at += n;
@@ -460,9 +484,9 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
                 Some(journal) => {
                     if !partial.is_empty() {
                         // Whole in the cache before the stripes change.
-                        let slots = log.writer.fill(&partial);
+                        let records = log.writer.fill(&partial);
                         pool.flush_members()?;
-                        self.write_cache_slots(cache, &slots)?;
+                        self.write_log(&cache.area, &records)?;
                         pool.flush_members()?;
                     }
                     self.write_stripes(journal, &parts)?;
@@ -475,27 +499,40 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
                 }
             }
             let offsets: Vec<u64> = batch.iter().map(|b| b.0).collect();
-            let slots = log.writer.destage(&offsets);
-            self.write_cache_slots(cache, &slots)?;
+            let records = log.writer.destage(&offsets);
+            self.write_log(&cache.area, &records)?;
             pool.flush_members()?;
         }
         Ok(())
     }
 
-    /// Writes the slots of cached writes once their data is durable.
+    /// Writes the log records of cached writes once their data is durable.
     fn write_pending(&self, cache: &CacheState, log: &mut CacheLog) -> Result<()> {
         if log.pending.is_empty() {
             return Ok(());
         }
         self.reader.pool().flush_members()?;
-        let slots = std::mem::take(&mut log.pending);
-        self.write_cache_slots(cache, &slots)
+        let records = std::mem::take(&mut log.pending);
+        self.write_log(&cache.area, &records)
     }
 
-    fn write_cache_slots(&self, cache: &CacheState, slots: &[(usize, Vec<u8>)]) -> Result<()> {
-        for (index, page) in slots {
-            let at = cache.slot_offset + *index as u64 * cache.slot_size;
-            write_copies(self.reader.pool(), &cache.layout, at, page)?;
+    /// Writes log records in order; a checkpoint reaches the disks after
+    /// everything before it and before anything after it.
+    fn write_log(&self, log: &LogArea, records: &[LogWrite]) -> Result<()> {
+        let pool = self.reader.pool();
+        for record in records {
+            match record {
+                LogWrite::Slot(index, page) => {
+                    let at = log.slot_offset + *index as u64 * log.slot_size;
+                    write_copies(pool, &log.layout, at, page)?;
+                }
+                LogWrite::Checkpoint(area, page) => {
+                    pool.flush_members()?;
+                    let at = log.checkpoint_offset + *area as u64 * log.checkpoint_size;
+                    write_copies(pool, &log.layout, at, page)?;
+                    pool.flush_members()?;
+                }
+            }
         }
         Ok(())
     }
@@ -535,8 +572,8 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
         let mut marked = false;
         for (&run_start, (run_stripes, list)) in &by_run {
             if !writer.is_listed(run_start) || list.iter().any(|&s| writer.is_consistent(run_start, *run_stripes, s)) {
-                let (index, page) = writer.mark_stripes(run_start, *run_stripes, list, false);
-                self.write_journal_slot(journal, index, &page)?;
+                let records = writer.mark_stripes(run_start, *run_stripes, list, false);
+                self.write_log(&journal.area, &records)?;
                 marked = true;
             }
         }
@@ -554,8 +591,8 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
         }
         pool.flush_members()?;
         for (run_start, (run_stripes, list)) in by_run {
-            let (index, page) = writer.mark_stripes(run_start, run_stripes, &list, true);
-            self.write_journal_slot(journal, index, &page)?;
+            let records = writer.mark_stripes(run_start, run_stripes, &list, true);
+            self.write_log(&journal.area, &records)?;
         }
         Ok(())
     }
@@ -583,11 +620,6 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
             return Err(Error::Pool(format!("disk {disk} of the space is not present")));
         }
         Ok(())
-    }
-
-    fn write_journal_slot(&self, journal: &JournalState, index: usize, page: &[u8]) -> Result<()> {
-        let at = journal.slot_offset + index as u64 * journal.slot_size;
-        write_copies(self.reader.pool(), &journal.layout, at, page)
     }
 
     /// Lists the extent run starting at virtual slab `run` in the dirty
@@ -943,13 +975,14 @@ mod tests {
         let journal = r.journal().unwrap();
         let (slot_offset, slot_size, _) = journal.geometry();
         let mut jw = journal.writer(space.info.guid);
-        let (index, page) = jw.mark(0, 16384, 100, 4, false);
+        let records = jw.mark(0, 16384, 100, 4, false);
+        let (index, page) = records[0].slot().unwrap();
         let (jl, _) = super::SpaceWriter::child_space(&pool, id, SpaceRole::Other(0x0a)).unwrap();
         super::write_copies(
             &pool,
             &jl,
             jl.base + slot_offset + index as u64 * slot_size as u64,
-            &page,
+            page,
         )
         .unwrap();
         drop(r);
@@ -1125,6 +1158,99 @@ mod tests {
             }
         }
         assert!(held_whole > 0, "no state had a stripe held only by the cache");
+    }
+
+    /// A cache log that wraps with chunks still mapped by the slots it is
+    /// about to overwrite gets a checkpoint first (Windows reads the slots
+    /// before the newest only up to a checkpoint). 1100 writes of 4 KiB
+    /// into distinct chunks, flushed every 50, fill the log, destage once
+    /// and wrap; the crash states around the checkpoint and after every
+    /// flush are replayed: each chunk reads as before or as written, and
+    /// as written once flushed.
+    #[test]
+    fn a_wrapping_cache_log_writes_a_checkpoint_first() {
+        use crate::io::{DeviceEvent, Recorder, WriteAt};
+        use std::sync::{Arc, Mutex};
+
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/parity3_26100");
+        let images: Vec<SparseImage> = (0..)
+            .map_while(|i| File::open(dir.join(format!("disk{i}.fixture"))).ok())
+            .map(|f| SparseImage::read_from(f).unwrap())
+            .collect();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let disks: Vec<Recorder<Overlay<&SparseImage>>> = images
+            .iter()
+            .enumerate()
+            .map(|(i, img)| Recorder::new(Overlay::new(img), i, log.clone()))
+            .collect();
+        let pool = Pool::open(disks).unwrap();
+        let id = pool.find_space("parity3_26100").unwrap().id();
+        let w = pool.open_space_rw(id).unwrap();
+        let chunk = w.reader().cache().unwrap().header.chunk_size as u64;
+        // (offset, old, new, event count after which new is durable)
+        let mut writes = Vec::new();
+        for i in 0..1100u64 {
+            let at = (16 + 7 * i) * chunk;
+            let mut old = vec![0u8; BLOCK];
+            w.read_exact_at(&mut old, at).unwrap();
+            let new = pattern(at, BLOCK as u64, &format!("w{i}"));
+            w.write_all_at(&new, at).unwrap();
+            writes.push((at, old, new, usize::MAX));
+            if i % 50 == 49 || i == 1099 {
+                w.flush().unwrap();
+                let n = log.lock().unwrap().len();
+                writes.iter_mut().filter(|w| w.3 == usize::MAX).for_each(|w| w.3 = n);
+            }
+        }
+        drop(w);
+        drop(pool);
+        let events = log.lock().unwrap().clone();
+        let checkpoint = events
+            .iter()
+            .position(|e| matches!(e, DeviceEvent::Write { data, .. } if data.starts_with(b"SPCHECK")))
+            .expect("the log wrapped without a checkpoint");
+
+        let check = |k: usize| {
+            let replay: Vec<Overlay<&SparseImage>> = images.iter().map(Overlay::new).collect();
+            for e in &events[..k] {
+                if let DeviceEvent::Write { device, offset, data } = e {
+                    replay[*device].write_all_at(data, *offset).unwrap();
+                }
+            }
+            let pool = Pool::open(replay.iter().collect::<Vec<_>>()).unwrap();
+            let mut r = pool.open_space(id).unwrap();
+            if r.cache().unwrap().conflicting_chunks() > 0 {
+                // A log write that reached one copy only: the older version
+                // is the state before it, checked as well.
+                let newest = crate::reader::OpenOptions {
+                    unclean_parity: crate::reader::UncleanParity::PreferData,
+                };
+                r = pool.open_space_with(id, newest).unwrap();
+            }
+            for (at, old, new, durable) in &writes {
+                let mut b = vec![0u8; BLOCK];
+                r.read_exact_at(&mut b, *at)
+                    .unwrap_or_else(|e| panic!("state {k}: {e}"));
+                if k >= *durable {
+                    assert!(b == *new, "state {k}: flushed write at {at:#x} lost");
+                } else {
+                    assert!(b == *old || b == *new, "state {k}: {at:#x} holds neither version");
+                }
+            }
+            r.cache().unwrap().checkpoint().map(|c| c.sequence)
+        };
+        let flushed: Vec<usize> = (1..=events.len())
+            .filter(|&k| matches!(events[k - 1], DeviceEvent::Flush { .. }))
+            .collect();
+        let mut states: Vec<usize> = (checkpoint.saturating_sub(4)..(checkpoint + 12).min(events.len())).collect();
+        states.extend(flushed.iter().copied().step_by(3));
+        states.push(events.len());
+        states.sort();
+        states.dedup();
+        for &k in &states {
+            check(k);
+        }
+        assert!(check(events.len()).is_some(), "no checkpoint in the final state");
     }
 
     #[test]

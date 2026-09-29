@@ -13,10 +13,16 @@
 //! | 0x0c | … | state 1: bitmap (bit set = consistent stripe); state 2: run words; state 3: 4 bytes |
 //!
 //! Run words are u16 LE: bit 15 = consistent, bits 0-14 = number of stripes.
+//!
+//! The header also names checkpoint areas (0x40: offset, 0x48: size of
+//! each, 0x4c: count; then u64 owner size, u32 stripe size, u32 1), and the
+//! log wraps behind checkpoints as the cache's does (`cache::Checkpoint`):
+//! parity4 and lrc12 hold journal checkpoints of sequences 1025 and 2050
+//! that continue at slot 0, one entry per run.
 
 use std::collections::HashMap;
 
-use crate::cache::{SlotSource, merge_slot_copies};
+use crate::cache::{Checkpoint, LogWrite, SlotSource, load_checkpoints, merge_slot_copies};
 use crate::crc::crc32_excluding;
 use crate::error::{Result, format_err};
 use crate::guid::Guid;
@@ -45,9 +51,15 @@ pub struct ParityJournal {
     slots: Vec<crate::cache::Slot>,
     /// Slot offset, size and count from the header.
     geometry: (u64, u32, u32),
-    /// The newest entry per run of the merged slot area.
-    current: HashMap<u64, Consistency>,
+    /// Checkpoint area offset, size and count from the header.
+    checkpoint_geometry: (u64, u32, u32),
+    checkpoint: Option<Checkpoint>,
+    /// The newest entry per run of the merged slot area, and its bytes.
+    current: HashMap<u64, (Consistency, Vec<u8>)>,
 }
+
+/// Newest entry per run: consistency and the entry's bytes.
+type Entries = HashMap<u64, (Consistency, Vec<u8>)>;
 
 impl ParityJournal {
     /// Parses the journal. `read` reads from the journal space.
@@ -71,77 +83,83 @@ impl ParityJournal {
         }
         let copies = read.read_slot_copies(slot_offset, slot_size * slot_count)?;
         let merged = merge_slot_copies(&copies, slot_size);
-        let current = Self::parse(&merged, slot_size)?;
+        let checkpoint_geometry = (le_u64(&head[0x40..]), le_u32(&head[0x48..]), le_u32(&head[0x4c..]));
+        let (cp_offset, cp_size, cp_count) = checkpoint_geometry;
+        let checkpoints = load_checkpoints(&mut read, owner, cp_offset, cp_size, cp_count)?;
+        let checkpoint = checkpoints.iter().flatten().max_by_key(|c| c.sequence).cloned();
+        let current = Self::parse(&merged, slot_size, checkpoint.as_ref())?;
         let mut runs: HashMap<u64, Vec<Consistency>> = HashMap::new();
-        for area in std::iter::once(&merged).chain(copies.iter().filter(|c| **c != merged)) {
-            for (offset, c) in Self::parse(area, slot_size)? {
+        let mut add = |entries: Entries| {
+            for (offset, (c, _)) in entries {
                 let versions = runs.entry(offset).or_default();
                 if !versions.contains(&c) {
                     versions.push(c);
                 }
+            }
+        };
+        add(current.clone());
+        for (i, copy) in copies.iter().enumerate() {
+            // Each copy with its own checkpoint, where the copies line up.
+            let own = if checkpoints.len() == copies.len() {
+                checkpoints[i].as_ref()
+            } else {
+                checkpoint.as_ref()
+            };
+            if *copy != merged || own != checkpoint.as_ref() {
+                add(Self::parse(copy, slot_size, own)?);
             }
         }
         Ok(Some(ParityJournal {
             runs,
             slots: crate::cache::valid_slots(&merged, slot_size),
             geometry: (slot_offset, slot_size as u32, slot_count as u32),
+            checkpoint_geometry,
+            checkpoint,
             current,
         }))
     }
 
-    /// The consistency per extent run that one version of the slot area
-    /// describes: the newest entry per run.
-    fn parse(area: &[u8], slot_size: usize) -> Result<HashMap<u64, Consistency>> {
-        let mut newest: HashMap<u64, ((u64, usize), Consistency)> = HashMap::new();
-        for slot in area.chunks_exact(slot_size) {
+    /// The consistency per extent run that one version of the slot area and
+    /// checkpoint describes, read as Windows reads a cache log: the
+    /// checkpoint's entries, then the slots from the one it names on while
+    /// their sequences increase (from slot 0 without a checkpoint); the
+    /// newest entry per run counts.
+    fn parse(area: &[u8], slot_size: usize, checkpoint: Option<&Checkpoint>) -> Result<Entries> {
+        type Versioned = ((u64, usize), Consistency, Vec<u8>);
+        let mut newest: HashMap<u64, Versioned> = HashMap::new();
+        let mut apply = |sequence: u64, bytes: &[u8], count: usize| -> Result<()> {
+            for (index, (offset, consistency, raw)) in decode_entries(bytes, count)?.into_iter().enumerate() {
+                let version = (sequence, index);
+                if newest.get(&offset).is_none_or(|(v, _, _)| version > *v) {
+                    newest.insert(offset, (version, consistency, raw));
+                }
+            }
+            Ok(())
+        };
+        let (mut last, start) = match checkpoint {
+            Some(c) => {
+                apply(c.sequence, &c.entries, c.count as usize)?;
+                (c.sequence, c.next_slot as usize)
+            }
+            None => (0, 0),
+        };
+        let slots: Vec<&[u8]> = area.chunks_exact(slot_size).collect();
+        for k in 0..slots.len() {
+            let slot = slots[(start + k) % slots.len()];
+            let sequence = le_u64(&slot[0x28..]);
             if &slot[0..8] != SPSLOT_SIGNATURE
                 || le_u32(&slot[0x1c..]) as usize != slot_size
                 || crc32_excluding(slot, 0x24) != le_u32(&slot[0x24..])
-                || le_u32(&slot[0x20..]) != 0
+                || sequence <= last
             {
-                continue;
+                break; // the end of the log
             }
-            let sequence = le_u64(&slot[0x28..]);
-            let count = le_u32(&slot[0x30..]) as usize;
-            let mut pos = 0x38;
-            for index in 0..count {
-                let head = slot
-                    .get(pos..pos + 12)
-                    .ok_or_else(|| format_err!("parity journal slot overflows"))?;
-                let offset = le_u64(head);
-                let state = u16::from_le_bytes([head[8], head[9]]);
-                let n = u16::from_le_bytes([head[10], head[11]]) as usize;
-                let body_len = match state {
-                    1 | 2 => n,
-                    3 => 4,
-                    other => return Err(crate::Error::Unsupported(format!("parity journal entry state {other}"))),
-                };
-                let body = slot
-                    .get(pos + 12..pos + 12 + body_len)
-                    .ok_or_else(|| format_err!("parity journal entry overflows its slot"))?;
-                // Entries start 8-byte aligned.
-                pos = (pos + 12 + body_len).next_multiple_of(8);
-                let consistency = match state {
-                    1 => Consistency::Bitmap(body.to_vec()),
-                    3 => Consistency::All,
-                    _ => {
-                        let mut runs = Vec::new();
-                        for w in body.as_chunks::<2>().0.iter().map(|&w| u16::from_le_bytes(w)) {
-                            if w == 0 {
-                                break;
-                            }
-                            runs.push((w & 0x8000 != 0, (w & 0x7fff) as u64));
-                        }
-                        Consistency::Runs(runs)
-                    }
-                };
-                let version = (sequence, index);
-                if newest.get(&offset).is_none_or(|(v, _)| version > *v) {
-                    newest.insert(offset, (version, consistency));
-                }
+            last = sequence;
+            if le_u32(&slot[0x20..]) == 0 {
+                apply(sequence, &slot[0x38..], le_u32(&slot[0x30..]) as usize)?;
             }
         }
-        Ok(newest.into_iter().map(|(k, (_, c))| (k, c)).collect())
+        Ok(newest.into_iter().map(|(k, (_, c, raw))| (k, (c, raw))).collect())
     }
 
     /// Whether stripe `stripe` (counted from the start of the extent run that
@@ -171,17 +189,45 @@ impl ParityJournal {
         self.geometry
     }
 
+    /// Where the checkpoint areas are: (offset in the journal space, size
+    /// of each, count).
+    pub fn checkpoint_geometry(&self) -> (u64, u32, u32) {
+        self.checkpoint_geometry
+    }
+
+    /// The newest valid checkpoint.
+    pub fn checkpoint(&self) -> Option<&Checkpoint> {
+        self.checkpoint.as_ref()
+    }
+
     /// A writer that continues this journal for the space `owner`: the
     /// next slot follows the newest one, with the next sequence, and each
     /// run starts from its newest entry.
     pub fn writer(&self, owner: Guid) -> JournalWriter {
         let (_, slot_size, slot_count) = self.geometry;
         let mut w = JournalWriter::new(owner, slot_size, slot_count);
-        if let Some(newest) = self.slots.iter().max_by_key(|s| s.sequence) {
+        // A checkpoint newer than every slot continues at the slot it names.
+        if let Some(c) = &self.checkpoint {
+            (w.sequence, w.next_slot) = (c.sequence, c.next_slot as usize % slot_count.max(1) as usize);
+        }
+        if let Some(newest) = self.slots.iter().max_by_key(|s| s.sequence)
+            && newest.sequence > w.sequence
+        {
             w.sequence = newest.sequence;
             w.next_slot = (newest.index + 1) % slot_count.max(1) as usize;
         }
-        w.loaded = self.current.clone();
+        for s in &self.slots {
+            if let Some(v) = w.slot_seq.get_mut(s.index) {
+                *v = s.sequence;
+            }
+        }
+        w.checkpoint_count = self.checkpoint_geometry.2.min(4);
+        w.checkpoint = self
+            .checkpoint
+            .as_ref()
+            .map(|c| (c.sequence, c.area, c.next_slot as usize));
+        w.loaded = self.current.iter().map(|(k, (c, _))| (*k, c.clone())).collect();
+        w.loaded_bytes = self.current.iter().map(|(k, (_, raw))| (*k, raw.clone())).collect();
         w.listed = self.current.keys().copied().collect();
         w
     }
@@ -217,10 +263,18 @@ pub struct JournalWriter {
     sequence: u64,
     /// Owner offset where an extent run starts -> consistent stripes.
     runs: std::collections::BTreeMap<u64, Vec<bool>>,
-    /// Entries of a journal this writer continues, not yet expanded.
+    /// Entries of a journal this writer continues, not yet expanded, and
+    /// their bytes (for checkpoints).
     loaded: HashMap<u64, Consistency>,
+    loaded_bytes: HashMap<u64, Vec<u8>>,
     /// Runs the journal has an entry for.
     listed: std::collections::HashSet<u64>,
+    /// Sequence of the valid slot at each index (0: none).
+    slot_seq: Vec<u64>,
+    /// Number of checkpoint areas (0: none known), and the sequence, area
+    /// and next slot of the newest checkpoint.
+    checkpoint_count: u32,
+    checkpoint: Option<(u64, usize, usize)>,
 }
 
 impl JournalWriter {
@@ -234,8 +288,19 @@ impl JournalWriter {
             sequence: 0,
             runs: Default::default(),
             loaded: Default::default(),
+            loaded_bytes: Default::default(),
             listed: Default::default(),
+            slot_seq: vec![0; slot_count as usize],
+            checkpoint_count: 0,
+            checkpoint: None,
         }
+    }
+
+    /// The same writer for a journal with `count` checkpoint areas, which it
+    /// writes checkpoints into when its log wraps.
+    pub fn with_checkpoint_areas(mut self, count: u32) -> Self {
+        self.checkpoint_count = count.min(4);
+        self
     }
 
     /// Whether the journal has an entry for the run at `run_start` (a run
@@ -264,14 +329,14 @@ impl JournalWriter {
 
     /// A write request of stripes `first..first + count` of the extent run
     /// that starts at owner offset `run_start` and has `stripes` stripes:
-    /// the slot Windows writes (index and page).
-    pub fn write(&mut self, run_start: u64, stripes: u64, first: u64, count: u64) -> (usize, Vec<u8>) {
+    /// the slot Windows writes (after a checkpoint where one is due).
+    pub fn write(&mut self, run_start: u64, stripes: u64, first: u64, count: u64) -> Vec<LogWrite> {
         self.mark(run_start, stripes, first, count, true)
     }
 
     /// Records stripes `first..first + count` of the run as consistent or
-    /// not: the slot to write (index and page).
-    pub fn mark(&mut self, run_start: u64, stripes: u64, first: u64, count: u64, value: bool) -> (usize, Vec<u8>) {
+    /// not: the log writes.
+    pub fn mark(&mut self, run_start: u64, stripes: u64, first: u64, count: u64, value: bool) -> Vec<LogWrite> {
         let consistent = self.run(run_start, stripes);
         let end = (first + count).min(consistent.len() as u64);
         for s in first.min(end)..end {
@@ -280,9 +345,9 @@ impl JournalWriter {
         self.entry(run_start)
     }
 
-    /// Records the stripes `list` of the run as consistent or not: the slot
-    /// to write (index and page).
-    pub fn mark_stripes(&mut self, run_start: u64, stripes: u64, list: &[u64], value: bool) -> (usize, Vec<u8>) {
+    /// Records the stripes `list` of the run as consistent or not: the log
+    /// writes.
+    pub fn mark_stripes(&mut self, run_start: u64, stripes: u64, list: &[u64], value: bool) -> Vec<LogWrite> {
         let consistent = self.run(run_start, stripes);
         for &s in list {
             if let Some(c) = consistent.get_mut(s as usize) {
@@ -292,11 +357,63 @@ impl JournalWriter {
         self.entry(run_start)
     }
 
-    /// The next slot, with the entry for the run at `run_start`: a run list
-    /// (state 2, as Windows writes it), or a bitmap (state 1) where the run
-    /// list does not fit into the slot. Where neither fits, the run is
-    /// recorded as not consistent as a whole, which is always safe.
-    fn entry(&mut self, run_start: u64) -> (usize, Vec<u8>) {
+    /// The next slot, with the entry for the run at `run_start`, after a
+    /// checkpoint where the log comes round to the slot the newest one
+    /// continues at.
+    fn entry(&mut self, run_start: u64) -> Vec<LogWrite> {
+        let entry = self.encode(run_start);
+        self.listed.insert(run_start);
+        let mut out = Vec::new();
+        let index = self.next_slot;
+        let (cp_seq, cp_area, cp_next) = self.checkpoint.unwrap_or((0, usize::MAX, 0));
+        let overwritten = self.slot_seq.get(index).copied().unwrap_or(0);
+        if index == cp_next && overwritten > cp_seq && self.checkpoint_count > 0 {
+            self.sequence += 1;
+            let area = cp_area.wrapping_add(1) % self.checkpoint_count as usize;
+            let (entries, count) = self.checkpoint_entries();
+            out.push(LogWrite::Checkpoint(
+                area,
+                Checkpoint::encode(self.owner, 1, self.sequence, index as u32, count, &entries),
+            ));
+            self.checkpoint = Some((self.sequence, area, index));
+        }
+        self.sequence += 1;
+        if let Some(s) = self.slot_seq.get_mut(index) {
+            *s = self.sequence;
+        }
+        self.next_slot = (self.next_slot + 1) % self.slot_count.max(1) as usize;
+        out.push(LogWrite::Slot(
+            index,
+            crate::cache::encode_slot(self.owner, self.slot_size, 0, self.sequence, 1, &entry),
+        ));
+        out
+    }
+
+    /// The entries of every run the journal lists, 8-byte aligned, and
+    /// their count.
+    fn checkpoint_entries(&mut self) -> (Vec<u8>, u32) {
+        let mut listed: Vec<u64> = self.listed.iter().copied().collect();
+        listed.sort();
+        let mut out = Vec::new();
+        for run in &listed {
+            let entry = match self.runs.contains_key(run) {
+                true => self.encode(*run),
+                false => self.loaded_bytes.get(run).cloned().unwrap_or_default(),
+            };
+            if entry.is_empty() {
+                continue;
+            }
+            out.extend_from_slice(&entry);
+            out.resize(out.len().next_multiple_of(8), 0);
+        }
+        (out, listed.len() as u32)
+    }
+
+    /// The entry for the run at `run_start`: a run list (state 2, as
+    /// Windows writes it), or a bitmap (state 1) where the run list does not
+    /// fit into a slot. Where neither fits, the run is recorded as not
+    /// consistent as a whole, which is always safe.
+    fn encode(&mut self, run_start: u64) -> Vec<u8> {
         let capacity = (self.slot_size as usize).saturating_sub(0x38 + 12);
         let consistent = self.runs.get_mut(&run_start).expect("run expanded by the caller");
         let words = |c: &[bool]| {
@@ -342,15 +459,50 @@ impl JournalWriter {
         entry.extend_from_slice(&state.to_le_bytes());
         entry.extend_from_slice(&counted.unwrap_or(body.len() as u16).to_le_bytes());
         entry.extend_from_slice(&body);
-        self.listed.insert(run_start);
-        self.sequence += 1;
-        let index = self.next_slot;
-        self.next_slot = (self.next_slot + 1) % self.slot_count.max(1) as usize;
-        (
-            index,
-            crate::cache::encode_slot(self.owner, self.slot_size, 0, self.sequence, 1, &entry),
-        )
+        entry
     }
+}
+
+/// The entries of a journal slot or checkpoint (`count` of them, from the
+/// start of `bytes`): run offset, consistency and the entry's bytes.
+fn decode_entries(bytes: &[u8], count: usize) -> Result<Vec<(u64, Consistency, Vec<u8>)>> {
+    let mut out = Vec::with_capacity(count.min(4096));
+    let mut pos = 0;
+    for _ in 0..count {
+        let head = bytes
+            .get(pos..pos + 12)
+            .ok_or_else(|| format_err!("parity journal slot overflows"))?;
+        let offset = le_u64(head);
+        let state = u16::from_le_bytes([head[8], head[9]]);
+        let n = u16::from_le_bytes([head[10], head[11]]) as usize;
+        let body_len = match state {
+            1 | 2 => n,
+            3 => 4,
+            other => return Err(crate::Error::Unsupported(format!("parity journal entry state {other}"))),
+        };
+        let body = bytes
+            .get(pos + 12..pos + 12 + body_len)
+            .ok_or_else(|| format_err!("parity journal entry overflows its slot"))?;
+        let raw = bytes[pos..pos + 12 + body_len].to_vec();
+        // Entries start 8-byte aligned.
+        pos = (pos + 12 + body_len).next_multiple_of(8);
+        let consistency = match state {
+            1 => Consistency::Bitmap(body.to_vec()),
+            3 => Consistency::All,
+            _ => {
+                let mut runs = Vec::new();
+                for w in body.as_chunks::<2>().0.iter().map(|&w| u16::from_le_bytes(w)) {
+                    if w == 0 {
+                        break;
+                    }
+                    runs.push((w & 0x8000 != 0, (w & 0x7fff) as u64));
+                }
+                Consistency::Runs(runs)
+            }
+        };
+        out.push((offset, consistency, raw));
+    }
+    Ok(out)
 }
 
 impl Consistency {
@@ -455,8 +607,9 @@ mod tests {
         w.mark(0, 16384, 0, 16352, true);
         w.sequence = before.sequence;
         w.next_slot = last.index;
-        let (index, page) = w.write(0, 16384, 16352, 32);
-        assert_eq!(index, last.index);
+        let records = w.write(0, 16384, 16352, 32);
+        let (index, page) = records[0].slot().unwrap();
+        assert_eq!((records.len(), index), (1, last.index));
         let end = page.iter().rposition(|&b| b != 0).unwrap() + 1;
         assert_eq!(&page[0x20..end], &last.content[..]);
     }
