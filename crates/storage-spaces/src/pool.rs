@@ -353,6 +353,19 @@ impl<D: ReadAt> Pool<D> {
         Ok(Some((member.device, member.partition.offset + pos)))
     }
 
+    /// Why space `id` cannot be opened for writing, or `None` if it can
+    /// (the checks [`Pool::open_space_rw`] makes, without writing).
+    pub fn write_refusal(&self, id: u64) -> Result<Option<String>> {
+        if !self.warnings.is_empty() {
+            return Ok(Some(format!(
+                "the pool is not in a clean state ({})",
+                self.warnings.join("; ")
+            )));
+        }
+        let reader = self.open_space(id)?;
+        Ok(crate::writer::refusal(self, &reader))
+    }
+
     /// Opens a space for writing; see [`SpaceWriter`] for what it accepts.
     pub fn open_space_rw(&self, id: u64) -> Result<SpaceWriter<'_, D>>
     where

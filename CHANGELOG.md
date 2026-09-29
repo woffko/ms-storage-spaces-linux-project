@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+Writing, for spaces whose state is fully understood.
+
+### Writing
+
+* `spaces attach --rw` (and `serve-ublk --rw`, `serve-nbd --rw`): simple,
+  two- and three-way mirror and single parity spaces, written the way
+  Windows writes them, so that Windows reads the result back (healthy,
+  chkdsk clean, every file intact in the round trips of the test suite).
+  Refused, with the reason: pools that are not clean (missing disks, stale
+  copies, diverging metadata), degraded spaces, dual parity, storage tiers,
+  rows a thin space has not allocated yet, write-back caches whose copies
+  disagree.
+* Mirror spaces: the dirty region log lists an extent run, durably, before
+  its first write.
+* Single parity spaces: writes go through the write-back cache as Windows'
+  own do (whole stripes the parity journal records as not consistent go to
+  the space directly); destaging rewrites whole stripes under the journal,
+  so a stripe always matches its parity or is held whole by the cache: the
+  write hole stays closed.
+* The cache and journal logs wrap behind checkpoints as Windows expects;
+  a cache holding data when a space is opened for writing is destaged first.
+* Writes are durable after a flush (sync, FUA) or a clean detach; the
+  serving processes flush when stopped.
+* Checked by crash replays of every flush point and of unordered writes,
+  fio with verification through ublk, NBD and device-mapper, and NTFS
+  written on Linux and verified by Windows.
+
+### Reading
+
+* The write-back cache and parity journal are read as Windows reads them:
+  from the newest checkpoint on (a wrapped log is no longer read in full).
+* `spaces dump` shows checkpoints.
+
 ## 0.1.0 (unreleased)
 
 First release: read-only access to Microsoft Storage Spaces pools created by

@@ -110,102 +110,57 @@ struct CacheLog {
 
 impl<'p, D: WriteAt> SpaceWriter<'p, D> {
     pub(crate) fn new(pool: &'p Pool<D>, id: u64) -> Result<Self> {
-        let refuse = |why: String| {
-            Err(Error::Unsupported(format!(
+        if let Some(why) = pool.write_refusal(id)? {
+            return Err(Error::Unsupported(format!(
                 "space {id} cannot be opened for writing: {why}"
-            )))
-        };
-        if !pool.warnings.is_empty() {
-            return refuse(format!(
-                "the pool is not in a clean state ({})",
-                pool.warnings.join("; ")
-            ));
+            )));
         }
         let reader = pool.open_space_with(id, OpenOptions::default())?;
-        if reader.condition() != Condition::Healthy {
-            return refuse(format!("it is {:?}", reader.condition()).to_lowercase());
-        }
-        if pool.children(id).any(|c| c.info.is_child && !c.extents.is_empty()) {
-            return refuse("writes to tiered spaces are not supported yet".into());
-        }
         let layout = reader.layout();
         let (mut drt, mut journal) = (None, None);
-        match layout.resiliency {
-            Resiliency::Simple => {}
-            Resiliency::Mirror => {
-                let Some(log) = reader.dirty_regions() else {
-                    return refuse("the mirror space has no readable dirty region log".into());
-                };
-                let (layout, size) = Self::child_space(pool, id, SpaceRole::Other(0x06))?;
-                drt = Some(DrtState {
-                    layout,
-                    size,
-                    log: Mutex::new((log.writer(), HashMap::new())),
-                });
-            }
-            Resiliency::Parity if layout.parity_units == 1 => {
-                let Some(pj) = reader.journal() else {
-                    return refuse("the parity space has no readable parity journal".into());
-                };
-                let (jlayout, _) = Self::child_space(pool, id, SpaceRole::Other(0x0a))?;
-                let (slot_offset, slot_size, _) = pj.geometry();
-                journal = Some(JournalState {
-                    area: LogArea {
-                        slot_offset: jlayout.base + slot_offset,
-                        slot_size: slot_size as u64,
-                        checkpoint_offset: jlayout.base + pj.checkpoint_geometry().0,
-                        checkpoint_size: pj.checkpoint_geometry().1 as u64,
-                        layout: jlayout,
-                    },
-                    writer: Mutex::new(pj.writer(reader.space.info.guid)),
-                });
-            }
-            Resiliency::Parity => return refuse("writes to dual parity spaces are not supported yet".into()),
-            other => return refuse(format!("writes to {other:?} spaces are not supported yet").to_lowercase()),
+        if let Some(log) = reader
+            .dirty_regions()
+            .filter(|_| layout.resiliency == Resiliency::Mirror)
+        {
+            let (layout, size) = Self::child_space(pool, id, SpaceRole::Other(0x06))?;
+            drt = Some(DrtState {
+                layout,
+                size,
+                log: Mutex::new((log.writer(), HashMap::new())),
+            });
+        }
+        if let Some(pj) = reader.journal().filter(|_| layout.resiliency == Resiliency::Parity) {
+            let (jlayout, _) = Self::child_space(pool, id, SpaceRole::Other(0x0a))?;
+            let (slot_offset, slot_size, _) = pj.geometry();
+            journal = Some(JournalState {
+                area: LogArea {
+                    slot_offset: jlayout.base + slot_offset,
+                    slot_size: slot_size as u64,
+                    checkpoint_offset: jlayout.base + pj.checkpoint_geometry().0,
+                    checkpoint_size: pj.checkpoint_geometry().1 as u64,
+                    layout: jlayout,
+                },
+                writer: Mutex::new(pj.writer(reader.space.info.guid)),
+            });
         }
         let mut cache = None;
-        match reader.cache() {
-            Some(index) => {
-                if index.conflicting_chunks() > 0 {
-                    return refuse(format!(
-                        "the copies of its write-back cache disagree about {} chunks after an unclean shutdown",
-                        index.conflicting_chunks()
-                    ));
-                }
-                if let Some((offset, _, _)) = index
-                    .mappings()
-                    .into_iter()
-                    .find(|m| !row_allocated(layout, layout.locate(layout.base + m.0).row))
-                {
-                    return refuse(format!(
-                        "its write-back cache holds data at {offset:#x}, in a row the thin space has not allocated \
-                         (allocation is not supported yet)"
-                    ));
-                }
-                if index.header.checkpoint_count == 0 {
-                    return refuse("its write-back cache has no checkpoint areas".into());
-                }
-                let (clayout, _) = Self::child_space(pool, id, SpaceRole::Cache)?;
-                // Parity caches hand out blocks from 64, mirror caches from 0.
-                let first_block = if journal.is_some() { 64 } else { 0 };
-                cache = Some(CacheState {
-                    area: LogArea {
-                        layout: clayout,
-                        slot_offset: index.header.slot_offset,
-                        slot_size: index.header.slot_size as u64,
-                        checkpoint_offset: index.header.checkpoint_offset,
-                        checkpoint_size: index.header.checkpoint_size as u64,
-                    },
-                    log: RwLock::new(CacheLog {
-                        writer: index.writer(first_block),
-                        pending: Vec::new(),
-                    }),
-                });
-            }
-            None if journal.is_some() => {
-                return refuse("the parity space has no write-back cache, which its writes need".into());
-            }
-            None => {}
+        if let Some(index) = reader.cache() {
+            let (clayout, _) = Self::child_space(pool, id, SpaceRole::Cache)?;
+            // Parity caches hand out blocks from 64, mirror caches from 0.
+            let first_block = if journal.is_some() { 64 } else { 0 };
+            cache = Some(CacheState {
+                area: LogArea {
+                    layout: clayout,
+                    slot_offset: index.header.slot_offset,
+                    slot_size: index.header.slot_size as u64,
+                    checkpoint_offset: index.header.checkpoint_offset,
+                    checkpoint_size: index.header.checkpoint_size as u64,
+                },
+                log: RwLock::new(CacheLog {
+                    writer: index.writer(first_block),
+                    pending: Vec::new(),
+                }),
+            });
         }
         let mut writer = SpaceWriter {
             reader,
@@ -665,6 +620,63 @@ impl<D: WriteAt> ReadAt for SpaceWriter<'_, D> {
     fn size(&self) -> std::io::Result<u64> {
         Ok(SpaceWriter::size(self))
     }
+}
+
+/// Why the space `reader` reads cannot be opened for writing, if it cannot
+/// (its pool being clean): everything about its state has to be understood
+/// and kept consistent the way Windows would. Nothing is written.
+pub(crate) fn refusal<D: ReadAt>(pool: &Pool<D>, reader: &SpaceReader<'_, D>) -> Option<String> {
+    let id = reader.space.id();
+    if reader.condition() != Condition::Healthy {
+        return Some(format!("it is {:?}", reader.condition()).to_lowercase());
+    }
+    if pool.children(id).any(|c| c.info.is_child && !c.extents.is_empty()) {
+        return Some("writes to tiered spaces are not supported yet".into());
+    }
+    let layout = reader.layout();
+    match layout.resiliency {
+        Resiliency::Simple => {}
+        Resiliency::Mirror if reader.dirty_regions().is_none() => {
+            return Some("the mirror space has no readable dirty region log".into());
+        }
+        Resiliency::Mirror => {}
+        Resiliency::Parity if layout.parity_units > 1 => {
+            return Some("writes to dual parity spaces are not supported yet".into());
+        }
+        Resiliency::Parity if reader.journal().is_none() => {
+            return Some("the parity space has no readable parity journal".into());
+        }
+        Resiliency::Parity if reader.cache().is_none() => {
+            return Some("the parity space has no write-back cache, which its writes need".into());
+        }
+        Resiliency::Parity if reader.journal().is_some_and(|j| j.checkpoint_geometry().2 == 0) => {
+            return Some("its parity journal has no checkpoint areas".into());
+        }
+        Resiliency::Parity => {}
+        other => return Some(format!("writes to {other:?} spaces are not supported yet").to_lowercase()),
+    }
+    if let Some(index) = reader.cache() {
+        if index.conflicting_chunks() > 0 {
+            return Some(format!(
+                "the copies of its write-back cache disagree about {} chunks after an unclean shutdown",
+                index.conflicting_chunks()
+            ));
+        }
+        if let Some((offset, _, _)) = index
+            .mappings()
+            .into_iter()
+            .find(|m| !row_allocated(layout, layout.locate(layout.base + m.0).row))
+        {
+            return Some(format!(
+                "its write-back cache holds data at {offset:#x}, in a row the thin space has not allocated \
+                 (allocation is not supported yet)"
+            ));
+        }
+        if index.header.checkpoint_count == 0 {
+            return Some("its write-back cache has no checkpoint areas".into());
+        }
+    }
+    None
 }
 
 /// Whether every column of `row` is allocated.
@@ -1268,12 +1280,13 @@ mod tests {
         )];
         let pool = Pool::open(one).unwrap();
         let id = pool.find_space("simple2c").unwrap().id();
-        assert!(
-            pool.open_space_rw(id)
-                .err()
+        let err = pool.open_space_rw(id).err().unwrap().to_string();
+        assert!(err.contains("not in a clean state"), "{err}");
+        assert_eq!(
+            pool.write_refusal(id)
                 .unwrap()
-                .to_string()
-                .contains("not in a clean state")
+                .map(|w| w.contains("not in a clean state")),
+            Some(true)
         );
     }
 }

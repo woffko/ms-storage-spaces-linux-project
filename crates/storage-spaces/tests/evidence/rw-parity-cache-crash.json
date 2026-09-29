@@ -1,0 +1,29 @@
+{
+ "windows_build": "10.0.26100.0",
+ "pool": "copy of parity3_26100",
+ "crash": "spaces write-pattern of 1000 KiB at 4 KiB (tag cx) through the cache, flushed, then destaged and cut off before member write 50: stripe 2 half rewritten (its parity stale), stripes 0-7 recorded as not consistent in the journal and held whole by the cache",
+ "attached": [
+  [
+   "parity3_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "repaired": [
+  [
+   "parity3_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "pattern_check": {
+  "written": "4:1000:cx",
+  "first_mismatch": -1,
+  "ok": true
+ },
+ "windows_loaded": [
+  "Cache initialization for space {f10c97c3-f629-412e-9c4e-04ab4a9f5743} with status STATUS_SUCCESS. UsedLineCount: 0x8, ReservedLineCount: 0x0, SynchronizingCount: 0x8, ReplayCount: 0x0. ActiveCheckpoint: 0x0, StartSlot: 0x0, EndSlot: 0x3, Wrap: false, SequenceNumber: 0x3.",
+  "Vdt initialization for space {f10c97c3-f629-412e-9c4e-04ab4a9f5743} with status STATUS_SUCCESS. ActiveCheckpoint: 0x0, StartSlot: 0x0, EndSlot: 0x201, Wrap: false, SequenceNumber: 0x201."
+ ],
+ "after_windows": "Windows destaged the 8 chunks: every stripe matches its parity, the journal records the run as consistent, the cache is empty"
+}

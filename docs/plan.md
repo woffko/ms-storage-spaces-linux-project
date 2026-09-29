@@ -359,6 +359,37 @@ intact; used for the mirror copy and diverging database experiments).
   Linux 6.8 corrupts small files truncated to zero (chkdsk reports the
   same four records on a plain disk image); not a matter of the space.
   Evidence in `tests/evidence`, checked by `tests/roundtrip.rs`.
+* Mirror spaces (`mirror2_26100`): writes follow the dirty region log model
+  (the run listed and flushed before its first write, both copies
+  written); fio through ublk and NBD, NTFS with ntfs-3g accepted by
+  Windows, a write cut off between the copies attached as healthy; a crash
+  replay test checks that copies differ only inside listed runs.
+* Single parity (`parity3_26100`): in-place read-modify-write under the
+  journal passed fio and NTFS, but a write cut off between data and parity
+  was left inconsistent by Windows, even by `Repair-VirtualDisk`: the write
+  hole stays open for Windows. Parity writes therefore go through the
+  write-back cache as Windows' own do (whole stripes the journal records as
+  not consistent go to the space directly); destaging makes partial
+  chunks whole in the cache before rewriting whole stripes, so a stripe
+  always matches its parity or is held whole by the cache (crash replay
+  test over every prefix and random subsets of unflushed writes). The
+  first NTFS round trip through the cache lost 7 files: Windows reads a
+  wrapped cache log only behind a checkpoint (`SPCHECK`, see the format
+  document), which Linux did not write; experiments on Windows pinned
+  down the checkpoint format and rule (`rw-cache-log.json`), and the
+  cache and journal writers now write checkpoints as Windows does. With
+  them, NTFS written through the cache (the log wrapped, 830 chunks
+  cached) came back healthy with nothing to repair, chkdsk clean and all
+  files intact (`rw-parity-cache-ntfs3g.json`); a destage cut off between
+  a stripe's data and parity was read correctly from the cache and
+  finished by Windows (`rw-parity-cache-crash.json`). A repair Windows ran
+  once turned out to be the test harness mounting the third disk 32 s
+  late (the round trips now mount all disks at once and record the
+  driver's events).
+* `spaces attach --rw` (`tools/rw-attach-check.sh`): fio with verification
+  through `/dev/mapper` passed for simple (device-mapper read-write),
+  mirror and parity (ublk) copies, and again read-only; mirrors are
+  refused by dm read-write and dual parity by `--rw`, with the reason.
 
 ## Test infrastructure (continuous, feeds every stage)
 

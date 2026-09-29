@@ -1,0 +1,28 @@
+{
+ "windows_build": "10.0.26100.0",
+ "pool": "copy of parity3_26100 written on Linux with ntfs-3g through serve-ublk --rw (tools/rw-ntfs-check.sh), 3000 file operations",
+ "log": "parity writes through the write-back cache; the cache log wrapped behind a checkpoint (sequence 1025) and held 830 chunks when Linux finished",
+ "attached": [
+  [
+   "parity3_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "attached_jobs": [],
+ "repaired": [
+  [
+   "parity3_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "chkdsk_exit": 0,
+ "files": 573,
+ "mismatching": [],
+ "windows_loaded": [
+  "Cache initialization for space {f10c97c3-f629-412e-9c4e-04ab4a9f5743} with status STATUS_SUCCESS. UsedLineCount: 0x33E, ReservedLineCount: 0x0, SynchronizingCount: 0x33E, ReplayCount: 0x0. ActiveCheckpoint: 0x1, StartSlot: 0x0, EndSlot: 0x16B, Wrap: false, SequenceNumber: 0x56C.",
+  "Vdt initialization for space {f10c97c3-f629-412e-9c4e-04ab4a9f5743} with status STATUS_SUCCESS. ActiveCheckpoint: 0x0, StartSlot: 0x0, EndSlot: 0x21A, Wrap: false, SequenceNumber: 0x21A."
+ ],
+ "earlier_run": "the same images first came back Warning/InService with a repair of 768 MiB: the third disk arrived 32 s after the others, Windows started the pool without it, and regenerated the cache and journal mirrors (512 + 256 MiB) when it came; with all disks mounted at once nothing was repaired"
+}

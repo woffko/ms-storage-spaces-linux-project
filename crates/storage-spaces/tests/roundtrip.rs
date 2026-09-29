@@ -194,6 +194,46 @@ fn in_place_parity_writes_leave_windows_a_stale_stripe_after_a_crash() {
     assert!(e["after_windows"].as_str().unwrap().contains("still inconsistent"));
 }
 
+/// Single parity NTFS written from Linux through the write-back cache, with
+/// a log that wrapped behind a checkpoint: Windows loaded the cache as
+/// Linux left it (830 chunks, from slot 0 after the checkpoint up to slot
+/// 0x16b at sequence 0x56c) and the journal, attached the space as healthy
+/// with nothing to repair, and chkdsk and every file checked out.
+#[test]
+fn windows_reads_parity_written_through_the_cache() {
+    let e = evidence("rw-parity-cache-ntfs3g.json");
+    assert_eq!(
+        (e["attached"][0][1].as_str(), e["repaired"][0][1].as_str()),
+        (Some("Healthy"), Some("Healthy"))
+    );
+    assert_eq!(e["attached_jobs"].as_array().unwrap().len(), 0);
+    assert_eq!((e["chkdsk_exit"].as_i64(), e["files"].as_i64()), (Some(0), Some(573)));
+    assert_eq!(e["mismatching"].as_array().unwrap().len(), 0);
+    let loaded = e["windows_loaded"][0].as_str().unwrap();
+    assert!(loaded.contains("UsedLineCount: 0x33E") && loaded.contains("EndSlot: 0x16B"));
+}
+
+/// A destage cut off between the data and the parity of a stripe: the
+/// cache still held the whole stripe, so Windows read the new data, found
+/// the space healthy, and finished the destage itself (every stripe matches
+/// its parity afterwards): the write hole stays closed for Windows too.
+#[test]
+fn windows_finishes_a_destage_cut_off_by_a_crash() {
+    let e = evidence("rw-parity-cache-crash.json");
+    assert_eq!(
+        (e["attached"][0][1].as_str(), e["repaired"][0][1].as_str()),
+        (Some("Healthy"), Some("Healthy"))
+    );
+    assert_eq!(e["pattern_check"]["ok"], true);
+    assert!(e["windows_loaded"][0].as_str().unwrap().contains("UsedLineCount: 0x8"));
+    assert!(
+        e["after_windows"]
+            .as_str()
+            .unwrap()
+            .contains("every stripe matches its parity")
+    );
+}
+
 /// Cache logs written from Linux and read by Windows (the rule the reader
 /// and CacheWriter follow, see cache::Checkpoint): without a checkpoint
 /// Windows reads a wrapped log from slot 0 only and loses every chunk mapped

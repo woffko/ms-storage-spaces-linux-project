@@ -2,8 +2,9 @@
 
 `spaces` reads Microsoft Storage Spaces pools created by Windows 11 (24H2:
 pool version 28; Insider builds: pool version 29) and exposes their virtual
-disks ("spaces") as read-only Linux block devices. It never writes to the
-pool disks.
+disks ("spaces") as Linux block devices. They are read-only, and the pool
+disks are never written, unless a space is attached read-write
+(`attach --rw`, see [Writing](#writing)).
 
 ## Supported configurations
 
@@ -23,7 +24,9 @@ pool disks.
 | Member disks with 512-byte, 512e and 4Kn sectors | read |
 | Pools after a disk was retired, replaced or removed | read |
 | Pools created by Windows 8/10/Server | not supported |
-| Writing, pool management | not supported |
+| Writing: simple, mirror, single parity (fixed or allocated rows) | `attach --rw` |
+| Writing: dual parity, tiers, new rows of thin spaces, degraded pools | not supported (refused) |
+| Pool management (creating pools and spaces, adding disks) | not supported |
 
 ## Installing
 
@@ -78,6 +81,55 @@ device-mapper mapping reads one copy only.
 | `ublk` | Linux 6.0 or newer, module `ublk_drv` |
 | `nbd` | module `nbd`, `nbd-client` |
 | `fuse` | FUSE, `losetup` |
+
+## Writing
+
+```sh
+sudo spaces attach --rw --space Data          # one space, read-write
+sudo mount /dev/mapper/ss-<pool>-Data-p2 /mnt
+...
+sudo umount /mnt && sudo spaces detach Data   # flushes everything
+```
+
+A space opens for writing only when everything about its state is
+understood, and the writes keep it consistent the way Windows would, so
+that Windows reads the result back. `attach --rw` refuses, with the reason:
+
+* pools that are not clean: missing disks, copies that missed writes,
+  diverging metadata (attach them to Windows first);
+* degraded spaces, dual parity spaces, storage tiers and mirror-accelerated
+  parity;
+* write-back caches whose mirrored copies disagree after a crash.
+
+Writes into rows a thin space has not allocated yet fail with an I/O error
+(allocating them is not supported yet); fixed spaces and the allocated part
+of thin spaces are written in place.
+
+How the space types are written:
+
+* Simple: in place. `--backend auto` uses device-mapper when the space is
+  fully allocated and its write-back cache holds nothing, ublk otherwise.
+* Mirror: every copy; the extent run is listed in the dirty region log,
+  durably, before its first write (Windows compares those runs' copies).
+  Served by ublk (or NBD).
+* Single parity: through the write-back cache, like Windows' own writes;
+  the cache is destaged in whole stripes under the parity journal when it
+  fills up, so a crash never leaves a stripe whose parity is stale while
+  its data exists nowhere else. Served by ublk (or NBD).
+
+Guarantees and risks:
+
+* Writes are durable once flushed (`sync`, `fsync`, FUA, unmounting) or
+  after a clean `spaces detach`. A crash, power loss or `kill -9` of the
+  serving process loses what was not flushed, as with a disk's volatile
+  cache; the pool stays consistent and Windows attaches it as healthy.
+* A write-back cache holding data when a space is attached read-write is
+  destaged first.
+* Do not attach the same pool to Windows (or another Linux system) while it
+  is attached read-write here.
+* NTFS: `ntfs3` of Linux 6.8 corrupts small files that are truncated to zero
+  (on any disk, not only here); ntfs-3g is not affected.
+* Writing is new: keep a backup of data you care about.
 
 ## Pools with missing disks
 

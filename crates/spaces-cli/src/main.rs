@@ -80,6 +80,10 @@ enum Command {
         /// (their metadata may describe an old state of the pool).
         #[arg(long)]
         force: bool,
+        /// Attach read-write (only spaces whose state is fully understood;
+        /// the member devices are written). Not with --degraded or --force.
+        #[arg(long, conflicts_with_all = ["degraded", "force"])]
+        rw: bool,
         /// Use these member devices instead of scanning.
         devices: Vec<PathBuf>,
     },
@@ -367,6 +371,7 @@ fn main() -> Result<()> {
             backend,
             degraded,
             force,
+            rw,
             devices,
         } => cmd_attach(
             pool.as_deref(),
@@ -374,6 +379,7 @@ fn main() -> Result<()> {
             backend,
             degraded || force,
             force,
+            rw,
             &devices,
         ),
         #[cfg(target_os = "linux")]
@@ -1025,6 +1031,7 @@ fn cmd_attach(
     backend: attach::Backend,
     degraded: bool,
     force: bool,
+    rw: bool,
     devices: &[PathBuf],
 ) -> Result<()> {
     let _lock = attach::lock()?;
@@ -1067,9 +1074,10 @@ fn cmd_attach(
                 println!("{:?} is already attached", space.name());
                 continue;
             }
-            match attach::attach_space(&pool, space, &paths, backend) {
+            match attach::attach_space(&pool, space, &paths, backend, rw) {
                 Ok(state) => {
-                    println!("attached {:?} with {}:", space.name(), state.backend);
+                    let mode = if state.rw { ", read-write" } else { "" };
+                    println!("attached {:?} with {}{mode}:", space.name(), state.backend);
                     for d in &state.dm {
                         println!("  /dev/mapper/{d}");
                     }
@@ -1124,7 +1132,11 @@ fn cmd_status() -> Result<()> {
     }
     for s in states {
         let main = s.dm.first().cloned().unwrap_or_default();
-        println!("/dev/mapper/{main}  space {}  backend {}", s.space_guid, s.backend);
+        let mode = if s.rw { "read-write" } else { "read-only" };
+        println!(
+            "/dev/mapper/{main}  space {}  backend {}  {mode}",
+            s.space_guid, s.backend
+        );
         if let Some(d) = &s.device {
             println!("  backend device {d}");
         }

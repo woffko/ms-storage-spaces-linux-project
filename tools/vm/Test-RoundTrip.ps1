@@ -12,6 +12,8 @@ The script attaches the disks and writes roundtrip.json there:
   extents    Get-PhysicalExtent of every space
   checks     the verification pattern of every pattern space, chkdsk and
              the file hashes of an NTFS space
+  events     Storage Spaces driver events meanwhile (disks arriving, spaces
+             degraded or regenerating, the cache and journal as loaded)
 With -Written "OFFKB:LENKB:TAG;..." the main space must hold the pattern
 with TAG in those ranges (written from Linux) and its own tag elsewhere.
 With -ProbeStrideKB N it also reads the 4 KiB block at every N KiB of the
@@ -148,8 +150,11 @@ function Get-State {
 }
 
 $result = [ordered]@{ name = $Name; windows_build = [Environment]::OSVersion.Version.ToString() }
+$started = Get-Date
 try {
-    foreach ($f in $images) { Mount-DiskImage -ImagePath $f | Out-Null }
+    # All images in one call: a disk arriving late makes Windows start the
+    # pool without it and regenerate mirrors afterwards.
+    Mount-DiskImage -ImagePath $images | Out-Null
     $pool = $null
     for ($i = 0; $i -lt 60 -and -not $pool; $i++) {
         Start-Sleep -Seconds 1
@@ -243,6 +248,13 @@ try {
 } catch {
     $result.error = "$_"
 } finally {
+    # What the Storage Spaces driver reported meanwhile: disks arriving,
+    # spaces degraded or regenerating, the cache and journal as loaded.
+    $result.events = @(Get-WinEvent -FilterHashtable @{
+            LogName = 'Microsoft-Windows-StorageSpaces-Driver/Operational', 'Microsoft-Windows-StorageSpaces-Driver/Diagnostic'
+            StartTime = $started } -ErrorAction SilentlyContinue |
+        Where-Object { $_.Id -in 207, 304, 305, 1008, 1009, 1043, 1044 } | Sort-Object TimeCreated |
+        ForEach-Object { '{0:HH:mm:ss.fff} {1} {2}' -f $_.TimeCreated, $_.Id, (($_.Message -replace '\s+', ' ') -replace '^(.{0,400}).*', '$1') })
     foreach ($f in $images) { Dismount-DiskImage -ImagePath $f -ErrorAction SilentlyContinue | Out-Null }
     $result | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 (Join-Path $dir 'roundtrip.json')
 }

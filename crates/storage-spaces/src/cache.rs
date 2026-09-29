@@ -169,6 +169,8 @@ pub struct CacheWriter {
     slot_seq: Vec<u64>,
     /// Sequence, area and next slot of the newest checkpoint.
     checkpoint: Option<(u64, usize, usize)>,
+    /// Bytes the entries of all cached chunks take in a checkpoint.
+    entry_bytes: usize,
 }
 
 impl CacheWriter {
@@ -186,6 +188,7 @@ impl CacheWriter {
             slots_in_use: 0,
             slot_seq,
             checkpoint: None,
+            entry_bytes: 0,
         }
     }
 
@@ -250,7 +253,8 @@ impl CacheWriter {
         let reserve = 2 * (self.chunks.len() + new as usize).div_ceil(200) + 2;
         self.slots_in_use + reserve + 2 >= self.header.slot_count as usize
             || self.next_block as u64 + new > self.header.chunk_count as u64
-            || (self.header.checkpoint_count > 0 && self.checkpoint_may_overflow(new))
+            || (self.header.checkpoint_count > 0
+                && self.checkpoint_may_overflow((offset / chunk..(offset + len).div_ceil(chunk)).count() as u64))
     }
 
     /// Destaging `offsets` (owner offsets of cached chunks, whose data is in
@@ -264,7 +268,9 @@ impl CacheWriter {
         for batch in offsets.chunks(capacity.max(1)) {
             let mut entries = Vec::with_capacity(batch.len() * 16);
             for &offset in batch {
-                self.chunks.remove(&(offset / chunk));
+                if let Some((_, valid)) = self.chunks.remove(&(offset / chunk)) {
+                    self.entry_bytes = self.entry_bytes.saturating_sub(entry_len(&valid));
+                }
                 entries.extend_from_slice(&(offset / chunk * chunk).to_le_bytes());
                 entries.extend_from_slice(&NO_BLOCK.to_le_bytes());
                 entries.extend_from_slice(&STATE_EMPTY.to_le_bytes());
@@ -300,13 +306,17 @@ impl CacheWriter {
             let end = (offset + len).min((key + 1) * chunk);
             let (first, last) = ((at % chunk / 512) as usize, ((end - 1) % chunk / 512) as usize);
             let next_block = &mut self.next_block;
+            let mut added = false;
             let (_, valid) = self.chunks.entry(key).or_insert_with(|| {
                 let b = *next_block;
                 *next_block += 1;
+                added = true;
                 (b, vec![false; sectors])
             });
             if valid[first..=last].iter().any(|v| !v) {
+                let before = if added { 0 } else { entry_len(valid) };
                 valid[first..=last].fill(true);
+                self.entry_bytes = self.entry_bytes - before + entry_len(valid);
                 changed.push(key);
             }
             at = end;
@@ -323,7 +333,9 @@ impl CacheWriter {
             if let Some((_, valid)) = self.chunks.get_mut(&(offset / chunk))
                 && valid.contains(&false)
             {
+                let before = entry_len(valid);
                 valid.fill(true);
+                self.entry_bytes = self.entry_bytes - before + entry_len(valid);
                 changed.push(offset / chunk);
             }
         }
@@ -390,12 +402,17 @@ impl CacheWriter {
         (entries, self.chunks.len() as u32)
     }
 
-    /// Whether a checkpoint of the map with `new` more chunks (and every
-    /// chunk gaining runs) might not fit into a checkpoint area.
-    fn checkpoint_may_overflow(&self, new: u64) -> bool {
-        let (entries, count) = self.checkpoint_entries();
-        let bound = CHECKPOINT_ENTRIES as u64 + entries.len() as u64 + (u64::from(count) + new) * 24;
+    /// Whether a checkpoint of the map might not fit into a checkpoint area
+    /// once a write touches `touched` chunks (each new one, or one more run
+    /// in each, takes at most 24 bytes more).
+    fn checkpoint_may_overflow(&self, touched: u64) -> bool {
+        let bound = CHECKPOINT_ENTRIES as u64 + self.entry_bytes as u64 + touched * 24;
         bound > u64::from(self.header.checkpoint_size)
+    }
+
+    /// Recounts what the entries of the cached chunks take.
+    fn recount(&mut self) {
+        self.entry_bytes = self.chunks.values().map(|(_, valid)| entry_len(valid)).sum();
     }
 
     /// Appends the next slot with `count` entries, after a checkpoint where
@@ -463,6 +480,14 @@ pub(crate) fn encode_slot(
     let crc = crc32_excluding(&s, 0x24);
     s[0x24..0x28].copy_from_slice(&crc.to_le_bytes());
     s
+}
+
+/// Bytes the entry of a chunk with these valid sectors takes in a slot or
+/// checkpoint (8-byte aligned).
+fn entry_len(valid: &[bool]) -> usize {
+    let runs = valid.windows(2).filter(|w| w[0] != w[1]).count() + 1;
+    let counted = if runs == 1 { 0 } else { 2 * runs };
+    (16 + counted).next_multiple_of(8)
 }
 
 /// Runs of equally valid sectors, from the chunk start.
@@ -897,6 +922,7 @@ impl CacheIndex {
             w.chunks.insert(key, (*block as u32, valid));
             w.next_block = w.next_block.max(*block as u32 + 1);
         }
+        w.recount();
         w.slots_in_use = if w.chunks.is_empty() { 0 } else { self.slots.len() };
         w
     }
@@ -1088,6 +1114,32 @@ mod tests {
         }
     }
 
+    /// The running size of the checkpoint entries follows the map through
+    /// writes that add and split runs, fills and destages.
+    #[test]
+    fn checkpoint_size_is_tracked_as_the_map_changes() {
+        let mut w = CacheWriter::new(header(), 0);
+        let check = |w: &CacheWriter| assert_eq!(w.entry_bytes, w.checkpoint_entries().0.len());
+        let mut seed = 7u64;
+        for step in 0..400 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let offset = (seed >> 33) % (16 * CHUNK) / 512 * 512;
+            let len = ((seed >> 20) % 16 + 1) * 512;
+            let len = len.min(16 * CHUNK - offset);
+            if w.is_full_for(offset, len) || step % 97 == 96 {
+                let cached: Vec<u64> = w.cached().iter().map(|c| c.0).collect();
+                w.destage(&cached[..cached.len() / 2]);
+                check(&w);
+                w.fill(&cached[cached.len() / 2..]);
+                check(&w);
+                let cached: Vec<u64> = w.cached().iter().map(|c| c.0).collect();
+                w.destage(&cached);
+            }
+            w.write(offset, len);
+            check(&w);
+        }
+    }
+
     #[test]
     fn writer_splits_entries_that_do_not_fit_into_one_slot() {
         let header = CacheHeader {
@@ -1260,6 +1312,7 @@ mod tests {
         for &o in &offsets {
             w.chunks.insert(o / chunk, (0, vec![true; (chunk / 512) as usize]));
         }
+        w.recount();
         let written = w.destage(&offsets);
         assert_eq!(written.len(), 1);
         let (index, page) = written[0].slot().unwrap();

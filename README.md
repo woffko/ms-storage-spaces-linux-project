@@ -3,16 +3,17 @@
 [![CI](https://github.com/woffko/ms-storage-spaces-linux-project/actions/workflows/ci.yml/badge.svg)](https://github.com/woffko/ms-storage-spaces-linux-project/actions/workflows/ci.yml)
 [![License: GPL-2.0-or-later](https://img.shields.io/badge/license-GPL--2.0--or--later-blue.svg)](LICENSE)
 
-Read Microsoft Storage Spaces pools on Linux: `spaces` assembles a pool from
-its member disks and exposes every virtual disk ("space") as a read-only
-Linux block device, attached automatically at boot or when the disks are
-plugged in, so the NTFS (or any other) file system inside mounts like on an
-ordinary disk. Written in Rust, from a reverse-engineered description of the
+Read and write Microsoft Storage Spaces pools on Linux: `spaces` assembles a
+pool from its member disks and exposes every virtual disk ("space") as a
+Linux block device, read-only unless asked otherwise, attached
+automatically at boot or when the disks are plugged in, so the NTFS (or any
+other) file system inside mounts like on an ordinary disk. Written in Rust, from a reverse-engineered description of the
 on-disk format that is checked against pools created by Windows.
 
-> **Status: read-only, pools created by Windows 11.** Writing and pool
-> management are planned (see [the plan](docs/plan.md)); ReFS will follow.
-> The tools never write to the pool disks.
+> **Status: pools created by Windows 11; reading, and writing to simple,
+> mirror and single parity spaces (`attach --rw`, new).** Pool management is
+> planned (see [the plan](docs/plan.md)); ReFS will follow. The pool disks
+> are written only for spaces attached read-write.
 
 ## What works
 
@@ -31,7 +32,9 @@ on-disk format that is checked against pools created by Windows.
 | Pools after a crash or power loss | read; the few parity stripes or mirror rows left inconsistent by writes in flight are refused |
 | Pools created by Windows 11 24H2 (pool version 28) and Insider builds (version 29) | yes |
 | Pools created by Windows 8, 10 or Windows Server | not supported |
-| Writing, pool management, ReFS | not yet |
+| Writing simple, mirror and single parity spaces (fixed, or allocated rows of thin ones) | `attach --rw`; Windows reads the result back |
+| Writing dual parity, tiers, new rows of thin spaces, degraded pools | refused |
+| Pool management, ReFS | not yet |
 
 ## Quick start
 
@@ -61,8 +64,8 @@ spaces info /dev/sdb /dev/sdc
 spaces export /dev/sdb /dev/sdc --space "My space" --output space.img
 ```
 
-See the [user guide](docs/user-guide.md) for details, degraded pools and
-pools after a crash, and `man contrib/man/spaces.8`.
+See the [user guide](docs/user-guide.md) for details, writing, degraded
+pools and pools after a crash, and `man contrib/man/spaces.8`.
 
 ### Backends
 
@@ -111,7 +114,8 @@ pools after a crash, and `man contrib/man/spaces.8`.
 1. **Read-only** access that behaves like a normal disk (done for Windows 11
    pools).
 2. **Writes** to the exposed block devices, with Windows accepting the pool
-   afterwards.
+   afterwards (simple, mirror and single parity spaces done; thin
+   allocation and TRIM next).
 3. **Pool management**: creating, extending and repairing pools and spaces.
 
 ReFS support is planned as a separate track. Details in

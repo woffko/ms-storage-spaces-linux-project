@@ -1,6 +1,6 @@
-.TH SPACES 8 "2026-09-26" "storage-spaces 0.1" "System Administration"
+.TH SPACES 8 "2026-09-29" "storage-spaces 0.2" "System Administration"
 .SH NAME
-spaces \- read Microsoft Storage Spaces pools on Linux
+spaces \- read and write Microsoft Storage Spaces pools on Linux
 .SH SYNOPSIS
 .RB [ \-\-unclean\-parity
 .IR refuse | data ]
@@ -17,6 +17,7 @@ spaces \- read Microsoft Storage Spaces pools on Linux
 .IR auto | dm | ublk | nbd | fuse ]
 .RB [ \-\-degraded ]
 .RB [ \-\-force ]
+.RB [ \-\-rw ]
 .RI [ device ...]
 .br
 .B spaces detach
@@ -56,16 +57,20 @@ spaces \- read Microsoft Storage Spaces pools on Linux
 .B spaces
 reads the metadata of Microsoft Storage Spaces pools created by Windows 11
 (pool versions 28 and 29) from their member disks and exposes the virtual
-disks ("spaces") as read-only Linux block devices. It never writes to pool
-members.
+disks ("spaces") as Linux block devices, read-only unless a space is
+attached with
+.BR \-\-rw ;
+pool members are never written otherwise.
 .PP
 Supported: simple, two- and three-way mirror, single and dual parity spaces
 (including the local reconstruction code of 11 and more columns), storage
 tiers and mirror-accelerated parity, fixed and thin provisioning, several
 spaces per pool, the per-space write-back cache, 512e and 4Kn member disks,
 pools with missing, failing or retired disks as far as the redundancy
-allows, and pools after a crash. Not supported yet: writing, pool
-management, pools created by other Windows releases.
+allows, and pools after a crash. Writing: simple, mirror and single parity
+spaces of clean pools (not dual parity, storage tiers, new rows of thin
+spaces, degraded pools). Not supported yet: pool management, pools created
+by other Windows releases.
 .SH COMMANDS
 .TP
 .B scan
@@ -84,6 +89,18 @@ is given; pools with fewer than half of their disks are skipped unless
 .B \-\-force
 is given too (the disks at hand may hold an old state of the pool).
 Spaces already attached are left alone.
+With
+.B \-\-rw
+the spaces are attached read-write, if their state is fully understood
+(clean pool, healthy space, a supported resiliency); otherwise the reason is
+printed. Mirror spaces keep their dirty region log, single parity spaces are
+written through their write-back cache and parity journal, as Windows does.
+Writes are durable once flushed or after
+.BR detach .
+Not with
+.B \-\-degraded
+or
+.BR \-\-force .
 .TP
 .B detach
 Removes the devices of the given space (name, GUID or device-mapper name) or
@@ -124,7 +141,8 @@ parity stripes.
 .B dm
 Device-mapper table over the member devices; no process. Used by
 .B auto
-for simple spaces whose logical sector size matches the members'.
+for simple spaces whose logical sector size matches the members' (read-write
+only when the space is fully allocated and its write-back cache is empty).
 .TP
 .B ublk
 A
@@ -147,6 +165,7 @@ A
 .B spaces serve\-fuse
 process exposing an image file, attached with
 .BR losetup (8).
+Read-only.
 .SH FILES
 .TP
 .I /run/storage-spaces/
@@ -162,6 +181,7 @@ spaces scan
 spaces attach
 mount \-o ro /dev/mapper/ss\-Storage_pool\-Data\-p2 /mnt
 spaces detach
+spaces attach \-\-rw \-\-space Data
 .fi
 .SH SEE ALSO
 .BR dmsetup (8),

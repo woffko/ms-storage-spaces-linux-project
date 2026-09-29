@@ -130,6 +130,17 @@ pub fn dump<D: ReadAt>(pool: &Pool<D>) -> Vec<String> {
             for (offset, versions) in j.entries() {
                 line(format!("{tag} journal run {offset:#x} {versions:?}"));
             }
+            if let Some(c) = j.checkpoint() {
+                line(format!(
+                    "{tag} journal checkpoint area {} kind {} sequence {} continues at slot {} entries {}: {}",
+                    c.area,
+                    c.kind,
+                    c.sequence,
+                    c.next_slot,
+                    c.count,
+                    hex(&c.entries)
+                ));
+            }
             for s in j.slots() {
                 line(format!(
                     "{tag} journal slot {} type {} sequence {} entries {}: {}",
@@ -148,6 +159,17 @@ pub fn dump<D: ReadAt>(pool: &Pool<D>) -> Vec<String> {
             }
             for (offset, block, valid) in c.mappings() {
                 line(format!("{tag} cache chunk {offset:#x} block {block} {valid:?}"));
+            }
+            if let Some(c) = c.checkpoint() {
+                line(format!(
+                    "{tag} cache checkpoint area {} kind {} sequence {} continues at slot {} entries {}: {}",
+                    c.area,
+                    c.kind,
+                    c.sequence,
+                    c.next_slot,
+                    c.count,
+                    hex(&c.entries)
+                ));
             }
             for s in c.slots() {
                 line(format!(

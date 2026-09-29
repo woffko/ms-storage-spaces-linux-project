@@ -9,6 +9,15 @@
 //! * `ublk`, `nbd`, `fuse`: a `spaces serve-*` process run as a transient
 //!   systemd unit, wrapped by a linear device-mapper device.
 //!
+//! Spaces are attached read-only unless `--rw` is given. Writable spaces
+//! must pass the checks of the space writer (clean pool, healthy space, a
+//! resiliency writes can keep consistent). dm serves them only for simple
+//! spaces that are fully allocated and whose write-back cache holds
+//! nothing (dm cannot log to the cache, and its zero targets would drop
+//! writes into unallocated rows); others are served by `serve-ublk --rw`
+//! or `serve-nbd --rw`, which flush when they are stopped. FUSE is
+//! read-only.
+//!
 //! State lives in `/run/storage-spaces/<space guid>.state`.
 
 use std::fs::{self, File};
@@ -58,6 +67,8 @@ pub struct State {
     pub fuse_mount: Option<String>,
     /// Device-mapper names, whole space first.
     pub dm: Vec<String>,
+    /// Attached read-write.
+    pub rw: bool,
 }
 
 impl State {
@@ -83,6 +94,9 @@ impl State {
         for d in &self.dm {
             text += &format!("dm={d}\n");
         }
+        if self.rw {
+            text += "mode=rw\n";
+        }
         let tmp = Self::path(&self.space_guid).with_extension("tmp");
         fs::write(&tmp, text)?;
         fs::rename(tmp, Self::path(&self.space_guid))?;
@@ -104,6 +118,7 @@ impl State {
                 "device" => s.device = Some(value),
                 "fuse_mount" => s.fuse_mount = Some(value),
                 "dm" => s.dm.push(value),
+                "mode" => s.rw = value == "rw",
                 _ => {}
             }
         }
@@ -162,13 +177,18 @@ fn run(program: &str, args: &[&str], stdin: Option<&str>) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn dm_create(name: &str, table: &str) -> Result<()> {
+fn dm_create(name: &str, table: &str, rw: bool) -> Result<()> {
     if Path::new("/dev/mapper").join(name).exists() {
         bail!(
             "device-mapper device {name} already exists (left over from an interrupted run?); remove it with `dmsetup remove {name}`"
         );
     }
-    run("dmsetup", &["create", "--readonly", name], Some(table))?;
+    let args: &[&str] = if rw {
+        &["create", name]
+    } else {
+        &["create", "--readonly", name]
+    };
+    run("dmsetup", args, Some(table))?;
     run("udevadm", &["settle"], None).ok();
     Ok(())
 }
@@ -182,6 +202,8 @@ fn dm_remove(name: &str) -> Result<()> {
 
 /// Logical block size of a block device (through its parent for partitions).
 fn logical_block_size(dev: &Path) -> Option<u32> {
+    // /dev/mapper/<name> and /dev/disk/by-* are links to the kernel name.
+    let dev = fs::canonicalize(dev).ok()?;
     let name = dev.file_name()?.to_str()?;
     let sys = fs::canonicalize(Path::new("/sys/class/block").join(name)).ok()?;
     let queue = if sys.join("partition").exists() {
@@ -239,11 +261,40 @@ fn available(backend: Backend) -> bool {
     }
 }
 
+/// Why dm cannot serve the space read-write, if it cannot.
+fn dm_write_refusal(reader: &SpaceReader<'_, File>) -> Option<&'static str> {
+    if reader.layout().resiliency != storage_spaces::format::Resiliency::Simple {
+        return Some("dm writes one copy only; mirror and parity spaces need their logs kept");
+    }
+    if reader.cache().is_some_and(|c| c.cached_chunks() > 0) {
+        return Some("the write-back cache holds data, which dm would not see");
+    }
+    match reader.segments() {
+        Ok(segments) if segments.iter().any(|s| matches!(s.kind, SegmentKind::Zero)) => {
+            Some("the space has unallocated rows, whose writes dm would drop")
+        }
+        Ok(_) => None,
+        Err(_) => Some("dm cannot map this space"),
+    }
+}
+
 /// Picks the backend for a space.
-fn choose(requested: Backend, reader: &SpaceReader<'_, File>, paths: &[PathBuf], sector: u32) -> Result<Backend> {
+fn choose(
+    requested: Backend,
+    reader: &SpaceReader<'_, File>,
+    paths: &[PathBuf],
+    sector: u32,
+    rw: bool,
+) -> Result<Backend> {
+    if rw && requested == Backend::Fuse {
+        bail!("the fuse backend is read-only");
+    }
     if requested != Backend::Auto {
         if requested == Backend::Dm {
             reader.segments().context("the dm backend cannot map this space")?;
+            if let Some(why) = dm_write_refusal(reader).filter(|_| rw) {
+                bail!("the dm backend cannot serve this space read-write: {why}");
+            }
         }
         if !available(requested) {
             bail!("backend {} is not available on this system", requested.name());
@@ -255,10 +306,20 @@ fn choose(requested: Backend, reader: &SpaceReader<'_, File>, paths: &[PathBuf],
     // other copies when served by a process.
     let sectors_match = paths.iter().all(|p| logical_block_size(p) == Some(sector));
     let simple = reader.layout().resiliency == storage_spaces::format::Resiliency::Simple;
-    if simple && reader.segments().is_ok() && sectors_match && available(Backend::Dm) {
+    let dm_ok = if rw {
+        dm_write_refusal(reader).is_none()
+    } else {
+        reader.segments().is_ok()
+    };
+    if simple && dm_ok && sectors_match && available(Backend::Dm) {
         return Ok(Backend::Dm);
     }
-    for b in [Backend::Ublk, Backend::Nbd, Backend::Fuse] {
+    let fallbacks: &[Backend] = if rw {
+        &[Backend::Ublk, Backend::Nbd]
+    } else {
+        &[Backend::Ublk, Backend::Nbd, Backend::Fuse]
+    };
+    for &b in fallbacks {
         if available(b) {
             return Ok(b);
         }
@@ -342,53 +403,67 @@ pub fn is_attached(space: &Space) -> bool {
     State::path(&space.info.guid.to_string()).exists()
 }
 
-/// Attaches one space. Returns the state describing what was created.
-pub fn attach_space(pool: &Pool<File>, space: &Space, paths: &[PathBuf], requested: Backend) -> Result<State> {
+/// Attaches one space (read-write with `rw`). Returns the state describing
+/// what was created.
+pub fn attach_space(
+    pool: &Pool<File>,
+    space: &Space,
+    paths: &[PathBuf],
+    requested: Backend,
+    rw: bool,
+) -> Result<State> {
     let guid = space.info.guid.to_string();
+    if rw && let Some(why) = pool.write_refusal(space.id())? {
+        bail!("it cannot be written: {why}");
+    }
     let reader = crate::open_space(pool, space.id())?;
     let sector = pool.logical_sector_size;
-    let backend = choose(requested, &reader, paths, sector)?;
+    let backend = choose(requested, &reader, paths, sector, rw)?;
     let name = dm_name(&pool.name, space.name());
     let unit = format!("storage-spaces-{guid}");
     let mut state = State {
         space_guid: guid.clone(),
         pool_guid: pool.guid.to_string(),
         backend: backend.name().into(),
+        rw,
         ..Default::default()
     };
+    let rw_arg: &[&str] = if rw { &["--rw"] } else { &[] };
     let sectors = reader.size() / 512;
     let result = (|| -> Result<()> {
         match backend {
-            Backend::Dm | Backend::Auto => dm_create(&name, &dm_table(&reader, paths)?)?,
+            Backend::Dm | Backend::Auto => dm_create(&name, &dm_table(&reader, paths)?, rw)?,
             Backend::Ublk => {
                 state.unit = Some(unit.clone());
-                let dev = start_server(&unit, "ublk", paths, &guid, &[])?;
-                dm_create(&name, &format!("0 {sectors} linear {dev} 0\n"))?;
+                let dev = start_server(&unit, "ublk", paths, &guid, rw_arg)?;
+                dm_create(&name, &format!("0 {sectors} linear {dev} 0\n"), rw)?;
                 state.device = Some(dev);
             }
             Backend::Nbd => {
                 state.unit = Some(unit.clone());
                 let socket = Path::new(STATE_DIR).join(format!("{unit}.sock"));
                 let _ = fs::remove_file(&socket);
-                start_server(&unit, "nbd", paths, &guid, &["--socket", &socket.display().to_string()])?;
+                let socket_arg = socket.display().to_string();
+                let mut extra = vec!["--socket", socket_arg.as_str()];
+                extra.extend(rw_arg);
+                start_server(&unit, "nbd", paths, &guid, &extra)?;
                 let dev = free_nbd()?;
                 let bs = sector.to_string();
-                run(
-                    "nbd-client",
-                    &[
-                        "-N",
-                        space.name(),
-                        "-u",
-                        &socket.display().to_string(),
-                        &dev,
-                        "-b",
-                        &bs,
-                        "-R",
-                    ],
-                    None,
-                )?;
+                let mut args = vec![
+                    "-N",
+                    space.name(),
+                    "-u",
+                    socket_arg.as_str(),
+                    dev.as_str(),
+                    "-b",
+                    bs.as_str(),
+                ];
+                if !rw {
+                    args.push("-R");
+                }
+                run("nbd-client", &args, None)?;
                 state.device = Some(dev.clone());
-                dm_create(&name, &format!("0 {sectors} linear {dev} 0\n"))?;
+                dm_create(&name, &format!("0 {sectors} linear {dev} 0\n"), rw)?;
             }
             Backend::Fuse => {
                 state.unit = Some(unit.clone());
@@ -407,14 +482,14 @@ pub fn attach_space(pool: &Pool<File>, space: &Space, paths: &[PathBuf], request
                     .trim()
                     .to_string();
                 state.device = Some(dev.clone());
-                dm_create(&name, &format!("0 {sectors} linear {dev} 0\n"))?;
+                dm_create(&name, &format!("0 {sectors} linear {dev} 0\n"), false)?;
             }
         }
         state.dm.push(name.clone());
         for p in read_partitions(&reader, sector as u64)? {
             let part = format!("{name}-p{}", p.number);
             let table = format!("0 {} linear /dev/mapper/{name} {}\n", p.length / 512, p.offset / 512);
-            dm_create(&part, &table)?;
+            dm_create(&part, &table, rw)?;
             state.dm.push(part);
         }
         Ok(())
