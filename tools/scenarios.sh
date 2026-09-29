@@ -80,6 +80,9 @@ m7zero | -DiskCount 2 -Resiliency Simple -Columns 1 -Provisioning Thin -SizeMB 4
 # M7: the pool database past its 64 formatted slots: 48 writes of 4 KiB,
 # 256 MiB apart, all but the first allocating a row of a thin space.
 m7grow | -DiskCount 3 -Resiliency Simple -Columns 1 -Provisioning Thin -SizeMB 16384 -AllocationUnitMB 256 -NoPattern | snap:s0:64; writes:m7grow:48:262144:4:g; snap:s1:64; dismount
+# M7: TRIM on a thin space: NTFS, a file of 768 MiB (whole slabs),
+# deleted, then the free space retrimmed; are slabs given back?
+m7trim | -DiskCount 2 -Resiliency Simple -Columns 1 -Provisioning Thin -SizeMB 4096 -AllocationUnitMB 256 -NoPattern | format:m7trim; snap:s0:64; file:m7trim:big:768; snap:s1:64; delfile:m7trim:big; retrim:m7trim; sleep:30; snap:s2:64; dismount
 LIST
 exit $status
 }

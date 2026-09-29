@@ -515,6 +515,8 @@ pub const SPCHECK_SIGNATURE: &[u8; 8] = b"SPCHECK\0";
 const CHECKPOINT_HEADER: usize = 0x50;
 /// Where a checkpoint's entries start.
 const CHECKPOINT_ENTRIES: usize = 0x200;
+/// The largest checkpoint read.
+const MAX_CHECKPOINT: usize = 16 << 20;
 
 /// A checkpoint of the chunk map ("SPCHECK\0", in one of the checkpoint
 /// areas after the slot area): the owner GUID (mixed-endian), u32 1, u32
@@ -623,7 +625,10 @@ pub(crate) fn load_checkpoints(
             } else {
                 0
             };
-            let checkpoint = if used > head.len() && used <= size as usize {
+            // Real checkpoints take a few MiB at most (a full 1 GiB cache
+            // about 4 MiB); a larger claim is not read (journal areas are
+            // 125 MiB, and the disk may be hostile).
+            let checkpoint = if used > head.len() && used <= (size as usize).min(MAX_CHECKPOINT) {
                 read.read_slot_copies(at, used)?
                     .get(copy)
                     .and_then(|b| Checkpoint::parse(area, b, owner))

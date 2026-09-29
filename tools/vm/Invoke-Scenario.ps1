@@ -27,6 +27,10 @@ The pool is made by New-TestPool.ps1 -Finish Keep, so it stays attached.
   readonly:true|false        set the pool read-only or writable
   newspace:NAME:RESILIENCY:SIZEMB[:Thin|Fixed]
   removespace:NAME
+  format:SPACE               GPT, one partition and NTFS on the space
+  file:SPACE:NAME:MB         write a file of MB MiB (random data) there
+  delfile:SPACE:NAME         delete it
+  retrim:SPACE               Optimize-Volume -ReTrim (TRIM of free space)
   dismount                   detach every member image
 A snapshot file ("SSSNAP01") holds the disk size and runs of 4 KiB pages:
 kind 1 = data (offset u64, pages u32, the pages), kind 2 = verification
@@ -152,6 +156,15 @@ function Get-SpaceDevice([string] $space) {
     if ($d.IsReadOnly) { $d | Set-Disk -IsReadOnly $false }
     "\\.\PhysicalDrive$($d.Number)"
 }
+function Get-SpaceVolume([string] $space) {
+    $d = Get-VirtualDisk -FriendlyName $space | Get-Disk
+    $part = $d | Get-Partition | Where-Object Type -eq 'Basic' | Select-Object -First 1
+    if (-not $part.DriveLetter) {
+        $part | Add-PartitionAccessPath -AssignDriveLetter
+        $part = Get-Partition -DiskNumber $d.Number -PartitionNumber $part.PartitionNumber
+    }
+    "$($part.DriveLetter):"
+}
 function Get-State {
     $p = Get-StoragePool -FriendlyName $poolName -ErrorAction SilentlyContinue
     if (-not $p) { return [ordered]@{ pool = $null } }
@@ -250,6 +263,25 @@ foreach ($step in ($Steps.Split(';') | Where-Object { $_ })) {
             New-VirtualDisk @p | Out-Null
         }
         'removespace' { Remove-VirtualDisk -FriendlyName $a[1] -Confirm:$false }
+        'format' {
+            $d = Get-VirtualDisk -FriendlyName $a[1] | Get-Disk
+            if ($d.IsOffline) { $d | Set-Disk -IsOffline $false }
+            if ($d.IsReadOnly) { $d | Set-Disk -IsReadOnly $false }
+            if ($d.PartitionStyle -eq 'RAW') { $d | Initialize-Disk -PartitionStyle GPT }
+            $d | New-Partition -UseMaximumSize -AssignDriveLetter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $a[1] -Confirm:$false | Out-Null
+        }
+        'file' {
+            $path = Join-Path (Get-SpaceVolume $a[1]) $a[2]
+            $buf = New-Object byte[] (1MB)
+            $rng = [System.Random]::new(7)
+            $fs = [System.IO.File]::Create($path)
+            try {
+                for ($k = 0; $k -lt [int]$a[3]; $k++) { $rng.NextBytes($buf); $fs.Write($buf, 0, $buf.Length) }
+                $fs.Flush($true)
+            } finally { $fs.Dispose() }
+        }
+        'delfile' { Remove-Item -Force (Join-Path (Get-SpaceVolume $a[1]) $a[2]) }
+        'retrim' { Optimize-Volume -DriveLetter (Get-SpaceVolume $a[1]).TrimEnd(':') -ReTrim | Out-Null }
         'dismount' { foreach ($f in Get-Images) { if ((Get-DiskImage -ImagePath $f).Attached) { Dismount-DiskImage -ImagePath $f | Out-Null } } }
         default { throw "unknown step $step" }
     }

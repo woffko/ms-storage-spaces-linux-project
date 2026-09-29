@@ -946,6 +946,8 @@ fn serve_nbd(
     };
     let listener = std::os::unix::net::UnixListener::bind(socket)
         .with_context(|| format!("cannot listen on {}", socket.display()))?;
+    // Only the owner may connect (whatever the umask), before anyone can.
+    std::fs::set_permissions(socket, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     let space_size = source.size()?;
     let export = nbd::Export {
         name: space.name(),
