@@ -336,7 +336,15 @@ intact; used for the mirror copy and diverging database experiments).
   before and after. Object ids of new spaces (`m5ids`: 37, 70,
   99/100, 108) do not follow from the metadata either.
 
-### M6 (in progress, 2026-09-29)
+### M6 (exit criteria met, 2026-09-29)
+
+Met for simple, mirror and single parity spaces: fio with verification
+through every backend, NTFS written on Linux and verified by Windows
+(healthy, nothing to repair, chkdsk clean, every file intact), crash states
+accepted and handled by Windows, crash replays of every flush point and of
+unordered unflushed writes. Refused rather than written: dual parity (M5
+did not cover its write path), degraded pools and spaces, storage tiers,
+rows of thin spaces not allocated yet (M7).
 
 * Write infrastructure: `WriteAt`, `Overlay` (writes kept in memory, for
   tests), `Pool::open_space_rw` and `SpaceWriter`, which opens a space for

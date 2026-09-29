@@ -741,3 +741,32 @@ fn consistent_stripes_are_rewritten_through_the_cache() {
     let mappings: Vec<(u64, u64)> = reader.cache().unwrap().mappings().iter().map(|m| (m.0, m.1)).collect();
     assert_eq!(mappings, (0..8).map(|c| (c * (512 << 10), 64 + c)).collect::<Vec<_>>());
 }
+
+/// m7zero: a thin simple space (one column on two disks), a fixed space of
+/// 512 MiB filled with the pattern (tag x) and deleted, then 4 KiB written
+/// at 1 GiB of the thin space, into a row it had not allocated. Windows
+/// allocated the row at the first free slab of the disk it picked (slab 2
+/// of disk 1, freed by the deleted space) in one database update, and did
+/// not clear it: past the 4 KiB written, the row reads what the deleted
+/// space left there.
+#[test]
+fn new_slabs_are_not_cleared() {
+    use storage_spaces::testpattern::{BLOCK, fill_block};
+    let read = |label: &str| {
+        let pool = state("m7zero", label);
+        let space = pool.find_space("m7zero").unwrap();
+        let reader = pool.open_space(space.id()).unwrap();
+        let mut b = vec![0u8; 2 * BLOCK];
+        reader.read_exact_at(&mut b, 1 << 30).unwrap();
+        (b, reader.layout().physical(0, 0, 4), pool.database.sequence)
+    };
+    let (before, row, sequence) = read("s0");
+    assert!(before.iter().all(|&x| x == 0), "an unallocated row reads zeros");
+    assert_eq!(row, None);
+    let (after, row, next) = read("s1");
+    assert_eq!((row, next), (Some((1, 2)), sequence + 1));
+    let mut expected = vec![0u8; 2 * BLOCK];
+    fill_block(&mut expected[..BLOCK], 1 << 30, "a");
+    fill_block(&mut expected[BLOCK..], BLOCK as u64, "x");
+    assert!(after == expected, "the written block, then the deleted space's data");
+}

@@ -288,6 +288,10 @@ How Windows allocates slabs (**verified** by the tests
 * An extent record covers one allocation unit: 4 slabs with 1 GiB units
   (`m5db`'s second space), 1 slab with 256 MiB units (its extension, the
   thin spaces).
+* A new slab is not cleared (**verified** by the test
+  `new_slabs_are_not_cleared` on the scenario `m7zero`): deleting a space
+  leaves its data on the disks, and a thin row allocated at one of its
+  slabs reads that data wherever it has not been written since.
 
 ## Data layout (**verified**)
 

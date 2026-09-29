@@ -73,6 +73,10 @@ m5wbc2 | -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -SizeMB 2048 -
 m5thinwbc | -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -Provisioning Thin -SizeMB 4096 -NoPattern | snap:s0; write:m5thinwbc:2097152:4:a; snap:s1; writes:m5thinwbc:1500:512:4:b; snap:s2; dismount
 # Rewriting consistent stripes: does Windows mark them in the journal first?
 m5pj3 | -DiskCount 3 -Resiliency Parity -Redundancy 1 -Columns 3 -SizeMB 2048 -NoPattern | snap:s0; write:m5pj3:0:4096:a; snap:s1; write:m5pj3:0:4096:b; snap:s2; dismount
+# M7: what a thin space reads where a new slab was not written: a fixed
+# space filled with the pattern and deleted, then 4 KiB written into an
+# unallocated row of the thin space (whose slab can be one it freed).
+m7zero | -DiskCount 2 -Resiliency Simple -Columns 1 -Provisioning Thin -SizeMB 4096 -AllocationUnitMB 256 -NoPattern | newspace:m7fill:Simple:512:Fixed; write:m7fill:0:524288:x; snap:f0:1100; removespace:m7fill; snap:s0:1100; write:m7zero:1048576:4:a; snap:s1:1100; dismount
 LIST
 exit $status
 }

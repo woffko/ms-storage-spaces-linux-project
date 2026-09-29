@@ -1,0 +1,46 @@
+﻿{
+    "pool":  {
+                 "health":  "Healthy",
+                 "operational":  "OK",
+                 "read_only":  false
+             },
+    "spaces":  [
+                   {
+                       "name":  "m7zero",
+                       "health":  "Healthy",
+                       "operational":  "OK",
+                       "size":  4294967296,
+                       "footprint":  268435456,
+                       "manual_attach":  false,
+                       "extents":  [
+                                       {
+                                           "column":  0,
+                                           "copy":  0,
+                                           "size":  268435456,
+                                           "virtual_offset":  0,
+                                           "physical_offset":  268435456,
+                                           "disk_unique_id":  "60022480A54DD94FB785D8D535C86888",
+                                           "status":  "Active"
+                                       }
+                                   ]
+                   }
+               ],
+    "disks":  [
+                  {
+                      "unique_id":  "60022480A54DD94FB785D8D535C86888",
+                      "health":  "Healthy",
+                      "operational":  "OK",
+                      "usage":  "Auto-Select",
+                      "allocated":  1091567616,
+                      "size":  8589934592
+                  },
+                  {
+                      "unique_id":  "60022480812BF1509E9E7697F83A0E2C",
+                      "health":  "Healthy",
+                      "operational":  "OK",
+                      "usage":  "Auto-Select",
+                      "allocated":  823132160,
+                      "size":  8589934592
+                  }
+              ]
+}
