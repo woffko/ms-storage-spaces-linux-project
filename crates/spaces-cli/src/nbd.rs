@@ -39,12 +39,14 @@ const TFLAG_HAS_FLAGS: u16 = 1;
 const TFLAG_READ_ONLY: u16 = 2;
 const TFLAG_SEND_FLUSH: u16 = 4;
 const TFLAG_SEND_FUA: u16 = 8;
+const TFLAG_SEND_TRIM: u16 = 1 << 5;
 const TFLAG_CAN_MULTI_CONN: u16 = 1 << 8;
 
 const CMD_READ: u16 = 0;
 const CMD_WRITE: u16 = 1;
 const CMD_DISC: u16 = 2;
 const CMD_FLUSH: u16 = 3;
+const CMD_TRIM: u16 = 4;
 const CMD_FLAG_FUA: u16 = 1;
 
 const EPERM: u32 = 1;
@@ -59,6 +61,14 @@ pub trait Sink: Sync {
     fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()>;
     /// Makes the writes so far durable.
     fn flush(&self) -> io::Result<()>;
+    /// Whether discards are of use (offered to the client).
+    fn discards(&self) -> bool {
+        false
+    }
+    /// Discards a range (its content may change).
+    fn discard(&self, _offset: u64, _len: u64) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// What is exported: read-only without a sink.
@@ -95,7 +105,7 @@ pub fn serve<R: ReadAt + ?Sized, S: Read + Write>(export: &Export<'_, R>, mut co
                     return Ok(()); // the protocol has no error reply here
                 }
                 conn.write_all(&export.size.to_be_bytes())?;
-                conn.write_all(&transmission_flags(export.sink.is_some()).to_be_bytes())?;
+                conn.write_all(&transmission_flags(export.sink).to_be_bytes())?;
                 if !no_zeroes {
                     conn.write_all(&[0u8; 124])?;
                 }
@@ -122,7 +132,7 @@ pub fn serve<R: ReadAt + ?Sized, S: Read + Write>(export: &Export<'_, R>, mut co
                 }
                 let mut info = INFO_EXPORT.to_be_bytes().to_vec();
                 info.extend_from_slice(&export.size.to_be_bytes());
-                info.extend_from_slice(&transmission_flags(export.sink.is_some()).to_be_bytes());
+                info.extend_from_slice(&transmission_flags(export.sink).to_be_bytes());
                 option_reply(&mut conn, option, REP_INFO, &info)?;
                 let mut bs = INFO_BLOCK_SIZE.to_be_bytes().to_vec();
                 bs.extend_from_slice(&export.block_size.to_be_bytes());
@@ -140,8 +150,12 @@ pub fn serve<R: ReadAt + ?Sized, S: Read + Write>(export: &Export<'_, R>, mut co
     transmission(export, conn)
 }
 
-fn transmission_flags(writable: bool) -> u16 {
-    let access = if writable { TFLAG_SEND_FUA } else { TFLAG_READ_ONLY };
+fn transmission_flags(sink: Option<&dyn Sink>) -> u16 {
+    let access = match sink {
+        Some(sink) if sink.discards() => TFLAG_SEND_FUA | TFLAG_SEND_TRIM,
+        Some(_) => TFLAG_SEND_FUA,
+        None => TFLAG_READ_ONLY,
+    };
     TFLAG_HAS_FLAGS | access | TFLAG_SEND_FLUSH | TFLAG_CAN_MULTI_CONN
 }
 
@@ -210,6 +224,18 @@ fn transmission<R: ReadAt + ?Sized, S: Read + Write>(export: &Export<'_, R>, mut
                     reply(&mut conn, EIO, &[])?;
                 }
             },
+            CMD_TRIM => {
+                let in_range = offset.checked_add(length as u64).is_some_and(|end| end <= export.size);
+                let result = match export.sink.filter(|_| in_range) {
+                    Some(sink) => sink.discard(offset, length as u64).map(|()| 0).unwrap_or_else(|e| {
+                        eprintln!("discard of {length} bytes at {offset:#x} failed: {e}");
+                        EIO
+                    }),
+                    None if export.sink.is_some() => EINVAL,
+                    None => EPERM,
+                };
+                reply(&mut conn, result, &[])?;
+            }
             // What the client wrote becomes durable when it disconnects.
             CMD_DISC => return export.sink.map_or(Ok(()), |s| s.flush()),
             // Writes carry a payload that must be consumed before replying.
@@ -354,6 +380,7 @@ mod tests {
         let (size, flags, block) = client_go(&mut client, "space");
         assert_eq!((size, block), (8192, 4096));
         assert_ne!(flags & TFLAG_READ_ONLY, 0);
+        assert_eq!(flags & TFLAG_SEND_TRIM, 0);
         let (error, data) = request(&mut client, CMD_READ, 4096, 16);
         assert_eq!(error, 0);
         assert_eq!(data, (4096..4112u32).map(|i| i as u8).collect::<Vec<_>>());
@@ -390,6 +417,13 @@ mod tests {
             self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         }
+        fn discards(&self) -> bool {
+            true
+        }
+        fn discard(&self, offset: u64, len: u64) -> io::Result<()> {
+            self.0.lock().unwrap()[offset as usize..(offset + len) as usize].fill(0);
+            Ok(())
+        }
     }
 
     #[test]
@@ -410,6 +444,7 @@ mod tests {
         let (_, flags, _) = client_go(&mut client, "space");
         assert_eq!(flags & TFLAG_READ_ONLY, 0);
         assert_ne!(flags & TFLAG_SEND_FUA, 0);
+        assert_ne!(flags & TFLAG_SEND_TRIM, 0);
         assert_eq!(request_with(&mut client, CMD_WRITE, 0, 4096, &[7; 16], 16).0, 0);
         assert_eq!(
             request(&mut client, CMD_READ, 4090, 12).1,
@@ -423,6 +458,13 @@ mod tests {
         // Out of range: the payload is consumed and the write refused.
         assert_eq!(request_with(&mut client, CMD_WRITE, 0, 8190, &[1; 4], 4).0, EINVAL);
         assert_eq!(request(&mut client, CMD_READ, 8188, 4).1, [0; 4]);
+        // Trims reach the sink; beyond the end they are refused.
+        assert_eq!(request(&mut client, CMD_TRIM, 4096, 8).0, 0);
+        assert_eq!(
+            request(&mut client, CMD_READ, 4096, 12).1,
+            [0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 7]
+        );
+        assert_eq!(request(&mut client, CMD_TRIM, 8190, 4).0, EINVAL);
         let mut disc = REQUEST_MAGIC.to_be_bytes().to_vec();
         disc.extend_from_slice(&[0, 0, 0, 2]);
         disc.extend_from_slice(&[0u8; 20]);

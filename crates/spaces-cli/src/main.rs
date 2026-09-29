@@ -922,6 +922,12 @@ impl nbd::Sink for storage_spaces::SpaceWriter<'_, File> {
     fn flush(&self) -> std::io::Result<()> {
         storage_spaces::SpaceWriter::flush(self).map_err(std::io::Error::other)
     }
+    fn discards(&self) -> bool {
+        storage_spaces::SpaceWriter::discards(self)
+    }
+    fn discard(&self, offset: u64, len: u64) -> std::io::Result<()> {
+        storage_spaces::SpaceWriter::discard(self, offset, len).map_err(std::io::Error::other)
+    }
 }
 
 fn serve_nbd(

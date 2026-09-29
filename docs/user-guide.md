@@ -115,6 +115,13 @@ for rows Windows allocates, so `spaces` refuses to read them (I/O error)
 unless `--unclean-parity data` is given. File systems do not read what they
 have not written, but a copy of the whole device does.
 
+Discards (`fstrim`, the `discard` mount option, `blkdiscard`) give the rows
+of thin simple and mirror spaces back to the pool once they are discarded
+whole, as Windows does with TRIM; a row given back reads as zeros. Discards
+of parts of rows are remembered while the space stays attached and count
+towards the whole row until it is written again. Parity and fixed spaces
+do not offer discards.
+
 How the space types are written:
 
 * Simple: in place. `--backend auto` uses device-mapper when the space is

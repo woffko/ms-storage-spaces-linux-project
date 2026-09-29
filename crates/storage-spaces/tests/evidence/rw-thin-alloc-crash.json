@@ -1,0 +1,21 @@
+{
+ "windows_build": "10.0.26100.0",
+ "pool": "copy of thin2c_26100 (thin simple, 2 columns, two disks)",
+ "crash": "spaces write-pattern of 4 KiB at 8 GiB, a row not allocated yet, cut off before member write 2: the pool database with the new row (sequence 4) reached device 0 only, device 1 kept sequence 3, the data was not written",
+ "attached": [
+  [
+   "thin2c_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "repaired": [
+  [
+   "thin2c_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "pattern_check_ok": true,
+ "after_windows": "device 1 carries the database of sequence 4 with the new row's two extent records (Windows took the newest copy and wrote it to the stale member); no warnings"
+}

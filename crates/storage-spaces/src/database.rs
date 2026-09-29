@@ -205,6 +205,18 @@ impl Database {
         h[0x0c..0x10].copy_from_slice(&crc.to_be_bytes());
     }
 
+    /// The extent records with their ids.
+    pub fn extents(&self) -> Vec<(u32, crate::format::ExtentRecord)> {
+        crate::format::assemble_records(&self.bytes, self.entry_size)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| match crate::format::Record::decode(r) {
+                Ok(crate::format::Record::Extent(e)) => Some((r.id, e)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The first slab of disk `disk_id` that no extent uses: where Windows
     /// puts a slab it allocates on that disk.
     pub fn first_free_slab(&self, disk_id: u64) -> u64 {

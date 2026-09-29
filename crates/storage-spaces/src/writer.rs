@@ -62,6 +62,10 @@ const DRT_CLEAN_AFTER: Duration = Duration::from_secs(30);
 /// Data destaged at a time.
 const DESTAGE_BATCH: u64 = 32 << 20;
 
+/// Discarded pieces remembered for a row that is not discarded whole yet;
+/// a row discarded in more pieces than that is not given back.
+const MAX_DISCARDED_PIECES: usize = 4096;
+
 /// Writes to a space, and reads what was written.
 pub struct SpaceWriter<'p, D> {
     reader: SpaceReader<'p, D>,
@@ -70,6 +74,15 @@ pub struct SpaceWriter<'p, D> {
     layout: RwLock<Layout>,
     /// Thin spaces: allocates rows as writes first reach them.
     alloc: Option<Mutex<Allocator>>,
+    /// Rows allocated or freed since the space was opened: the reader's
+    /// layout is out of date for them.
+    changed: Mutex<BTreeSet<u64>>,
+    /// Thin simple and mirror spaces: the pieces of each row discarded since
+    /// it was last written, as offsets within the row, sorted and merged.
+    discarded: Mutex<BTreeMap<u64, Vec<(u64, u64)>>>,
+    /// Held shared by direct writes and exclusively by discards, so that a
+    /// row is never given back while a write into it is in flight.
+    gate: RwLock<()>,
     drt: Option<DrtState>,
     journal: Option<JournalState>,
     cache: Option<CacheState>,
@@ -199,6 +212,9 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
             layout: RwLock::new(reader.layout().clone()),
             reader,
             alloc,
+            changed: Mutex::new(BTreeSet::new()),
+            discarded: Mutex::new(BTreeMap::new()),
+            gate: RwLock::new(()),
             drt,
             journal,
             cache,
@@ -285,6 +301,90 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
         pool.write_database(&db)?;
         a.db = db;
         a.extents.extend(records);
+        self.changed.lock().unwrap().insert(row);
+        *self.layout.write().unwrap() = Layout::with_base(&a.policy, &a.extents, a.base)?;
+        Ok(())
+    }
+
+    /// Whether [`SpaceWriter::discard`] can give anything back: thin simple
+    /// and mirror spaces.
+    pub fn discards(&self) -> bool {
+        self.alloc.is_some() && self.journal.is_none()
+    }
+
+    /// Discards `len` bytes at `offset`: the rows of a thin simple or mirror
+    /// space that discards cover whole are given back to the pool, as
+    /// Windows gives back the slabs TRIM covers whole (m7trim): one update
+    /// of the pool database per row, removing its extent records. A row
+    /// may be covered by one discard or by several since it was last
+    /// written (file systems trim in pieces, ext4 by block groups of
+    /// 128 MiB). Nothing else changes; afterwards the rows read as zeros.
+    /// Parity and fixed spaces ignore discards.
+    pub fn discard(&self, offset: u64, len: u64) -> Result<()> {
+        let size = self.size();
+        let end = offset.checked_add(len).filter(|&end| end <= size).ok_or_else(|| {
+            Error::Pool(format!(
+                "discard of {len} bytes at {offset:#x} beyond the end of the space"
+            ))
+        })?;
+        if !self.discards() || len == 0 {
+            return Ok(());
+        }
+        let _gate = self.gate.write().unwrap();
+        let (base, row_bytes) = {
+            let layout = self.layout();
+            (layout.base, SLAB_SIZE * layout.data_columns)
+        };
+        let mut discarded = self.discarded.lock().unwrap();
+        let rows = offset.saturating_sub(base) / row_bytes..end.saturating_sub(base).div_ceil(row_bytes);
+        for row in rows {
+            let start = base + row * row_bytes;
+            let piece = (offset.max(start) - start, end.min(start + row_bytes) - start);
+            if piece.0 >= piece.1 {
+                continue;
+            }
+            if !row_allocated(&self.layout(), row) {
+                discarded.remove(&row);
+                continue;
+            }
+            let pieces = discarded.entry(row).or_default();
+            add_piece(pieces, piece);
+            if pieces[..] == [(0, row_bytes)] {
+                discarded.remove(&row);
+                self.free(row)?;
+            } else if pieces.len() > MAX_DISCARDED_PIECES {
+                discarded.remove(&row);
+            }
+        }
+        Ok(())
+    }
+
+    /// Gives row `row` of a thin space back to the pool (see
+    /// [`SpaceWriter::discard`]); rows allocated otherwise than a slab per
+    /// column and copy stay.
+    fn free(&self, row: u64) -> Result<()> {
+        let Some(alloc) = &self.alloc else { return Ok(()) };
+        let mut a = alloc.lock().unwrap();
+        let data_columns = self.layout().data_columns;
+        let virtual_slab = a.base / SLAB_SIZE + row * data_columns;
+        let space_id = self.reader.space.id();
+        let ids: Vec<u32> =
+            a.db.extents()
+                .into_iter()
+                .filter(|(_, e)| e.space_id == space_id && e.virtual_slab == virtual_slab && e.slab_count == 1)
+                .map(|(id, _)| id)
+                .collect();
+        if ids.len() as u64 != a.policy.columns * a.policy.copies.max(1) {
+            return Ok(());
+        }
+        let sequence = a.db.sequence() + 1;
+        let mut db = a.db.clone();
+        db.update(&[], &ids);
+        db.commit(sequence, filetime_now());
+        self.reader.pool().write_database(&db)?;
+        a.db = db;
+        a.extents.retain(|e| e.virtual_slab != virtual_slab);
+        self.changed.lock().unwrap().insert(row);
         *self.layout.write().unwrap() = Layout::with_base(&a.policy, &a.extents, a.base)?;
         Ok(())
     }
@@ -336,11 +436,13 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
             let layout = self.layout();
             let loc = layout.locate(offset);
             let n = buf.len().min(loc.contiguous as usize);
-            if row_allocated(&layout, loc.row) && !row_allocated(self.reader.layout(), loc.row) {
-                read_first_copy(self.reader.pool(), &layout, offset, &mut buf[..n])?;
-            } else {
+            if !self.changed.lock().unwrap().contains(&loc.row) {
                 drop(layout);
                 self.reader.read_uncached_at(&mut buf[..n], offset)?;
+            } else if row_allocated(&layout, loc.row) {
+                read_first_copy(self.reader.pool(), &layout, offset, &mut buf[..n])?;
+            } else {
+                buf[..n].fill(0);
             }
             offset += n as u64;
             buf = &mut buf[n..];
@@ -392,8 +494,16 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
     /// Writes to a simple or mirror space itself.
     fn write_direct(&self, mut buf: &[u8], mut offset: u64) -> Result<()> {
         let pool = self.reader.pool();
+        let _gate = self.alloc.as_ref().map(|_| self.gate.read().unwrap());
         while !buf.is_empty() {
             let row = self.layout().locate(offset).row;
+            {
+                // What the row held is no longer discarded.
+                let mut discarded = self.discarded.lock().unwrap();
+                if !discarded.is_empty() {
+                    discarded.remove(&row);
+                }
+            }
             if !row_allocated(&self.layout(), row) {
                 self.allocate(row)?;
             }
@@ -823,6 +933,21 @@ fn filetime_now() -> u64 {
     (since_1970.as_nanos() / 100) as u64 + 11_644_473_600 * 10_000_000
 }
 
+/// Adds `piece` to the sorted, merged pieces `pieces`, merging it with
+/// those it overlaps or touches.
+fn add_piece(pieces: &mut Vec<(u64, u64)>, (mut start, mut end): (u64, u64)) {
+    pieces.retain(|&(s, e)| {
+        let apart = e < start || s > end;
+        if !apart {
+            start = start.min(s);
+            end = end.max(e);
+        }
+        apart
+    });
+    let at = pieces.partition_point(|&(s, _)| s < start);
+    pieces.insert(at, (start, end));
+}
+
 /// Rows of the extent run holding `row`.
 fn run_rows(layout: &Layout, row: u64) -> Result<u64> {
     layout
@@ -891,6 +1016,7 @@ mod tests {
     use std::fs::File;
     use std::path::Path;
 
+    use super::add_piece;
     use crate::format::SLAB_SIZE;
     use crate::io::{Overlay, SparseImage};
     use crate::pool::Pool;
@@ -1645,6 +1771,102 @@ mod tests {
             assert!(copies.iter().all(|c| c.bytes() == copies[0].bytes()), "state {k}");
             let again = Pool::open(replay.iter().collect::<Vec<_>>()).unwrap();
             assert!(again.warnings.is_empty(), "state {k}: {:?}", again.warnings);
+        }
+    }
+
+    /// Discarding a row of a thin simple space whole gives it back to the
+    /// pool (its extent record removed from every member's database, one
+    /// update), as Windows does with TRIM (m7trim), whether one discard
+    /// covers it or several since it was last written; the row then reads
+    /// as zeros, also through a pool opened afterwards. Discards that cover
+    /// a row in part change nothing, nor does one on a parity space.
+    #[test]
+    fn discarding_whole_rows_gives_them_back() {
+        let images = scenario("m5thin", "s0");
+        let disks: Vec<Overlay<&SparseImage>> = images.iter().map(Overlay::new).collect();
+        let pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+        let id = pool.find_space("m5thin").unwrap().id();
+        let before = pool.database_model().unwrap();
+        let w = pool.open_space_rw(id).unwrap();
+        assert!(w.discards());
+        let row = 2u64 << 30;
+        let next = row + SLAB_SIZE;
+        let data = pattern(row, BLOCK as u64, "d");
+        let mut back = vec![0u8; BLOCK];
+        for at in [row, next] {
+            w.write_all_at(&data, at).unwrap();
+        }
+        // In part: nothing changes.
+        w.discard(row, SLAB_SIZE - 8192).unwrap();
+        w.discard(row - 4096, 8192).unwrap();
+        w.read_exact_at(&mut back, row).unwrap();
+        assert!(back == data);
+        // A write in between: what was discarded before does not count.
+        w.write_all_at(&data, row).unwrap();
+        w.discard(row + SLAB_SIZE - 8192, 8192).unwrap();
+        w.read_exact_at(&mut back, row).unwrap();
+        assert!(back == data);
+        // Whole in two pieces since the write: given back.
+        w.discard(row, SLAB_SIZE - 8192).unwrap();
+        w.read_exact_at(&mut back, row).unwrap();
+        assert!(back.iter().all(|&b| b == 0));
+        // Whole in one discard (with some of the neighbours): given back.
+        w.discard(next - 4096, SLAB_SIZE + 8192).unwrap();
+        w.read_exact_at(&mut back, next).unwrap();
+        assert!(back.iter().all(|&b| b == 0));
+        w.flush().unwrap();
+        drop(w);
+        drop(pool);
+        let pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+        assert!(pool.warnings.is_empty());
+        assert_eq!(pool.database.sequence, before.sequence() + 4);
+        let r = pool.open_space(id).unwrap();
+        assert_eq!(r.layout().physical(0, 0, 8), None);
+        assert_eq!(r.layout().physical(0, 0, 9), None);
+        for at in [row, next] {
+            r.read_exact_at(&mut back, at).unwrap();
+            assert!(back.iter().all(|&b| b == 0));
+        }
+        let copies = member_databases(&pool);
+        assert!(copies.iter().all(|c| c.bytes() == copies[0].bytes()));
+
+        let images = scenario("m5thinwbc", "s0");
+        let disks: Vec<Overlay<&SparseImage>> = images.iter().map(Overlay::new).collect();
+        let pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+        let id = pool.find_space("m5thinwbc").unwrap().id();
+        let sequence = pool.database.sequence;
+        let w = pool.open_space_rw(id).unwrap();
+        assert!(!w.discards());
+        w.discard(0, 1 << 30).unwrap();
+        w.flush().unwrap();
+        assert_eq!(member_databases(&pool)[0].sequence(), sequence);
+    }
+
+    /// Discarded pieces stay sorted and merged, and cover what was added.
+    #[test]
+    fn discarded_pieces_are_merged() {
+        let mut seed = 7u64;
+        let mut next = |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        for _ in 0..200 {
+            let mut pieces = Vec::new();
+            let mut covered = [false; 64];
+            for _ in 0..next(12) {
+                let start = next(64);
+                let end = start + 1 + next(64 - start);
+                add_piece(&mut pieces, (start, end));
+                covered[start as usize..end as usize].fill(true);
+            }
+            let mut model = [false; 64];
+            for w in pieces.windows(2) {
+                assert!(w[0].1 < w[1].0, "{pieces:?}");
+            }
+            for &(s, e) in &pieces {
+                model[s as usize..e as usize].fill(true);
+            }
+            assert_eq!(model, covered);
         }
     }
 

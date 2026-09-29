@@ -279,3 +279,41 @@ fn windows_reads_a_thin_parity_space_filled_from_linux() {
             .contains("UsedLineCount: 0x47D")
     );
 }
+
+/// Thin simple and mirror spaces filled from Linux beyond their initial
+/// allocation (NTFS with ntfs-3g in a partition the pool can allocate):
+/// Windows found them healthy with nothing to repair, and chkdsk and every
+/// file checked out.
+#[test]
+fn windows_reads_thin_simple_and_mirror_spaces_filled_from_linux() {
+    for name in ["rw-thin-simple-ntfs3g.json", "rw-thin-mirror-ntfs3g.json"] {
+        let e = evidence(name);
+        assert_eq!(
+            (e["attached"][0][1].as_str(), e["repaired"][0][1].as_str()),
+            (Some("Healthy"), Some("Healthy")),
+            "{name}"
+        );
+        assert_eq!(e["attached_jobs"].as_array().unwrap().len(), 0, "{name}");
+        assert_eq!(
+            (e["chkdsk_exit"].as_i64(), e["files"].as_i64()),
+            (Some(0), Some(573)),
+            "{name}"
+        );
+        assert_eq!(e["mismatching"].as_array().unwrap().len(), 0, "{name}");
+    }
+}
+
+/// An allocating write cut off between the members' database copies (the
+/// newest on device 0 only, no data): Windows attached the pool as healthy,
+/// took the newest copy and brought the stale member up to it, as
+/// `Pool::update_stale_copies` does when a space is opened for writing.
+#[test]
+fn windows_takes_the_newest_database_copy_after_a_cut_off_allocation() {
+    let e = evidence("rw-thin-alloc-crash.json");
+    assert_eq!(
+        (e["attached"][0][1].as_str(), e["repaired"][0][1].as_str()),
+        (Some("Healthy"), Some("Healthy"))
+    );
+    assert_eq!(e["pattern_check_ok"], true);
+    assert!(e["after_windows"].as_str().unwrap().contains("sequence 4"));
+}

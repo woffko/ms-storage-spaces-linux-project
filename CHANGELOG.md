@@ -24,6 +24,10 @@ Writing, for spaces whose state is fully understood.
   one pool database update per row, on every member before the data;
   parity rows when the cache destages them. The pool database grows by
   pages of 64 slots when full.
+* Discards (TRIM) give rows of thin simple and mirror spaces that they
+  cover whole back to the pool, as Windows does (ublk and NBD).
+* A pool database copy left stale by an interrupted update is brought up
+  to the newest copy when a space is opened for writing, as Windows does.
 * The cache and journal logs wrap behind checkpoints as Windows expects;
   a cache holding data when a space is opened for writing is destaged first.
 * Writes are durable after a flush (sync, FUA) or a clean detach; the

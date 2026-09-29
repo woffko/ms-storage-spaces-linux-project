@@ -803,3 +803,23 @@ fn the_pool_database_grows_by_a_page_of_slots() {
     replay_allocations("m7grow", space.id(), &[("s1", &allocations)]);
     assert_eq!(databases("m7grow", "s1")[0].bytes().len(), 128 * 0x40);
 }
+
+/// m7trim: a thin simple space (one column on two disks) with NTFS, a file
+/// of 768 MiB written (three more slabs allocated), deleted, and the free
+/// space retrimmed: Windows gave back the two slabs the file covered whole
+/// (their extent records removed), and kept the one it covered in part.
+#[test]
+fn trimmed_whole_slabs_are_given_back() {
+    let extents = |label: &str| {
+        let pool = state("m7trim", label);
+        let space = pool.find_space("m7trim").unwrap();
+        let mut slabs: Vec<u64> = space.extents.iter().map(|e| e.virtual_slab).collect();
+        slabs.sort();
+        (slabs, pool.database.sequence)
+    };
+    let (before, sequence) = extents("s1");
+    let (after, next) = extents("s2");
+    assert_eq!(before, [0, 1, 2, 3, 4, 15]);
+    assert_eq!(after, [0, 3, 4, 15]);
+    assert!(next > sequence);
+}

@@ -64,6 +64,16 @@ pub fn serve(
         basic.physical_bs_shift = physical_shift;
         basic.io_min_shift = physical_shift;
         basic.io_opt_shift = physical_shift;
+        if writer.is_some_and(|w| w.discards()) {
+            // Discards give whole rows of thin spaces back to the pool.
+            dev.tgt.params.types |= libublk::sys::UBLK_PARAM_TYPE_DISCARD;
+            dev.tgt.params.discard = libublk::sys::ublk_param_discard {
+                discard_granularity: 1 << physical_shift,
+                max_discard_sectors: 1 << 22,
+                max_discard_segments: 1,
+                ..Default::default()
+            };
+        }
         Ok(())
     };
     let queue_fn = move |qid: u16, dev: &UblkDev| run_queue(qid, dev, source, writer);
@@ -111,6 +121,14 @@ fn run_queue(qid: u16, dev: &UblkDev, source: &dyn ReadAt, writer: Option<&Space
                         -libc_errno::EIO
                     }
                 },
+                None => -libc_errno::EROFS,
+            },
+            libublk::sys::UBLK_IO_OP_DISCARD => match writer.map(|w| w.discard(offset, len as u64)) {
+                Some(Ok(())) => 0,
+                Some(Err(e)) => {
+                    eprintln!("discard of {len} bytes at {offset:#x} failed: {e}");
+                    -libc_errno::EIO
+                }
                 None => -libc_errno::EROFS,
             },
             libublk::sys::UBLK_IO_OP_FLUSH => match writer.map_or(Ok(()), |w| w.flush()) {

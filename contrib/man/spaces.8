@@ -68,9 +68,10 @@ tiers and mirror-accelerated parity, fixed and thin provisioning, several
 spaces per pool, the per-space write-back cache, 512e and 4Kn member disks,
 pools with missing, failing or retired disks as far as the redundancy
 allows, and pools after a crash. Writing: simple, mirror and single parity
-spaces of clean pools (not dual parity, storage tiers, new rows of thin
-spaces, degraded pools). Not supported yet: pool management, pools created
-by other Windows releases.
+spaces of clean pools, fixed and thin (not dual parity, storage tiers,
+degraded pools, or rows of thin spaces with other allocation units than
+256 MiB that are not allocated yet). Not supported yet: pool management,
+pools created by other Windows releases.
 .SH COMMANDS
 .TP
 .B scan
@@ -95,6 +96,8 @@ the spaces are attached read-write, if their state is fully understood
 (clean pool, healthy space, a supported resiliency); otherwise the reason is
 printed. Mirror spaces keep their dirty region log, single parity spaces are
 written through their write-back cache and parity journal, as Windows does.
+Thin spaces allocate rows as writes first reach them; discards give rows of
+thin simple and mirror spaces back to the pool once they cover them whole.
 Writes are durable once flushed or after
 .BR detach .
 Not with

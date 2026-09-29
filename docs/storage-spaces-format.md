@@ -301,6 +301,13 @@ How Windows allocates slabs (**verified** by the tests
   `new_slabs_are_not_cleared` on the scenario `m7zero`): deleting a space
   leaves its data on the disks, and a thin row allocated at one of its
   slabs reads that data wherever it has not been written since.
+* TRIM gives slabs back (**verified** by the test
+  `trimmed_whole_slabs_are_given_back` on the scenario `m7trim`): after a
+  768 MiB file on a thin simple space was deleted and the free space
+  retrimmed (`Optimize-Volume -ReTrim`), the extent records of the two
+  slabs the file had covered whole were gone, and the slab it covered in
+  part stayed. The database sequence went from 7 to 14; how those updates
+  divide between the deletion and the two slabs is not known.
 
 `SpaceWriter` allocates rows of thin spaces with 256 MiB allocation units
 the same way: one database update per row, written to every member in turn
@@ -309,6 +316,15 @@ new), before the row's data; simple and mirror rows when a write first
 reaches them, parity rows when the cache destages them. Each slab goes to
 the present disk with the most free slabs that the row does not use yet,
 so the disks fill evenly.
+
+Discards (TRIM) give back the rows of thin simple and mirror spaces that
+they cover whole, in one discard or in several since the row was last
+written (file systems trim in pieces: ext4 by block groups of 128 MiB): one
+database update per row, removing its extent records, written the same
+way. The row then reads as zeros until a write allocates it again. Parity
+and fixed spaces ignore discards: giving back a parity row would also have
+to reset what the parity journal says about its stripes, which has not been
+studied.
 
 ## Data layout (**verified**)
 
