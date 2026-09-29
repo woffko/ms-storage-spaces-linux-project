@@ -149,3 +149,25 @@ fn windows_accepts_ntfs_written_from_linux_to_a_simple_space() {
     assert_eq!(e["corrupt_records"], serde_json::json!(["39", "B6", "1A4", "258"]));
     assert_eq!(e["mismatching"].as_array().unwrap().len(), 4);
 }
+
+/// A two-way mirror written from Linux (mirror2_26100 copies): NTFS with
+/// ntfs-3g and 3000 file operations (Windows: healthy, chkdsk clean, all
+/// files intact), and a write cut off before its 4th member write, leaving
+/// one 256 KiB unit on copy 0 only inside a listed run: Windows attached it
+/// as healthy before and after repair (and spaces refuses that row).
+#[test]
+fn windows_accepts_mirrors_written_from_linux_and_cut_off() {
+    let e = evidence("rw-mirror-ntfs3g.json");
+    assert_eq!(
+        (e["attached"][0][1].as_str(), e["repaired"][0][1].as_str()),
+        (Some("Healthy"), Some("Healthy"))
+    );
+    assert_eq!(e["chkdsk_exit"], 0);
+    assert_eq!(e["files"], 573);
+    assert_eq!(e["mismatching"].as_array().unwrap().len(), 0);
+    let e = evidence("rw-mirror-crash.json");
+    assert_eq!(
+        (e["attached"][0][1].as_str(), e["repaired"][0][1].as_str()),
+        (Some("Healthy"), Some("Healthy"))
+    );
+}

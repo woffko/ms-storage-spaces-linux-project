@@ -1,0 +1,18 @@
+{
+ "windows_build": "10.0.26100.0",
+ "attached": [
+  [
+   "mirror2_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "repaired": [
+  [
+   "mirror2_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "crash": "write-pattern 1 MiB at 8 MiB, the process ended before the 4th member write: the second 256 KiB unit reached copy 0 only; spaces refused that row (copies differ at 0x840000, run 0 listed)"
+}

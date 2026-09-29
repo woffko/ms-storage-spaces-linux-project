@@ -246,6 +246,10 @@ enum Command {
         length: u64,
         #[arg(long)]
         tag: String,
+        /// Stop the process before the Nth write reaches a member, as a
+        /// power loss would (for crash tests).
+        #[arg(long)]
+        crash_after_writes: Option<usize>,
     },
     /// Verify the test pattern written by tools/vm/New-TestPool.ps1.
     #[command(hide = true)]
@@ -415,7 +419,8 @@ fn main() -> Result<()> {
             offset,
             length,
             tag,
-        } => write_pattern(&devices, &space, offset, length, &tag),
+            crash_after_writes,
+        } => write_pattern(&devices, &space, offset, length, &tag, crash_after_writes),
         Command::CheckPattern { devices, space, length } => {
             let pool = open_pool(&devices)?;
             check_pattern(&pool, find_space(&pool, &space)?, length)
@@ -466,13 +471,80 @@ fn open_pool_mode(paths: &[PathBuf], exclusive: bool, write: bool) -> Result<Poo
     Ok(pool)
 }
 
-fn write_pattern(devices: &[PathBuf], space: &str, offset: u64, length: u64, tag: &str) -> Result<()> {
+/// A member that ends the process before a given write, as a power loss
+/// would leave the disks.
+struct CrashAfter {
+    file: File,
+    writes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    limit: usize,
+}
+
+impl storage_spaces::io::ReadAt for CrashAfter {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        self.file.read_exact_at(buf, offset)
+    }
+    fn size(&self) -> std::io::Result<u64> {
+        storage_spaces::io::ReadAt::size(&self.file)
+    }
+}
+
+impl storage_spaces::io::WriteAt for CrashAfter {
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
+        if self.writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 >= self.limit {
+            eprintln!("crash before member write {}", self.limit);
+            std::process::exit(99);
+        }
+        storage_spaces::io::WriteAt::write_all_at(&self.file, buf, offset)
+    }
+    fn flush(&self) -> std::io::Result<()> {
+        storage_spaces::io::WriteAt::flush(&self.file)
+    }
+}
+
+fn write_pattern(
+    devices: &[PathBuf],
+    space: &str,
+    offset: u64,
+    length: u64,
+    tag: &str,
+    crash_after_writes: Option<usize>,
+) -> Result<()> {
     let block = testpattern::BLOCK as u64;
     if !offset.is_multiple_of(block) || !length.is_multiple_of(block) {
         bail!("offset and length must be multiples of {block}");
     }
+    if let Some(limit) = crash_after_writes {
+        let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let files = devices
+            .iter()
+            .map(|p| {
+                let file = std::fs::OpenOptions::new().read(true).write(true).open(p)?;
+                Ok(CrashAfter {
+                    file,
+                    writes: writes.clone(),
+                    limit,
+                })
+            })
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let pool = Pool::open(files)?;
+        let id = pool
+            .find_space(space)
+            .map(|s| s.id())
+            .ok_or_else(|| anyhow::anyhow!("no space {space:?}"))?;
+        let writer = pool.open_space_rw(id)?;
+        return write_pattern_with(&writer, offset, length, tag);
+    }
     let pool = open_pool_rw(devices)?;
     let writer = pool.open_space_rw(find_space(&pool, space)?.id())?;
+    write_pattern_with(&writer, offset, length, tag)
+}
+
+fn write_pattern_with<D: storage_spaces::io::WriteAt>(
+    writer: &storage_spaces::SpaceWriter<'_, D>,
+    offset: u64,
+    length: u64,
+    tag: &str,
+) -> Result<()> {
     let mut buf = vec![0u8; 1 << 20];
     let mut at = offset;
     while at < offset + length {
