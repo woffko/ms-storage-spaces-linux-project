@@ -206,11 +206,11 @@ in this repository.
 
 ### M4 (exit criteria met except the release, 2026-09-28)
 
-* Release: postponed (2026-09-28) until the dirty region question was
-  settled; it is (below) and v0.1.0 waits for approval. The release is a
-  tag `v0.1.0` and a GitHub release with a static x86_64 musl build; the
-  crates go to crates.io only once a stable release is confirmed (decision
-  2026-09-28), their metadata is ready.
+* Release: prepared (a tag `v0.1.0` and a GitHub release with a static
+  x86_64 musl build; the crates go to crates.io only once a stable release
+  is confirmed, decision 2026-09-28, their metadata is ready). Decision
+  2026-09-29: nothing more is pushed to GitHub, tagged or released until
+  Stage 3 is complete; the work stays in local commits until then.
 * Dirty region log of mirrors (settled 2026-09-28): every mirror pool of the
   corpus listed extent runs although its copies agreed. Batch 9 of
   `tools/gen-corpus.sh` ended small mirror pools in every way

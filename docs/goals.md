@@ -93,7 +93,7 @@ Do Stage 2 of docs/plan.md (M6-M8, write support) in /home/w0w/Linux_Storage_Spa
 5. M8: release
    - Document `spaces attach --rw`: guarantees, risks, what is refused.
    - Update the README, user guide, man page and CHANGELOG.
-   - Prepare v0.2.0 (GitHub release only) and stop to ask before pushing, tagging or releasing.
+   - Record the state as v0.2.0-ready. Nothing is pushed to GitHub, tagged or released before Stage 3 is complete (decision 2026-09-29).
 
 Rules:
 - Follow AGENTS.md and docs/plan.md.
