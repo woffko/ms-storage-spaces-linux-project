@@ -12,7 +12,9 @@
 # way Windows' chkdsk reports as corrupt, also on plain disks, so run it
 # with SKIP=truncate.
 # PART_MB limits the partition (default: the whole space), e.g. to what a
-# thin pool can allocate.
+# thin pool can allocate. TRIM_MB adds a step after 3: write a file of that
+# size, delete it and fstrim (thin spaces give rows back); trim.txt records
+# the slabs allocated before and after.
 # Usage: sudo tools/rw-ntfs-check.sh POOL [DRIVER] [SKIP] [COPY_MB] [OPS]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -54,6 +56,25 @@ mount -t "$driver" "${dev}p1" "$mnt"
 python3 tools/ntfs-stress.py "$mnt" /usr/lib/x86_64-linux-gnu "$copy_mb" "$ops" 42 "$work/files.json" "$skip"
 umount "$mnt"
 cleanup
+# The slabs the pool database lists for the space.
+slabs() { "$spaces" extents --space "$space" "${disks[@]}" | grep -cE '^ *[0-9]'; }
+if [[ -n ${TRIM_MB:-} ]]; then
+  expose --rw
+  mount -t "$driver" "${dev}p1" "$mnt"
+  dd if=/dev/urandom of="$mnt/trim.bin" bs=1M count="$TRIM_MB" status=none
+  umount "$mnt"
+  cleanup
+  before=$(slabs)
+  expose --rw
+  mount -t "$driver" "${dev}p1" "$mnt"
+  rm "$mnt/trim.bin"
+  sync
+  fstrim -v "$mnt"
+  umount "$mnt"
+  cleanup
+  echo "slabs allocated with a $TRIM_MB MiB file: $before; after deleting it and fstrim: $(slabs)" | tee "$work/trim.txt"
+  (($(slabs) < before)) || { echo "fstrim gave nothing back" >&2; exit 1; }
+fi
 # A failed write (a thin pool out of slabs, say) can hide in the file
 # system's cache until it is too late for the model check.
 if grep -q "failed" "$work/server.log"; then

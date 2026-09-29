@@ -317,3 +317,35 @@ fn windows_takes_the_newest_database_copy_after_a_cut_off_allocation() {
     assert_eq!(e["pattern_check_ok"], true);
     assert!(e["after_windows"].as_str().unwrap().contains("sequence 4"));
 }
+
+/// A thin simple space filled with NTFS on Linux, then a file deleted and
+/// fstrim run: the discards gave a row back (two slabs), and Windows
+/// attached the pool as healthy with nothing to repair, chkdsk clean, every
+/// file intact, and the same extents as the database written on Linux,
+/// without the row given back.
+#[test]
+fn windows_reads_a_thin_space_after_linux_gave_rows_back() {
+    let e = evidence("rw-thin-trim-ntfs3g.json");
+    assert_eq!(
+        (e["attached"][0][1].as_str(), e["repaired"][0][1].as_str()),
+        (Some("Healthy"), Some("Healthy"))
+    );
+    assert_eq!(e["attached_jobs"].as_array().unwrap().len(), 0);
+    assert_eq!((e["chkdsk_exit"].as_i64(), e["files"].as_i64()), (Some(0), Some(573)));
+    assert_eq!(e["mismatching"].as_array().unwrap().len(), 0);
+    assert!(
+        e["trim"]
+            .as_str()
+            .unwrap()
+            .ends_with("44; after deleting it and fstrim: 42")
+    );
+    assert_eq!(e["extents_windows"], e["extents_linux"]);
+    let vslabs: Vec<u64> = e["extents_windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x[1].as_u64().unwrap())
+        .collect();
+    assert!(vslabs.contains(&0) && !vslabs.contains(&2));
+    assert_eq!(vslabs.len(), 42);
+}

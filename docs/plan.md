@@ -399,7 +399,7 @@ rows of thin spaces not allocated yet (M7).
   mirror and parity (ublk) copies, and again read-only; mirrors are
   refused by dm read-write and dual parity by `--rw`, with the reason.
 
-### M7 (in progress, 2026-09-29)
+### M7 (met, 2026-09-29)
 
 * Windows does not clear new slabs (`m7zero`), writes nothing but every
   member's pool database page and the data for an allocation (`m5thin`,
@@ -413,6 +413,23 @@ rows of thin spaces not allocated yet (M7).
   the run is listed in the dirty region log, parity rows are allocated at
   destage only, and every crash state of an allocating write opens and
   reads the old or the new data.
+* Thin simple, mirror and parity spaces filled with NTFS on Linux beyond
+  their initial allocation (ntfs-3g, 3000 file operations) were attached
+  by Windows as healthy, chkdsk clean, every file intact; fio beyond the
+  allocated part passed through ublk and NBD.
+* Metadata crash consistency: an allocation cut off between the members'
+  database copies leaves a stale copy, which Windows brings up to the
+  newest one (as `Pool::update_stale_copies` does when a space is opened
+  for writing); replay tests open every crash state of an allocation.
+* TRIM: Windows gives back the slabs a retrim covers whole (`m7trim`).
+  Discards through ublk and NBD give back rows of thin simple and mirror
+  spaces covered whole, in one discard or several since their last write
+  (`tools/rw-trim-check.sh`: blkdiscard pieces and ext4 fstrim, e2fsck
+  clean); Windows attached a pool whose row fstrim gave back from NTFS as
+  healthy, with the same extents. Parity and fixed spaces ignore discards.
+* Cache destaging on Linux: a cache holding data is destaged when a space
+  is opened for writing, and single parity writes destage as the cache
+  fills (M6).
 
 ## Test infrastructure (continuous, feeds every stage)
 
