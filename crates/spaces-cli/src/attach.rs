@@ -327,11 +327,20 @@ fn choose(
     bail!("no usable backend (install dmsetup, or load ublk_drv or nbd)")
 }
 
-fn wait_for(path: &Path, timeout: Duration) -> Result<()> {
+/// Waits for `path` to appear while the systemd unit `unit` runs, at most
+/// `timeout`.
+fn wait_for(path: &Path, unit: &str, timeout: Duration) -> Result<()> {
     let start = Instant::now();
+    let mut checked = Instant::now();
     while !path.exists() {
         if start.elapsed() > timeout {
             bail!("timed out waiting for {}", path.display());
+        }
+        if checked.elapsed() > Duration::from_secs(2) {
+            checked = Instant::now();
+            if run("systemctl", &["is-active", "--quiet", unit], None).is_err() && !path.exists() {
+                bail!("the serving process ended before it was ready");
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -370,7 +379,10 @@ fn start_server(unit: &str, kind: &str, paths: &[PathBuf], space: &str, extra: &
     args.extend(crate::inherited_args());
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     run("systemd-run", &refs, None)?;
-    if let Err(e) = wait_for(&ready, Duration::from_secs(30)) {
+    // Opening a space read-write destages its write-back cache first, which
+    // can take minutes.
+    let timeout = Duration::from_secs(if extra.contains(&"--rw") { 3600 } else { 30 });
+    if let Err(e) = wait_for(&ready, unit, timeout) {
         let _ = run("systemctl", &["stop", unit], None);
         let log = run("journalctl", &["-u", unit, "-n", "20", "--no-pager"], None).unwrap_or_default();
         bail!("{e}; unit log:\n{log}");

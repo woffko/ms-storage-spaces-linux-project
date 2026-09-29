@@ -1,0 +1,27 @@
+{
+ "windows_build": "10.0.26100.0",
+ "pool": "copy of paritythin_26100 (thin 3-column parity, 8 GiB, 768 MiB allocated) written on Linux with ntfs-3g through serve-ublk --rw (tools/rw-ntfs-check.sh), 3000 file operations",
+ "allocated_after_linux": "4.50 GiB (rows allocated as the cache destaged them), 1149 chunks still cached",
+ "attached": [
+  [
+   "paritythin_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "attached_jobs": [],
+ "repaired": [
+  [
+   "paritythin_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "chkdsk_exit": 0,
+ "files": 573,
+ "mismatching": [],
+ "windows_loaded": [
+  "Cache initialization for space {e5d7a02b-749f-407f-aee2-4005654369e0} with status STATUS_SUCCESS. UsedLineCount: 0x47D, ReservedLineCount: 0x0, SynchronizingCount: 0x47D, ReplayCount: 0x0. ActiveCheckpoint: 0x1, StartSlot: 0x0, EndSlot: 0x3EB, Wrap: false, SequenceNumber: 0x7EC.",
+  "Vdt initialization for space {e5d7a02b-749f-407f-aee2-4005654369e0} with status STATUS_SUCCESS. ActiveCheckpoint: 0x0, StartSlot: 0x0, EndSlot: 0x99, Wrap: false, SequenceNumber: 0x99."
+ ]
+}

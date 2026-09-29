@@ -306,10 +306,9 @@ How Windows allocates slabs (**verified** by the tests
 the same way: one database update per row, written to every member in turn
 (each flushed before the next, so a crash leaves each copy whole, old or
 new), before the row's data; simple and mirror rows when a write first
-reaches them, parity rows when the cache destages them. The disk of each
-slab is the one the same column and copy use in the nearest allocated row
-if it has a free slab, else the present disk with the most free slabs; the
-slabs of a row are always on different disks.
+reaches them, parity rows when the cache destages them. Each slab goes to
+the present disk with the most free slabs that the row does not use yet,
+so the disks fill evenly.
 
 ## Data layout (**verified**)
 

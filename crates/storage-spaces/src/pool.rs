@@ -13,6 +13,10 @@ use crate::io::{ReadAt, WriteAt, read_vec};
 use crate::reader::{OpenOptions, SpaceReader};
 use crate::writer::SpaceWriter;
 
+/// Warning about a member whose pool database copy is older than the
+/// newest one.
+const STALE_COPY: &str = "stale pool database copy";
+
 /// A device that belongs to the pool.
 #[derive(Debug, Clone)]
 pub struct Member {
@@ -216,7 +220,7 @@ impl<D: ReadAt> Pool<D> {
         };
         for m in &members {
             if m.db_sequence.is_some_and(|s| s < database.sequence) && !retired(m) {
-                warnings.push(format!("device {}: stale pool database copy", m.device));
+                warnings.push(format!("device {}: {STALE_COPY}", m.device));
             }
         }
 
@@ -356,10 +360,13 @@ impl<D: ReadAt> Pool<D> {
     /// Why space `id` cannot be opened for writing, or `None` if it can
     /// (the checks [`Pool::open_space_rw`] makes, without writing).
     pub fn write_refusal(&self, id: u64) -> Result<Option<String>> {
-        if !self.warnings.is_empty() {
+        // Stale database copies are brought up to date when a space is
+        // opened for writing ([`Pool::update_stale_copies`]).
+        let unclean: Vec<&String> = self.warnings.iter().filter(|w| !w.ends_with(STALE_COPY)).collect();
+        if !unclean.is_empty() {
             return Ok(Some(format!(
                 "the pool is not in a clean state ({})",
-                self.warnings.join("; ")
+                unclean.iter().map(|w| w.as_str()).collect::<Vec<_>>().join("; ")
             )));
         }
         let reader = self.open_space(id)?;
@@ -398,6 +405,39 @@ impl<D: ReadAt> Pool<D> {
         let mut members: Vec<&Member> = self.members.iter().filter(|m| m.db_sequence.is_some()).collect();
         members.sort_by_key(|m| m.device);
         for m in members {
+            let dev = &self.devices[m.device];
+            dev.write_all_at(db.bytes(), m.partition.offset + POOL_DB_OFFSET)?;
+            dev.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Writes the current pool database to the members whose copy is older
+    /// (a crash between the copies of an update leaves them so): each
+    /// whole, one after the other. Windows reads the newest copy anyway and
+    /// rewrites all of them when it attaches the pool; afterwards every
+    /// member carries the same copy.
+    pub(crate) fn update_stale_copies(&self) -> Result<()>
+    where
+        D: WriteAt,
+    {
+        let retired = |index: usize| {
+            self.disks
+                .values()
+                .any(|d| d.member == Some(index) && d.usage == DiskUsage::Retired)
+        };
+        let stale: Vec<&Member> = self
+            .members
+            .iter()
+            .enumerate()
+            .filter(|(i, m)| m.db_sequence.is_some_and(|s| s < self.database.sequence) && !retired(*i))
+            .map(|(_, m)| m)
+            .collect();
+        if stale.is_empty() {
+            return Ok(());
+        }
+        let db = self.database_model()?;
+        for m in stale {
             let dev = &self.devices[m.device];
             dev.write_all_at(db.bytes(), m.partition.offset + POOL_DB_OFFSET)?;
             dev.flush()?;

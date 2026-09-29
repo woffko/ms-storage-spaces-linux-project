@@ -11,6 +11,8 @@
 # directory. ntfs3 of Linux 6.8 truncates small resident files to zero in a
 # way Windows' chkdsk reports as corrupt, also on plain disks, so run it
 # with SKIP=truncate.
+# PART_MB limits the partition (default: the whole space), e.g. to what a
+# thin pool can allocate.
 # Usage: sudo tools/rw-ntfs-check.sh POOL [DRIVER] [SKIP] [COPY_MB] [OPS]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -35,14 +37,16 @@ trap cleanup EXIT
 expose() {
   local ready=$work/ready
   rm -f "$ready"
-  "$spaces" serve-ublk "${disks[@]}" --space "$space" "$@" --ready-file "$ready" >/dev/null &
+  "$spaces" serve-ublk "${disks[@]}" --space "$space" "$@" --ready-file "$ready" >/dev/null 2>>"$work/server.log" &
   pid=$!
-  for _ in $(seq 100); do [[ -s $ready ]] && break; sleep 0.1; done
+  for _ in $(seq 6000); do [[ -s $ready ]] && break; kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
   dev=$(cat "$ready")
 }
 
 expose --rw
-sgdisk -o -n 1:2048:0 -t 1:0700 -c 1:linux "$dev" >/dev/null
+end=0
+[[ -n ${PART_MB:-} ]] && end=+${PART_MB}M
+sgdisk -o -n 1:2048:$end -t 1:0700 -c 1:linux "$dev" >/dev/null
 partprobe "$dev"
 udevadm settle
 mkntfs -f -Q -L linux "${dev}p1" >/dev/null
@@ -50,6 +54,13 @@ mount -t "$driver" "${dev}p1" "$mnt"
 python3 tools/ntfs-stress.py "$mnt" /usr/lib/x86_64-linux-gnu "$copy_mb" "$ops" 42 "$work/files.json" "$skip"
 umount "$mnt"
 cleanup
+# A failed write (a thin pool out of slabs, say) can hide in the file
+# system's cache until it is too late for the model check.
+if grep -q "failed" "$work/server.log"; then
+  echo "writes failed:" >&2
+  grep "failed" "$work/server.log" | head -5 >&2
+  exit 1
+fi
 
 expose
 mount -t "$driver" -o ro "${dev}p1" "$mnt"

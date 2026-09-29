@@ -5,14 +5,16 @@
 #   2. expose the space writable through BACKEND (ublk, nbd, or dm on loop
 #      devices of the images; dm only for simple spaces)
 #   3. fio: random writes of 4 KiB to 1 MiB with crc32c verification over
-#      MIB MiB from 256 MiB on, then read everything back and verify
+#      MIB MiB from START MiB on (default 256; beyond the allocated part of
+#      a thin space the writes allocate rows), then read everything back
+#      and verify
 #   4. expose it again read-only and verify the fio data once more (it
 #      reached the images), and check that the verification pattern outside
 #      the fio range is intact
-# Usage: sudo tools/rw-kernel-check.sh POOL BACKEND [MIB]
+# Usage: sudo tools/rw-kernel-check.sh POOL BACKEND [MIB] [START]
 set -euo pipefail
 cd "$(dirname "$0")/.."
-pool=$1 backend=$2 mib=${3:-512}
+pool=$1 backend=$2 mib=${3:-512} start_mib=${4:-256}
 spaces=$PWD/target/release/spaces
 src=/srv/spaces/pools/$pool
 work=/srv/spaces/work/$pool-$backend
@@ -22,7 +24,7 @@ rm -rf -- "${work:?}"
 mkdir -p "$work"
 cp --sparse=always "$src"/disk*.img "$src"/manifest.json "$work/"
 disks=("$work"/disk*.img)
-fio_start=$((256 << 20))
+fio_start=$((start_mib << 20))
 fio_len=$((mib << 20))
 
 pid=
@@ -49,14 +51,14 @@ expose() {
     ublk)
       "$spaces" serve-ublk "${disks[@]}" --space "$space" "${rw[@]}" --ready-file "$ready" >/dev/null &
       pid=$!
-      for _ in $(seq 100); do [[ -s $ready ]] && break; sleep 0.1; done
+      for _ in $(seq 6000); do [[ -s $ready ]] && break; kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
       dev=$(cat "$ready")
       ;;
     nbd)
       rm -f "$work/sock"
       "$spaces" serve-nbd "${disks[@]}" --space "$space" "${rw[@]}" --socket "$work/sock" --ready-file "$ready" >/dev/null 2>&1 &
       pid=$!
-      for _ in $(seq 100); do [[ -s $ready ]] && break; sleep 0.1; done
+      for _ in $(seq 6000); do [[ -s $ready ]] && break; kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
       dev=
       for d in /dev/nbd*; do
         [[ $d =~ ^/dev/nbd[0-9]+$ ]] || continue
@@ -104,7 +106,7 @@ fio_job --rw=randwrite --verify_only
 cleanup
 # The pattern outside the fio range, through the library.
 if ((pattern > 0)); then
-  "$spaces" check-pattern "${disks[@]}" --space "$space" --length "$fio_start" >/dev/null
+  "$spaces" check-pattern "${disks[@]}" --space "$space" --length $((pattern < fio_start ? pattern : fio_start)) >/dev/null
   echo "pattern intact below the fio range"
 fi
 rm -rf -- "${work:?}"

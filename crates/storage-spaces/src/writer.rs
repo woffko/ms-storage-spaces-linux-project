@@ -135,6 +135,7 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
                 "space {id} cannot be opened for writing: {why}"
             )));
         }
+        pool.update_stale_copies()?;
         let reader = pool.open_space_with(id, OpenOptions::default())?;
         let layout = reader.layout();
         let (mut drt, mut journal) = (None, None);
@@ -253,7 +254,7 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
         let mut records = Vec::new();
         for column in 0..a.policy.columns {
             for copy in 0..a.policy.copies.max(1) {
-                let disk_id = pick_disk(pool, &a.db, &layout, column, copy, row, &used)?;
+                let disk_id = pick_disk(pool, &a.db, row, &used)?;
                 used.insert(disk_id);
                 records.push(ExtentRecord {
                     space_id: self.reader.space.id(),
@@ -787,20 +788,11 @@ pub(crate) fn refusal<D: ReadAt>(pool: &Pool<D>, reader: &SpaceReader<'_, D>) ->
     None
 }
 
-/// The disk for the slab of `column` and `copy` of a new `row`: the one
-/// that column and copy use in the nearest allocated row if it has a free
-/// slab (Windows' choice does not follow from the metadata), else the
-/// present disk with the most free slabs, never one of `used` (the row's
-/// other slabs).
-fn pick_disk<D: ReadAt>(
-    pool: &Pool<D>,
-    db: &Database,
-    layout: &Layout,
-    column: u64,
-    copy: u64,
-    row: u64,
-    used: &BTreeSet<u64>,
-) -> Result<u64> {
+/// The disk for a slab of a new row: the present disk with the most free
+/// slabs that the row does not use yet (`used`), so that the disks fill
+/// evenly and a mirror or parity row finds its disks as long as possible
+/// (Windows' choice does not follow from the metadata).
+fn pick_disk<D: ReadAt>(pool: &Pool<D>, db: &Database, row: u64, used: &BTreeSet<u64>) -> Result<u64> {
     let free = |disk_id: u64| -> u64 {
         let Some(m) = pool
             .disks
@@ -813,22 +805,14 @@ fn pick_disk<D: ReadAt>(
         let capacity = m.partition.length.saturating_sub(DATA_AREA_OFFSET) / SLAB_SIZE;
         capacity.saturating_sub(db.first_free_slab(disk_id))
     };
-    let preferred = layout
-        .runs()
-        .get(&(column, copy))
-        .and_then(|runs| runs.iter().min_by_key(|r| r.first_row.abs_diff(row)))
-        .map(|r| r.disk_id);
-    let mut candidates: Vec<(bool, u64, u64)> = pool
-        .disks
+    pool.disks
         .values()
         .filter(|d| d.member.is_some() && matches!(d.usage, DiskUsage::AutoSelect | DiskUsage::ManualSelect))
-        .map(|d| (Some(d.id) != preferred, u64::MAX - free(d.id), d.id))
-        .collect();
-    candidates.sort();
-    candidates
-        .into_iter()
-        .map(|c| c.2)
-        .find(|&d| !used.contains(&d) && free(d) > 0)
+        .filter(|d| !used.contains(&d.id))
+        .map(|d| (free(d.id), d.id))
+        .filter(|&(free, _)| free > 0)
+        .min_by_key(|&(free, id)| (u64::MAX - free, id))
+        .map(|(_, id)| id)
         .ok_or_else(|| Error::Pool(format!("no disk has a free slab for row {row} (the pool is full)")))
 }
 
@@ -1654,6 +1638,13 @@ mod tests {
             } else {
                 assert!(back == data || back.iter().all(|&b| b == 0), "state {k}");
             }
+            // Opening it for writing brings the stale copies up to date.
+            drop(r);
+            pool.open_space_rw(id).unwrap();
+            let copies = member_databases(&pool);
+            assert!(copies.iter().all(|c| c.bytes() == copies[0].bytes()), "state {k}");
+            let again = Pool::open(replay.iter().collect::<Vec<_>>()).unwrap();
+            assert!(again.warnings.is_empty(), "state {k}: {:?}", again.warnings);
         }
     }
 

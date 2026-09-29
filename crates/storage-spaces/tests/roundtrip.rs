@@ -256,3 +256,26 @@ fn windows_reads_a_wrapped_cache_log_from_its_checkpoint() {
     }
     assert_eq!(e["ntfs_before_the_fix"]["mismatching"], 7);
 }
+
+/// A thin parity space filled from Linux beyond its initial allocation
+/// (768 MiB to 4.5 GiB, rows allocated as the cache destaged them, NTFS
+/// with ntfs-3g): Windows loaded the cache as Linux left it, found the
+/// space healthy with nothing to repair, and chkdsk and every file checked
+/// out.
+#[test]
+fn windows_reads_a_thin_parity_space_filled_from_linux() {
+    let e = evidence("rw-thin-parity-ntfs3g.json");
+    assert_eq!(
+        (e["attached"][0][1].as_str(), e["repaired"][0][1].as_str()),
+        (Some("Healthy"), Some("Healthy"))
+    );
+    assert_eq!(e["attached_jobs"].as_array().unwrap().len(), 0);
+    assert_eq!((e["chkdsk_exit"].as_i64(), e["files"].as_i64()), (Some(0), Some(573)));
+    assert_eq!(e["mismatching"].as_array().unwrap().len(), 0);
+    assert!(
+        e["windows_loaded"][0]
+            .as_str()
+            .unwrap()
+            .contains("UsedLineCount: 0x47D")
+    );
+}
