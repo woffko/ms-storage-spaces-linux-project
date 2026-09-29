@@ -43,6 +43,10 @@ pub enum Consistency {
 pub struct ParityJournal {
     runs: HashMap<u64, Vec<Consistency>>,
     slots: Vec<crate::cache::Slot>,
+    /// Slot offset, size and count from the header.
+    geometry: (u64, u32, u32),
+    /// The newest entry per run of the merged slot area.
+    current: HashMap<u64, Consistency>,
 }
 
 impl ParityJournal {
@@ -67,6 +71,7 @@ impl ParityJournal {
         }
         let copies = read.read_slot_copies(slot_offset, slot_size * slot_count)?;
         let merged = merge_slot_copies(&copies, slot_size);
+        let current = Self::parse(&merged, slot_size)?;
         let mut runs: HashMap<u64, Vec<Consistency>> = HashMap::new();
         for area in std::iter::once(&merged).chain(copies.iter().filter(|c| **c != merged)) {
             for (offset, c) in Self::parse(area, slot_size)? {
@@ -79,6 +84,8 @@ impl ParityJournal {
         Ok(Some(ParityJournal {
             runs,
             slots: crate::cache::valid_slots(&merged, slot_size),
+            geometry: (slot_offset, slot_size as u32, slot_count as u32),
+            current,
         }))
     }
 
@@ -158,6 +165,26 @@ impl ParityJournal {
         &self.slots
     }
 
+    /// Where the slot area is: (offset in the journal space, slot size,
+    /// slot count).
+    pub fn geometry(&self) -> (u64, u32, u32) {
+        self.geometry
+    }
+
+    /// A writer that continues this journal for the space `owner`: the
+    /// next slot follows the newest one, with the next sequence, and each
+    /// run starts from its newest entry.
+    pub fn writer(&self, owner: Guid) -> JournalWriter {
+        let (_, slot_size, slot_count) = self.geometry;
+        let mut w = JournalWriter::new(owner, slot_size, slot_count);
+        if let Some(newest) = self.slots.iter().max_by_key(|s| s.sequence) {
+            w.sequence = newest.sequence;
+            w.next_slot = (newest.index + 1) % slot_count.max(1) as usize;
+        }
+        w.loaded = self.current.clone();
+        w
+    }
+
     /// Number of extent runs with possibly inconsistent stripes.
     pub fn dirty_runs(&self) -> usize {
         self.runs
@@ -183,6 +210,8 @@ pub struct JournalWriter {
     sequence: u64,
     /// Owner offset where an extent run starts -> consistent stripes.
     runs: std::collections::BTreeMap<u64, Vec<bool>>,
+    /// Entries of a journal this writer continues, not yet expanded.
+    loaded: HashMap<u64, Consistency>,
 }
 
 impl JournalWriter {
@@ -195,21 +224,44 @@ impl JournalWriter {
             next_slot: 0,
             sequence: 0,
             runs: Default::default(),
+            loaded: Default::default(),
         }
+    }
+
+    /// Whether stripe `stripe` of the run at `run_start` (of `stripes`
+    /// stripes) is recorded as consistent.
+    pub fn is_consistent(&mut self, run_start: u64, stripes: u64, stripe: u64) -> bool {
+        self.run(run_start, stripes)
+            .get(stripe as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn run(&mut self, run_start: u64, stripes: u64) -> &mut Vec<bool> {
+        let loaded = self.loaded.remove(&run_start);
+        self.runs.entry(run_start).or_insert_with(|| {
+            (0..stripes)
+                .map(|s| loaded.as_ref().is_some_and(|c| !c.is_dirty(s)))
+                .collect()
+        })
     }
 
     /// A write request of stripes `first..first + count` of the extent run
     /// that starts at owner offset `run_start` and has `stripes` stripes:
     /// the slot Windows writes (index and page).
     pub fn write(&mut self, run_start: u64, stripes: u64, first: u64, count: u64) -> (usize, Vec<u8>) {
-        let consistent = self
-            .runs
-            .entry(run_start)
-            .or_insert_with(|| vec![false; stripes as usize]);
+        self.mark(run_start, stripes, first, count, true)
+    }
+
+    /// Records stripes `first..first + count` of the run as consistent or
+    /// not: the slot to write (index and page).
+    pub fn mark(&mut self, run_start: u64, stripes: u64, first: u64, count: u64, value: bool) -> (usize, Vec<u8>) {
+        let consistent = self.run(run_start, stripes);
         let end = (first + count).min(consistent.len() as u64);
         for s in first.min(end)..end {
-            consistent[s as usize] = true;
+            consistent[s as usize] = value;
         }
+        let consistent = &*consistent;
         let mut words = Vec::new();
         let mut i = 0;
         while i < consistent.len() {

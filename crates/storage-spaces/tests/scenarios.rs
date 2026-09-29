@@ -709,3 +709,32 @@ fn thin_destaged_and_cached_blocks_read_back() {
         assert!(block == expected, "block at {offset:#x}");
     }
 }
+
+/// m5pj3: whole stripes written twice (4 MiB at 0). The first write went to
+/// the space and the journal (four slots, as in m5pj2); the second, into
+/// stripes the journal records as consistent, went to the write-back cache
+/// (eight full chunks from block 64) and left the journal untouched: Windows
+/// never rewrites consistent stripes in place.
+#[test]
+fn consistent_stripes_are_rewritten_through_the_cache() {
+    let journal = |label: &str| {
+        let pool = state("m5pj3", label);
+        let space = pool.user_spaces().next().unwrap();
+        let reader = pool.open_space(space.id()).unwrap();
+        reader
+            .journal()
+            .unwrap()
+            .slots()
+            .iter()
+            .map(|s| (s.index, s.content.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(journal("s1").len(), 4);
+    assert_eq!(journal("s2"), journal("s1"));
+    assert_eq!(cache_slots(&state("m5pj3", "s1")).len(), 1);
+    let pool = state("m5pj3", "s2");
+    let space = pool.user_spaces().next().unwrap();
+    let reader = pool.open_space(space.id()).unwrap();
+    let mappings: Vec<(u64, u64)> = reader.cache().unwrap().mappings().iter().map(|m| (m.0, m.1)).collect();
+    assert_eq!(mappings, (0..8).map(|c| (c * (512 << 10), 64 + c)).collect::<Vec<_>>());
+}

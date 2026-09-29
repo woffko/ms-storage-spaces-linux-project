@@ -584,6 +584,19 @@ of 1 MiB, then 4 KiB; `JournalWriter` implements it):
   4 KiB write took cache block 64), as do writes into chunks the cache
   holds (`m5pj`: 512 KiB at 0).
 * A minute without writes changed nothing.
+* Stripes the journal records as consistent are never rewritten in place:
+  writing the same 4 MiB again (`m5pj3`, test
+  `consistent_stripes_are_rewritten_through_the_cache`) put eight full
+  chunks into the write-back cache and left the journal and the stripes
+  unchanged.
+
+`spaces` writes a single parity space differently but with the same
+guarantees (`SpaceWriter`): it keeps the cache empty and rewrites stripes
+in place, recording a consistent stripe as not consistent (a slot, flushed)
+before its data and parity change and as consistent again afterwards, so
+that a crash leaves only stripes the journal lists as not consistent; those
+Windows checks and repairs when it mounts the pool (crash experiments
+above).
 
 The newest entry per run wins. After a clean shutdown the runs are state 3
 (or all-set bitmaps). In the crash experiment `crashparity` (disks pulled
