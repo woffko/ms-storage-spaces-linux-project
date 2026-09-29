@@ -171,3 +171,25 @@ fn windows_accepts_mirrors_written_from_linux_and_cut_off() {
         (Some("Healthy"), Some("Healthy"))
     );
 }
+
+/// A single parity space written from Linux in place under the journal
+/// (parity3_26100 copies): NTFS with ntfs-3g and 3000 file operations was
+/// accepted (healthy, chkdsk clean, all files intact). A write cut off
+/// between its data and its parity left a stripe the journal records as not
+/// consistent: Windows attached the space as healthy but repaired nothing,
+/// not even with Repair-VirtualDisk, so after a later disk failure it would
+/// rebuild from the stale parity. In-place rewrites leave that write hole
+/// open; Windows avoids it by rewriting stripes through the cache.
+#[test]
+fn in_place_parity_writes_leave_windows_a_stale_stripe_after_a_crash() {
+    let e = evidence("rw-parity-ntfs3g.json");
+    assert_eq!(
+        (e["attached"][0][1].as_str(), e["repaired"][0][1].as_str()),
+        (Some("Healthy"), Some("Healthy"))
+    );
+    assert_eq!(e["chkdsk_exit"], 0);
+    assert_eq!(e["mismatching"].as_array().unwrap().len(), 0);
+    let e = evidence("rw-parity-crash.json");
+    assert_eq!(e["repaired"][0][1], "Healthy");
+    assert!(e["after_windows"].as_str().unwrap().contains("still inconsistent"));
+}

@@ -1,0 +1,20 @@
+{
+ "windows_build": "10.0.26100.0",
+ "attached": [
+  [
+   "parity3_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "repaired": [
+  [
+   "parity3_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "chkdsk_exit": 0,
+ "files": 573,
+ "mismatching": []
+}

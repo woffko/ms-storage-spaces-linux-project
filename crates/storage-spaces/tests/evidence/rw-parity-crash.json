@@ -1,0 +1,19 @@
+{
+ "windows_build": "10.0.26100.0",
+ "attached": [
+  [
+   "parity3_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "repaired": [
+  [
+   "parity3_26100",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "crash": "SpaceWriter in-place write of 4 KiB at 0 cut before the parity write: journal slot 512 records stripe 0 as not consistent, the data unit holds the new data, the parity is stale",
+ "after_windows": "journal unchanged, stripe 0 still inconsistent (spaces refuses it): Windows neither repaired it on attach nor with Repair-VirtualDisk"
+}
