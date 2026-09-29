@@ -247,9 +247,13 @@ enum Command {
         #[arg(long)]
         tag: String,
         /// Stop the process before the Nth write reaches a member, as a
-        /// power loss would (for crash tests).
+        /// power loss would (for crash tests); without a crash, the number
+        /// of member writes is printed.
         #[arg(long)]
         crash_after_writes: Option<usize>,
+        /// Destage the write-back cache after the writes.
+        #[arg(long)]
+        destage: bool,
     },
     /// Verify the test pattern written by tools/vm/New-TestPool.ps1.
     #[command(hide = true)]
@@ -327,11 +331,11 @@ fn main() -> Result<()> {
             } else {
                 None
             };
-            let reader = match writer {
-                Some(w) => w.reader(),
+            let source: &'static dyn storage_spaces::io::ReadAt = match writer {
+                Some(w) => w,
                 None => Box::leak(Box::new(open_space(pool, id)?)),
             };
-            ublk::serve(pool, reader, writer, move |dev| {
+            ublk::serve(pool, source, writer, move |dev| {
                 println!("{dev}");
                 if let Some(path) = &ready_file
                     && let Err(e) = std::fs::write(path, dev)
@@ -420,7 +424,8 @@ fn main() -> Result<()> {
             length,
             tag,
             crash_after_writes,
-        } => write_pattern(&devices, &space, offset, length, &tag, crash_after_writes),
+            destage,
+        } => write_pattern(&devices, &space, offset, length, &tag, crash_after_writes, destage),
         Command::CheckPattern { devices, space, length } => {
             let pool = open_pool(&devices)?;
             check_pattern(&pool, find_space(&pool, &space)?, length)
@@ -508,6 +513,7 @@ fn write_pattern(
     length: u64,
     tag: &str,
     crash_after_writes: Option<usize>,
+    destage: bool,
 ) -> Result<()> {
     let block = testpattern::BLOCK as u64;
     if !offset.is_multiple_of(block) || !length.is_multiple_of(block) {
@@ -532,11 +538,13 @@ fn write_pattern(
             .map(|s| s.id())
             .ok_or_else(|| anyhow::anyhow!("no space {space:?}"))?;
         let writer = pool.open_space_rw(id)?;
-        return write_pattern_with(&writer, offset, length, tag);
+        write_pattern_with(&writer, offset, length, tag, destage)?;
+        eprintln!("member writes: {}", writes.load(std::sync::atomic::Ordering::SeqCst));
+        return Ok(());
     }
     let pool = open_pool_rw(devices)?;
     let writer = pool.open_space_rw(find_space(&pool, space)?.id())?;
-    write_pattern_with(&writer, offset, length, tag)
+    write_pattern_with(&writer, offset, length, tag, destage)
 }
 
 fn write_pattern_with<D: storage_spaces::io::WriteAt>(
@@ -544,6 +552,7 @@ fn write_pattern_with<D: storage_spaces::io::WriteAt>(
     offset: u64,
     length: u64,
     tag: &str,
+    destage: bool,
 ) -> Result<()> {
     let mut buf = vec![0u8; 1 << 20];
     let mut at = offset;
@@ -556,6 +565,9 @@ fn write_pattern_with<D: storage_spaces::io::WriteAt>(
         at += n as u64;
     }
     writer.flush()?;
+    if destage {
+        writer.destage()?;
+    }
     println!("wrote {} at {offset:#x} with tag {tag:?}", size(length));
     Ok(())
 }
@@ -916,8 +928,8 @@ fn serve_nbd(
         None
     };
     let reader_ro;
-    let reader = match &writer {
-        Some(w) => w.reader(),
+    let source: &dyn storage_spaces::io::ReadAt = match &writer {
+        Some(w) => w,
         None => {
             reader_ro = open_space(pool, space.id())?;
             &reader_ro
@@ -925,17 +937,18 @@ fn serve_nbd(
     };
     let listener = std::os::unix::net::UnixListener::bind(socket)
         .with_context(|| format!("cannot listen on {}", socket.display()))?;
+    let space_size = source.size()?;
     let export = nbd::Export {
         name: space.name(),
-        source: reader,
+        source,
         sink: writer.as_ref().map(|w| w as &dyn nbd::Sink),
-        size: reader.size(),
+        size: space_size,
         block_size: pool.logical_sector_size,
     };
     eprintln!(
         "serving {:?} ({}{}) on {}",
         space.name(),
-        size(reader.size()),
+        size(space_size),
         if rw { ", writable" } else { "" },
         socket.display()
     );

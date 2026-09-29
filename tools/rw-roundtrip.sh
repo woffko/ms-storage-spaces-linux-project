@@ -5,6 +5,7 @@
 # Usage: tools/rw-roundtrip.sh NAME POOL "OFFKB:LENKB:TAG;..."
 #   NAME   round-trip name (C:\sstest\roundtrip\NAME, testdata/work/NAME)
 #   POOL   corpus pool in testdata/pools (never written: a copy is made)
+# WRITE_ARGS adds arguments to every write-pattern call (e.g. --destage).
 # The result lands in testdata/work/NAME/roundtrip.json.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -21,7 +22,7 @@ space=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="
 IFS=';' read -ra list <<<"$ranges"
 for r in "${list[@]}"; do
   IFS=':' read -r off len tag <<<"$r"
-  "$spaces" write-pattern "$work"/disk*.img --space "$space" --offset $((off * 1024)) --length $((len * 1024)) --tag "$tag"
+  "$spaces" write-pattern "$work"/disk*.img --space "$space" --offset $((off * 1024)) --length $((len * 1024)) --tag "$tag" ${WRITE_ARGS:-}
 done
 n=$(ls "$work"/disk*.img | wc -l)
 for ((i = 0; i < n; i++)); do

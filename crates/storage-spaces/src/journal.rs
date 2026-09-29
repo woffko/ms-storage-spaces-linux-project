@@ -182,6 +182,7 @@ impl ParityJournal {
             w.next_slot = (newest.index + 1) % slot_count.max(1) as usize;
         }
         w.loaded = self.current.clone();
+        w.listed = self.current.keys().copied().collect();
         w
     }
 
@@ -189,7 +190,13 @@ impl ParityJournal {
     pub fn dirty_runs(&self) -> usize {
         self.runs
             .values()
-            .filter(|v| v.iter().any(|c| *c != Consistency::All))
+            .filter(|v| {
+                v.iter().any(|c| match c {
+                    Consistency::All => false,
+                    Consistency::Runs(runs) => runs.iter().any(|&(consistent, n)| !consistent && n > 0),
+                    Consistency::Bitmap(bits) => bits.iter().any(|&b| b != 0xff),
+                })
+            })
             .count()
     }
 }
@@ -212,6 +219,8 @@ pub struct JournalWriter {
     runs: std::collections::BTreeMap<u64, Vec<bool>>,
     /// Entries of a journal this writer continues, not yet expanded.
     loaded: HashMap<u64, Consistency>,
+    /// Runs the journal has an entry for.
+    listed: std::collections::HashSet<u64>,
 }
 
 impl JournalWriter {
@@ -225,7 +234,14 @@ impl JournalWriter {
             sequence: 0,
             runs: Default::default(),
             loaded: Default::default(),
+            listed: Default::default(),
         }
+    }
+
+    /// Whether the journal has an entry for the run at `run_start` (a run
+    /// without one is not checked by readers).
+    pub fn is_listed(&self, run_start: u64) -> bool {
+        self.listed.contains(&run_start)
     }
 
     /// Whether stripe `stripe` of the run at `run_start` (of `stripes`
@@ -261,21 +277,72 @@ impl JournalWriter {
         for s in first.min(end)..end {
             consistent[s as usize] = value;
         }
-        let consistent = &*consistent;
-        let mut words = Vec::new();
-        let mut i = 0;
-        while i < consistent.len() {
-            let v = consistent[i];
-            let n = consistent[i..].iter().take(0x7fff).take_while(|&&c| c == v).count();
-            words.push((u16::from(v) << 15) | n as u16);
-            i += n;
+        self.entry(run_start)
+    }
+
+    /// Records the stripes `list` of the run as consistent or not: the slot
+    /// to write (index and page).
+    pub fn mark_stripes(&mut self, run_start: u64, stripes: u64, list: &[u64], value: bool) -> (usize, Vec<u8>) {
+        let consistent = self.run(run_start, stripes);
+        for &s in list {
+            if let Some(c) = consistent.get_mut(s as usize) {
+                *c = value;
+            }
+        }
+        self.entry(run_start)
+    }
+
+    /// The next slot, with the entry for the run at `run_start`: a run list
+    /// (state 2, as Windows writes it), or a bitmap (state 1) where the run
+    /// list does not fit into the slot. Where neither fits, the run is
+    /// recorded as not consistent as a whole, which is always safe.
+    fn entry(&mut self, run_start: u64) -> (usize, Vec<u8>) {
+        let capacity = (self.slot_size as usize).saturating_sub(0x38 + 12);
+        let consistent = self.runs.get_mut(&run_start).expect("run expanded by the caller");
+        let words = |c: &[bool]| {
+            let mut words = Vec::new();
+            let mut i = 0;
+            while i < c.len() {
+                let v = c[i];
+                let n = c[i..].iter().take(0x7fff).take_while(|&&x| x == v).count();
+                words.push((u16::from(v) << 15) | n as u16);
+                i += n;
+            }
+            words
+        };
+        let mut body = Vec::new();
+        let mut state = 2u16;
+        let w = words(consistent);
+        let mut counted = None;
+        if !consistent.contains(&false) && 2 * w.len() <= capacity {
+            // Whole run consistent: state 3; the run words are written but
+            // not counted (parity3_26100, the slot after the last stripe).
+            state = 3;
+            counted = Some(0);
+            w.iter().for_each(|w| body.extend_from_slice(&w.to_le_bytes()));
+        } else if 2 * w.len() <= capacity {
+            w.iter().for_each(|w| body.extend_from_slice(&w.to_le_bytes()));
+        } else if consistent.len().div_ceil(8) <= capacity {
+            state = 1;
+            body = vec![0u8; consistent.len().div_ceil(8)];
+            for (i, _) in consistent.iter().enumerate().filter(|c| *c.1) {
+                body[i / 8] |= 1 << (i % 8);
+            }
+            // Bits past the last stripe are set, as in all-set bitmaps.
+            if !consistent.len().is_multiple_of(8) {
+                *body.last_mut().unwrap() |= 0xff << (consistent.len() % 8);
+            }
+        } else {
+            consistent.fill(false);
+            words(consistent)
+                .iter()
+                .for_each(|w| body.extend_from_slice(&w.to_le_bytes()));
         }
         let mut entry = run_start.to_le_bytes().to_vec();
-        entry.extend_from_slice(&2u16.to_le_bytes());
-        entry.extend_from_slice(&(2 * words.len() as u16).to_le_bytes());
-        for w in words {
-            entry.extend_from_slice(&w.to_le_bytes());
-        }
+        entry.extend_from_slice(&state.to_le_bytes());
+        entry.extend_from_slice(&counted.unwrap_or(body.len() as u16).to_le_bytes());
+        entry.extend_from_slice(&body);
+        self.listed.insert(run_start);
         self.sequence += 1;
         let index = self.next_slot;
         self.next_slot = (self.next_slot + 1) % self.slot_count.max(1) as usize;
@@ -360,6 +427,38 @@ mod tests {
         })
         .unwrap()
         .unwrap()
+    }
+
+    /// The slot Windows wrote when the last stripes of a run became
+    /// consistent (parity3_26100 was filled front to back in whole
+    /// stripes): state 3, rebuilt byte for byte.
+    #[test]
+    fn whole_run_consistent_is_state_3_as_windows_writes_it() {
+        use crate::io::SparseImage;
+        use crate::pool::Pool;
+        use std::fs::File;
+        use std::path::Path;
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/parity3_26100");
+        let disks: Vec<SparseImage> = (0..3)
+            .map(|i| SparseImage::read_from(File::open(dir.join(format!("disk{i}.fixture"))).unwrap()).unwrap())
+            .collect();
+        let pool = Pool::open(disks).unwrap();
+        let space = pool.find_space("parity3_26100").unwrap();
+        let reader = pool.open_space(space.id()).unwrap();
+        let journal = reader.journal().unwrap();
+        let slots = journal.slots();
+        let last = slots.iter().max_by_key(|s| s.sequence).unwrap();
+        let before = slots.iter().find(|s| s.sequence == last.sequence - 1).unwrap();
+        // The slot before: consistent 16352, not consistent 32.
+        assert_eq!(&before.content[0x18 + 8..], &[2, 0, 4, 0, 0xe0, 0xbf, 0x20]);
+        let mut w = JournalWriter::new(space.info.guid, 4096, 1024);
+        w.mark(0, 16384, 0, 16352, true);
+        w.sequence = before.sequence;
+        w.next_slot = last.index;
+        let (index, page) = w.write(0, 16384, 16352, 32);
+        assert_eq!(index, last.index);
+        let end = page.iter().rposition(|&b| b != 0).unwrap() + 1;
+        assert_eq!(&page[0x20..end], &last.content[..]);
     }
 
     #[test]

@@ -664,7 +664,7 @@ impl<D: ReadAt> Seek for SpaceStream<'_, D> {
     }
 }
 
-fn into_io(e: Error) -> io::Error {
+pub(crate) fn into_io(e: Error) -> io::Error {
     match e {
         Error::Io(e) => e,
         other => io::Error::other(other),

@@ -134,8 +134,11 @@ pub struct CacheWriter {
     next_slot: usize,
     sequence: u64,
     next_block: u32,
+    first_block: u32,
     /// Chunk number -> (block, valid sectors).
     chunks: std::collections::BTreeMap<u64, (u32, Vec<bool>)>,
+    /// Slots written since the cache was last empty.
+    slots_in_use: usize,
 }
 
 impl CacheWriter {
@@ -146,8 +149,99 @@ impl CacheWriter {
             next_slot: 1,
             sequence: 1,
             next_block: first_block,
+            first_block,
             chunks: Default::default(),
+            slots_in_use: 0,
         }
+    }
+
+    pub fn header(&self) -> &CacheHeader {
+        &self.header
+    }
+
+    /// Byte offset in the cache space of block `block`.
+    pub fn block_offset(&self, block: u32) -> u64 {
+        self.header.data_offset + block as u64 * self.header.chunk_size as u64
+    }
+
+    /// The cached chunks as (owner offset, block).
+    pub fn cached(&self) -> Vec<(u64, u32)> {
+        let chunk = self.header.chunk_size as u64;
+        self.chunks.iter().map(|(&c, &(b, _))| (c * chunk, b)).collect()
+    }
+
+    /// Where the sector at owner `offset` is cached: the cache space offset,
+    /// or `None` if it is not.
+    pub fn lookup(&self, offset: u64) -> Option<u64> {
+        self.lookup_run(offset).0
+    }
+
+    /// Where the sector at owner `offset` is cached (the cache space offset,
+    /// or `None` if it is not), and for how many bytes from `offset` the
+    /// same holds (up to the end of its chunk).
+    pub fn lookup_run(&self, offset: u64) -> (Option<u64>, u64) {
+        let chunk = self.header.chunk_size as u64;
+        let within = offset % chunk;
+        let Some((block, valid)) = self.chunks.get(&(offset / chunk)) else {
+            return (None, chunk - within);
+        };
+        let sector = (within / 512) as usize;
+        let v = valid[sector];
+        let same = valid[sector..].iter().take_while(|&&x| x == v).count() as u64;
+        let len = (sector as u64 + same) * 512 - within;
+        (v.then(|| self.block_offset(*block) + within), len)
+    }
+
+    /// The block of the cached chunk at owner offset `offset` and its runs
+    /// of equally valid bytes from the chunk start: (valid, bytes).
+    pub fn chunk_runs(&self, offset: u64) -> Option<(u32, Vec<(bool, u64)>)> {
+        let chunk = self.header.chunk_size as u64;
+        let (block, valid) = self.chunks.get(&(offset / chunk))?;
+        Some((
+            *block,
+            runs_of(valid).into_iter().map(|(v, n)| (v, n as u64 * 512)).collect(),
+        ))
+    }
+
+    /// Whether writing `len` bytes at `offset` needs more slots or blocks
+    /// than are left without reusing ones that still map cached data: then
+    /// everything has to be destaged first.
+    pub fn is_full_for(&self, offset: u64, len: u64) -> bool {
+        let chunk = self.header.chunk_size as u64;
+        let new = (offset / chunk..(offset + len).div_ceil(chunk))
+            .filter(|c| !self.chunks.contains_key(c))
+            .count() as u64;
+        // Destaging everything needs slots too: for the entries that make
+        // partly valid chunks whole and for the tombstones.
+        let reserve = 2 * (self.chunks.len() + new as usize).div_ceil(200) + 2;
+        self.slots_in_use + reserve + 2 >= self.header.slot_count as usize
+            || self.next_block as u64 + new > self.header.chunk_count as u64
+    }
+
+    /// Destaging `offsets` (owner offsets of cached chunks, whose data is in
+    /// the space now): the slots with their entries of state 0 without a
+    /// block, as Windows logs them. Once the cache is empty its blocks are
+    /// handed out from the first again.
+    pub fn destage(&mut self, offsets: &[u64]) -> Vec<(usize, Vec<u8>)> {
+        let chunk = self.header.chunk_size as u64;
+        let capacity = (self.header.slot_size as usize).saturating_sub(0x38) / 16;
+        let mut slots = Vec::new();
+        for batch in offsets.chunks(capacity.max(1)) {
+            let mut entries = Vec::with_capacity(batch.len() * 16);
+            for &offset in batch {
+                self.chunks.remove(&(offset / chunk));
+                entries.extend_from_slice(&(offset / chunk * chunk).to_le_bytes());
+                entries.extend_from_slice(&NO_BLOCK.to_le_bytes());
+                entries.extend_from_slice(&STATE_EMPTY.to_le_bytes());
+                entries.extend_from_slice(&0u16.to_le_bytes());
+            }
+            slots.push(self.next(batch.len() as u32, &entries));
+        }
+        if self.chunks.is_empty() {
+            self.next_block = self.first_block;
+            self.slots_in_use = 0;
+        }
+        slots
     }
 
     /// Slot 0 of a new cache: type 1, sequence 1, the entry (8, 1).
@@ -160,53 +254,81 @@ impl CacheWriter {
     /// A write of `len` bytes at owner offset `offset`: the slots Windows
     /// writes (index and page), none if no chunk changes. A write whose
     /// entries do not fit into one slot continues in the next (where Windows
-    /// ends a slot then is not modelled, nor is destaging).
+    /// ends a slot then is not modelled).
     pub fn write(&mut self, offset: u64, len: u64) -> Vec<(usize, Vec<u8>)> {
         let chunk = self.header.chunk_size as u64;
         let sectors = (chunk / 512) as usize;
-        let capacity = (self.header.slot_size as usize).saturating_sub(0x38);
-        let mut slots = Vec::new();
-        let mut entries = Vec::new();
-        let mut pos = 0;
-        let mut count = 0;
+        let mut changed = Vec::new();
         let mut at = offset;
         while at < offset + len {
             let key = at / chunk;
             let end = (offset + len).min((key + 1) * chunk);
             let (first, last) = ((at % chunk / 512) as usize, ((end - 1) % chunk / 512) as usize);
             let next_block = &mut self.next_block;
-            let (block, valid) = self.chunks.entry(key).or_insert_with(|| {
+            let (_, valid) = self.chunks.entry(key).or_insert_with(|| {
                 let b = *next_block;
                 *next_block += 1;
                 (b, vec![false; sectors])
             });
             if valid[first..=last].iter().any(|v| !v) {
                 valid[first..=last].fill(true);
-                let runs = runs_of(valid);
-                let full = runs.len() == 1;
-                let counted: u16 = if full { 0 } else { 2 * runs.len() as u16 };
-                let mut e = (key * chunk).to_le_bytes().to_vec();
-                e.extend_from_slice(&block.to_le_bytes());
-                e.extend_from_slice(&(if full { STATE_FULL } else { STATE_PARTIAL }).to_le_bytes());
-                e.extend_from_slice(&counted.to_le_bytes());
-                // The run words are always written, but counted only for a
-                // partly valid chunk; the next entry starts 8-byte aligned
-                // after the counted part and so overwrites the others.
-                for (v, n) in runs {
-                    e.extend_from_slice(&((u16::from(v) << 15) | n as u16).to_le_bytes());
-                }
-                if pos + e.len() > capacity && count > 0 {
-                    entries.truncate(pos);
-                    slots.push(self.next(count, &entries));
-                    (entries, pos, count) = (Vec::new(), 0, 0);
-                }
-                entries.truncate(pos);
-                entries.resize(pos, 0);
-                entries.extend_from_slice(&e);
-                pos = (pos + 16 + counted as usize).next_multiple_of(8);
-                count += 1;
+                changed.push(key);
             }
             at = end;
+        }
+        self.log_chunks(&changed)
+    }
+
+    /// Makes the cached chunks at owner offsets `offsets` wholly valid
+    /// (their missing sectors are in their blocks now): the slots to write.
+    pub fn fill(&mut self, offsets: &[u64]) -> Vec<(usize, Vec<u8>)> {
+        let chunk = self.header.chunk_size as u64;
+        let mut changed = Vec::new();
+        for &offset in offsets {
+            if let Some((_, valid)) = self.chunks.get_mut(&(offset / chunk))
+                && valid.contains(&false)
+            {
+                valid.fill(true);
+                changed.push(offset / chunk);
+            }
+        }
+        self.log_chunks(&changed)
+    }
+
+    /// Slots with one mapping entry for each of the chunks `keys`, as many
+    /// entries per slot as fit.
+    fn log_chunks(&mut self, keys: &[u64]) -> Vec<(usize, Vec<u8>)> {
+        let chunk = self.header.chunk_size as u64;
+        let capacity = (self.header.slot_size as usize).saturating_sub(0x38);
+        let mut slots = Vec::new();
+        let mut entries = Vec::new();
+        let mut pos = 0;
+        let mut count = 0;
+        for &key in keys {
+            let (block, valid) = &self.chunks[&key];
+            let runs = runs_of(valid);
+            let full = runs.len() == 1;
+            let counted: u16 = if full { 0 } else { 2 * runs.len() as u16 };
+            let mut e = (key * chunk).to_le_bytes().to_vec();
+            e.extend_from_slice(&block.to_le_bytes());
+            e.extend_from_slice(&(if full { STATE_FULL } else { STATE_PARTIAL }).to_le_bytes());
+            e.extend_from_slice(&counted.to_le_bytes());
+            // The run words are always written, but counted only for a
+            // partly valid chunk; the next entry starts 8-byte aligned
+            // after the counted part and so overwrites the others.
+            for (v, n) in runs {
+                e.extend_from_slice(&((u16::from(v) << 15) | n as u16).to_le_bytes());
+            }
+            if pos + e.len() > capacity && count > 0 {
+                entries.truncate(pos);
+                slots.push(self.next(count, &entries));
+                (entries, pos, count) = (Vec::new(), 0, 0);
+            }
+            entries.truncate(pos);
+            entries.resize(pos, 0);
+            entries.extend_from_slice(&e);
+            pos = (pos + 16 + counted as usize).next_multiple_of(8);
+            count += 1;
         }
         if count > 0 {
             slots.push(self.next(count, &entries));
@@ -217,6 +339,7 @@ impl CacheWriter {
     /// The next slot with `count` entries.
     fn next(&mut self, count: u32, entries: &[u8]) -> (usize, Vec<u8>) {
         self.sequence += 1;
+        self.slots_in_use += 1;
         let index = self.next_slot;
         // Past the last slot the log continues at slot 0, over the type 1
         // record (m5wbc2).
@@ -492,6 +615,38 @@ impl CacheIndex {
         &self.slots
     }
 
+    /// A writer that continues this log: the next slot follows the newest
+    /// one, with the next sequence; the cached chunks stay mapped; blocks
+    /// are handed out after the highest one mapped (from `first_block` if
+    /// none is).
+    pub fn writer(&self, first_block: u32) -> CacheWriter {
+        let mut w = CacheWriter::new(self.header.clone(), first_block);
+        w.next_slot = 0;
+        w.sequence = 0;
+        if let Some(newest) = self.slots.iter().max_by_key(|s| s.sequence) {
+            w.sequence = newest.sequence;
+            w.next_slot = (newest.index + 1) % self.header.slot_count.max(1) as usize;
+        }
+        let sectors = (self.header.chunk_size / 512) as usize;
+        for (&key, (block, validity)) in &self.chunks {
+            let valid = match validity {
+                Validity::Full => vec![true; sectors],
+                Validity::Runs(runs) => {
+                    let mut v = Vec::with_capacity(sectors);
+                    for &(ok, n) in runs {
+                        v.extend(std::iter::repeat_n(ok, n as usize));
+                    }
+                    v.resize(sectors, false);
+                    v
+                }
+            };
+            w.chunks.insert(key, (*block as u32, valid));
+            w.next_block = w.next_block.max(*block as u32 + 1);
+        }
+        w.slots_in_use = if w.chunks.is_empty() { 0 } else { self.slots.len() };
+        w
+    }
+
     /// Number of chunks the copies of the cache disagree about.
     pub fn conflicting_chunks(&self) -> usize {
         self.conflicts.len()
@@ -666,6 +821,71 @@ mod tests {
             );
         }
         assert!(matches!(index.lookup(5 * (64 << 10)), Lookup::Miss { .. }));
+    }
+
+    /// A slot of tombstones Windows wrote when it destaged (m5wbc2, its
+    /// largest batch of tombstones only), rebuilt byte for byte by
+    /// `destage` from the same chunks in the same order.
+    #[test]
+    fn destaging_logs_tombstones_as_windows_does() {
+        use crate::io::SparseImage;
+        use crate::pool::Pool;
+        use std::fs::File;
+        use std::path::Path;
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scenarios/m5wbc2/s4");
+        let disks: Vec<SparseImage> = (0..3)
+            .map(|i| SparseImage::read_from(File::open(dir.join(format!("disk{i}.fixture"))).unwrap()).unwrap())
+            .collect();
+        let pool = Pool::open(disks).unwrap();
+        let space = pool.user_spaces().next().unwrap();
+        let reader = pool.open_space(space.id()).unwrap();
+        let cache = reader.cache().unwrap();
+        // Entries: (owner offset, state), each after the previous one's
+        // counted length, 8-byte aligned.
+        let entries = |c: &[u8], n: u32| {
+            // The stored content ends at its last non-zero byte.
+            let mut c = c.to_vec();
+            c.resize(c.len() + 64, 0);
+            let mut pos = 0x18;
+            let mut out = Vec::new();
+            for _ in 0..n {
+                let offset = u64::from_le_bytes(c[pos..pos + 8].try_into().unwrap());
+                let state = u16::from_le_bytes([c[pos + 12], c[pos + 13]]);
+                let len = u16::from_le_bytes([c[pos + 14], c[pos + 15]]) as usize;
+                out.push((offset, state));
+                pos = (pos + 16 + len).next_multiple_of(8);
+            }
+            out
+        };
+        // The largest batch of nothing but tombstones.
+        let slot = cache
+            .slots()
+            .iter()
+            .filter(|s| s.kind == 0 && s.entries > 10 && entries(&s.content, s.entries).iter().all(|e| e.1 == 0))
+            .max_by_key(|s| s.entries)
+            .unwrap();
+        let offsets: Vec<u64> = entries(&slot.content, slot.entries).iter().map(|e| e.0).collect();
+        let mut w = cache.writer(64);
+        w.next_slot = slot.index;
+        w.sequence = slot.sequence - 1;
+        let chunk = cache.header.chunk_size as u64;
+        for &o in &offsets {
+            w.chunks.insert(o / chunk, (0, vec![true; (chunk / 512) as usize]));
+        }
+        let written = w.destage(&offsets);
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].0, slot.index);
+        let page = &written[0].1;
+        let end = page.iter().rposition(|&b| b != 0).unwrap() + 1;
+        let ours = &page[0x20..end];
+        let first = ours.iter().zip(&slot.content).position(|(a, b)| a != b);
+        assert!(
+            ours == &slot.content[..],
+            "{} entries: lengths {} / {}, first difference at {first:?}",
+            slot.entries,
+            ours.len(),
+            slot.content.len()
+        );
     }
 
     #[test]

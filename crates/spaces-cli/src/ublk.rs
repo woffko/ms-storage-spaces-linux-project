@@ -2,28 +2,31 @@
 //! writable through a space writer (`--rw`).
 //!
 //! Each hardware queue runs in its own thread with a synchronous handler
-//! that reads the requested range through the space reader straight into
-//! the queue's I/O buffer, or writes it from there. A writable device
-//! declares a volatile cache, so the kernel sends flushes (and turns FUA
-//! writes into a write and a flush). The device lives until the process
-//! receives SIGINT/SIGTERM or the device is deleted.
+//! that reads the requested range through the space reader (or writer)
+//! straight into the queue's I/O buffer, or writes it from there. A
+//! writable device declares a volatile cache, so the kernel sends flushes
+//! (and turns FUA writes into a write and a flush); what is written is
+//! flushed once more when the device goes away. The device lives until the
+//! process receives SIGINT/SIGTERM or the device is deleted.
 
 use std::fs::File;
 
 use anyhow::{Context, Result};
 use libublk::io::{BufDescList, UblkDev, UblkIOCtx, UblkQueue};
 use libublk::{BufDesc, UblkFlags, UblkIORes};
-use storage_spaces::{Pool, SpaceReader, SpaceWriter};
+use storage_spaces::io::ReadAt;
+use storage_spaces::{Pool, SpaceWriter};
 
 const QUEUES: u16 = 2;
 const DEPTH: u16 = 64;
 const IO_BUF_BYTES: u32 = 1 << 20;
 
-/// Serves `reader` until the device is removed. `on_ready` receives the
-/// block device path once the kernel exposes it.
+/// Serves `source` (the space reader, or the writer of a writable device)
+/// until the device is removed. `on_ready` receives the block device path
+/// once the kernel exposes it.
 pub fn serve(
     pool: &'static Pool<File>,
-    reader: &'static SpaceReader<'static, File>,
+    source: &'static dyn ReadAt,
     writer: Option<&'static SpaceWriter<'static, File>>,
     on_ready: impl FnOnce(&str) + Send + Sync + 'static,
 ) -> Result<()> {
@@ -46,7 +49,7 @@ pub fn serve(
         }
     });
 
-    let size = reader.size();
+    let size = source.size()?;
     let logical_shift = pool.logical_sector_size.trailing_zeros() as u8;
     let physical_shift = pool.physical_sector_size.max(pool.logical_sector_size).trailing_zeros() as u8;
     let tgt_init = move |dev: &mut UblkDev| {
@@ -63,15 +66,18 @@ pub fn serve(
         basic.io_opt_shift = physical_shift;
         Ok(())
     };
-    let queue_fn = move |qid: u16, dev: &UblkDev| run_queue(qid, dev, reader, writer);
+    let queue_fn = move |qid: u16, dev: &UblkDev| run_queue(qid, dev, source, writer);
     let ready = move |ctrl: &libublk::ctrl::UblkCtrl| on_ready(&format!("/dev/ublkb{}", ctrl.dev_info().dev_id));
     ctrl.run_target(tgt_init, queue_fn, ready)
         .context("ublk device failed")?;
     let _ = ctrl.del_dev();
+    if let Some(w) = writer {
+        w.flush().context("cannot flush the space")?;
+    }
     Ok(())
 }
 
-fn run_queue(qid: u16, dev: &UblkDev, reader: &SpaceReader<'_, File>, writer: Option<&SpaceWriter<'_, File>>) {
+fn run_queue(qid: u16, dev: &UblkDev, source: &dyn ReadAt, writer: Option<&SpaceWriter<'_, File>>) {
     let mut bufs = dev.alloc_queue_io_bufs();
     let queue = match UblkQueue::new(qid, dev)
         .and_then(|q| q.submit_fetch_commands_unified(BufDescList::Slices(Some(&bufs))))
@@ -88,7 +94,7 @@ fn run_queue(qid: u16, dev: &UblkDev, reader: &SpaceReader<'_, File>, writer: Op
         let len = (iod.nr_sectors as usize) << 9;
         let buf = bufs[tag as usize].as_mut_slice();
         let result = match iod.op_flags & 0xff {
-            libublk::sys::UBLK_IO_OP_READ if len <= buf.len() => match reader.read_exact_at(&mut buf[..len], offset) {
+            libublk::sys::UBLK_IO_OP_READ if len <= buf.len() => match source.read_exact_at(&mut buf[..len], offset) {
                 Ok(()) => len as i32,
                 Err(e) => {
                     eprintln!("read of {len} bytes at {offset:#x} failed: {e}");

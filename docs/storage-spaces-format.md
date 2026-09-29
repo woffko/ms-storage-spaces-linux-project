@@ -590,13 +590,37 @@ of 1 MiB, then 4 KiB; `JournalWriter` implements it):
   chunks into the write-back cache and left the journal and the stripes
   unchanged.
 
-`spaces` writes a single parity space differently but with the same
-guarantees (`SpaceWriter`): it keeps the cache empty and rewrites stripes
-in place, recording a consistent stripe as not consistent (a slot, flushed)
-before its data and parity change and as consistent again afterwards, so
-that a crash leaves only stripes the journal lists as not consistent; those
-Windows checks and repairs when it mounts the pool (crash experiments
-above).
+* When the last stripes of a run become consistent, the entry is state 3
+  with length 0, followed by the run words that are written but not counted
+  (`c000`: 16384 consistent stripes), as in the cache (**verified**:
+  `parity3_26100`, filled front to back in whole stripes; test
+  `whole_run_consistent_is_state_3_as_windows_writes_it`).
+
+Rewriting a consistent stripe in place is not safe even when the journal
+records it as not consistent first: a write cut off between the data and
+the parity of stripe 0 (journal slot saying not consistent, new data, stale
+parity) was attached by Windows as healthy, but Windows repaired nothing,
+on attach or with `Repair-VirtualDisk` (evidence `rw-parity-crash.json`).
+So `spaces` writes single parity spaces as Windows does (`SpaceWriter`):
+whole stripes the journal records as not consistent and the cache does not
+hold go to the space directly and are recorded as consistent afterwards;
+everything else goes to the write-back cache (data into the block, flushed,
+then the slot). When the log or the blocks run out, and when a space whose
+cache holds data is opened for writing, every cached chunk is destaged:
+partly valid chunks are made whole in the cache first (the rest of the
+stripe copied from the space and logged as state 3), then the stripes are
+recorded as not consistent (flushed), written with their parity (flushed),
+recorded as consistent and tombstoned (flushed before their blocks are
+handed out again). At every point a stripe either matches its parity or the
+cache holds all of its data (test
+`parity_writes_close_the_write_hole_in_every_crash_state`, which replays
+every prefix of the recorded writes and random subsets of the unflushed
+ones). A slot that reached only one copy of the cache makes the copies
+disagree about its chunk; both versions are acceptable there (the older is
+the state without the slot), but readers refuse the chunk unless told to
+take the newer. Entries whose run list does not fit into a slot are written
+as bitmaps (state 1); where neither fits, the whole run is recorded as not
+consistent.
 
 The newest entry per run wins. After a clean shutdown the runs are state 3
 (or all-set bitmaps). In the crash experiment `crashparity` (disks pulled

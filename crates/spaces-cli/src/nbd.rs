@@ -62,7 +62,7 @@ pub trait Sink: Sync {
 }
 
 /// What is exported: read-only without a sink.
-pub struct Export<'a, R> {
+pub struct Export<'a, R: ?Sized> {
     pub name: &'a str,
     pub source: &'a R,
     pub sink: Option<&'a dyn Sink>,
@@ -71,7 +71,7 @@ pub struct Export<'a, R> {
 }
 
 /// Serves one client connection until it disconnects.
-pub fn serve<R: ReadAt, S: Read + Write>(export: &Export<'_, R>, mut conn: S) -> io::Result<()> {
+pub fn serve<R: ReadAt + ?Sized, S: Read + Write>(export: &Export<'_, R>, mut conn: S) -> io::Result<()> {
     conn.write_all(&NBDMAGIC.to_be_bytes())?;
     conn.write_all(&IHAVEOPT.to_be_bytes())?;
     conn.write_all(&(FLAG_FIXED_NEWSTYLE | FLAG_NO_ZEROES).to_be_bytes())?;
@@ -163,7 +163,7 @@ fn option_reply<W: Write>(w: &mut W, option: u32, reply: u32, data: &[u8]) -> io
     w.write_all(&buf)
 }
 
-fn transmission<R: ReadAt, S: Read + Write>(export: &Export<'_, R>, mut conn: S) -> io::Result<()> {
+fn transmission<R: ReadAt + ?Sized, S: Read + Write>(export: &Export<'_, R>, mut conn: S) -> io::Result<()> {
     let mut data = Vec::new();
     loop {
         let mut req = [0u8; 28];
@@ -210,7 +210,8 @@ fn transmission<R: ReadAt, S: Read + Write>(export: &Export<'_, R>, mut conn: S)
                     reply(&mut conn, EIO, &[])?;
                 }
             },
-            CMD_DISC => return Ok(()),
+            // What the client wrote becomes durable when it disconnects.
+            CMD_DISC => return export.sink.map_or(Ok(()), |s| s.flush()),
             // Writes carry a payload that must be consumed before replying.
             CMD_WRITE => {
                 let in_range = offset.checked_add(length as u64).is_some_and(|end| end <= export.size);
