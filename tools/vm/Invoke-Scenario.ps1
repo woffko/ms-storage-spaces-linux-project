@@ -271,7 +271,7 @@ foreach ($step in ($Steps.Split(';') | Where-Object { $_ })) {
             $out = Join-Path $dir "snap-$($a[1])"
             if (Test-Path $out) { throw "snapshot $($a[1]) exists" }
             New-Item -ItemType Directory $out | Out-Null
-            $images = Get-Images
+            $images = @(Get-Images)
             for ($i = 0; $i -lt $images.Count; $i++) {
                 $img = Get-DiskImage -ImagePath $images[$i]
                 if (-not $img.Attached) { continue }
@@ -339,7 +339,7 @@ foreach ($step in ($Steps.Split(';') | Where-Object { $_ })) {
         }
         'removespace' { Remove-VirtualDisk -FriendlyName $a[1] -Confirm:$false }
         'blank' {
-            $first = (Get-Images).Count
+            $first = @(Get-Images).Count
             $sizeMB = if ($a.Count -gt 2) { [int]$a[2] } else { 8192 }
             for ($i = $first; $i -lt $first + [int]$a[1]; $i++) {
                 $f = Get-Image $i
@@ -356,7 +356,7 @@ foreach ($step in ($Steps.Split(';') | Where-Object { $_ })) {
             Start-Sleep -Seconds 2
         }
         'newpool' {
-            $physical = @(for ($i = 0; $i -lt (Get-Images).Count; $i++) { Get-MemberDisk $i })
+            $physical = @(for ($i = 0; $i -lt @(Get-Images).Count; $i++) { Get-MemberDisk $i })
             $subsystem = Get-StorageSubSystem | Where-Object FriendlyName -like 'Windows Storage*' | Select-Object -First 1
             $pp = @{ FriendlyName = $poolName; StorageSubSystemUniqueId = $subsystem.UniqueId; PhysicalDisks = $physical }
             if ($a.Count -gt 1) { $pp.LogicalSectorSizeDefault = [int]$a[1] }
@@ -373,7 +373,7 @@ foreach ($step in ($Steps.Split(';') | Where-Object { $_ })) {
                     size = $pool.Size; allocated = $pool.AllocatedSize
                     logical_sector = $pool.LogicalSectorSize; physical_sector = $pool.PhysicalSectorSize
                 }
-                disks = @(for ($i = 0; $i -lt (Get-Images).Count; $i++) {
+                disks = @(for ($i = 0; $i -lt @(Get-Images).Count; $i++) {
                     $pd = Get-MemberDisk $i
                     [ordered]@{
                         image = Split-Path (Get-Image $i) -Leaf; unique_id = $pd.UniqueId; size = $pd.Size

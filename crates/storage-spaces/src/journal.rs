@@ -58,6 +58,27 @@ pub struct ParityJournal {
     current: HashMap<u64, (Consistency, Vec<u8>)>,
 }
 
+/// The header of a new parity journal (a 256 MiB child space): the cache
+/// header's layout with 1024 slots of 4 KiB, two checkpoint areas of
+/// 125 MiB at 6 MiB, then the owner's size, its stripe width (data columns
+/// x interleave) and 1.
+pub fn new_journal_header(owner: Guid, owner_size: u64, stripe: u32) -> Vec<u8> {
+    crate::cache::CacheHeader {
+        owner_guid: owner,
+        sequence: 1,
+        slot_offset: 0x2000,
+        slot_size: 0x1000,
+        slot_count: 1024,
+        checkpoint_offset: 0x60_0000,
+        checkpoint_size: 125 << 20,
+        checkpoint_count: 2,
+        data_offset: owner_size,
+        chunk_size: stripe,
+        chunk_count: 1,
+    }
+    .encode(SPVDT_SIGNATURE)
+}
+
 /// Newest entry per run: consistency and the entry's bytes.
 type Entries = HashMap<u64, (Consistency, Vec<u8>)>;
 

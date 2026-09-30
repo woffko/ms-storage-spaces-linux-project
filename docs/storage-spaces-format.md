@@ -160,7 +160,52 @@ reproduces every page, and nothing else is written):
   slab with 16 MiB interleave, redundancy n-1); its extents, copy k on
   disk k+1 at physical slab 0.
 * Nothing in the metadata space: its first database is written with the
-  first space.
+  first space. On a single disk the metadata space is simple (one copy).
+
+## Creating a space
+
+What `New-VirtualDisk` writes (**verified** byte for byte by the test
+`new_spaces_are_predicted_byte_for_byte`: a simple, a mirror, a parity, a
+thin simple and a thin mirror space on three disks (`c9new`), a mirror of
+four columns on eight disks (`c9eight`), simple spaces on one disk, with
+4 KiB logical sectors and on 4Kn disks; `storage_spaces::create::NewSpace`
+takes Windows' ids, GUIDs, slabs and times as inputs and reproduces every
+page, and nothing else is written):
+
+* One pool database update (sequence + 1) with, in this order: the space
+  record; for each hidden space (the dirty region log of a mirror, or the
+  parity journal, then the write-back cache) its container (type 3,
+  internal, parent the space), the extents of its child (flag 4, one slab
+  per row and copy) and the child (type 6, range 0 to its size); then the
+  space's extents. A thin space gets its first row at creation.
+* Every type 3 space (the space and each container) has a `number`: the
+  count of type 3 spaces the pool had before it, containers included, so
+  also the slot of its database in the metadata space. Numbers go to the
+  space first, then the cache container, then the journal container,
+  although the journal's records come first in the update.
+* A database per type 3 space in the metadata space, 4 MiB apart by number:
+  a page of 64 slots (0x20 = 0x10000), sequence 1, one record of type 7
+  (version 1): `vint 0, vint 1, vint n, n disk GUIDs`, the disks whose
+  copy of the metadata space holds the database, in the order of their
+  ids. In pools of up to five disks that is every disk; the 8-disk pool
+  holds five, not the five that carry the pool database. They are written
+  before the pool database update.
+* Hidden spaces: mirror copies of 256 MiB (the cache: its size) with the
+  space's interleave, 256 MiB allocation unit. The dirty region log starts
+  as an empty header (generation 0) at 0 and at its size less 8 KiB; the
+  parity journal as its header alone (owner the space, 1024 slots of 4 KiB
+  from 8 KiB, two checkpoint areas of 125 MiB at 6 MiB, then the space's
+  size, its stripe width and 1); the cache as its header and slot 0 (type
+  1, sequence 1, one entry (8, 1)). The cache header: 1024 slots of 4 KiB
+  from 8 KiB; two checkpoint areas after them, each 0x200 bytes plus
+  16 + chunk_size / 4096 bytes per chunk rounded up to 4 KiB; chunks of
+  the space's stripe width from the next chunk boundary to the end
+  (**verified** for the caches of `c9new`, `paritythin_26100`,
+  `parity3_26100` and `wc64` by the test `new_caches_have_windows_geometry`).
+* Object ids do not follow from the metadata: the first space of a pool
+  got 11 in `c9new` (disks 1-3, metadata space 4) and 15 in `c9eight`, and
+  the ids of later spaces grow in steps (44, 73/74, 76, 109/110, 115/116).
+  Windows reads any unique ids (they are inputs of the model).
 
 
 Every record body below is complete: `storage_spaces::records` decodes

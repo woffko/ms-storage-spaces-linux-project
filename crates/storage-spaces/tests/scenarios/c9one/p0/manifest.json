@@ -1,0 +1,23 @@
+﻿{
+    "name":  "c9one",
+    "windows_build":  "10.0.26100.0",
+    "pattern":  false,
+    "pool":  {
+                 "name":  "ss-c9one",
+                 "guid":  "6f84d990-9fbc-4404-8466-dbcaa030430c",
+                 "version":  "Windows Server vNext",
+                 "version_number":  28,
+                 "size":  8035237888,
+                 "allocated":  268435456,
+                 "logical_sector":  512,
+                 "physical_sector":  4096
+             },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "60022480B73E09BAC8DAB9C56ED539D3",
+                      "size":  8589934592,
+                      "spaces_guid":  "a31c9408-98cc-073a-f540-3534b2e653d8"
+                  }
+              ]
+}

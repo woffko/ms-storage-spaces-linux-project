@@ -673,6 +673,65 @@ pub struct CacheHeader {
 impl CacheHeader {
     pub const SIZE: usize = 0x60;
 
+    /// The header of a new write-back cache of `size` bytes whose chunks
+    /// are `chunk_size` bytes (the data stripe width of its owner): 1024
+    /// slots of 4 KiB from 8 KiB on, two checkpoint areas after them, each
+    /// with room for 0x200 bytes and 16 + chunk_size / 4096 bytes per
+    /// chunk (rounded up to 4 KiB), then the chunks from the next chunk
+    /// boundary to the end.
+    pub fn new(owner_guid: Guid, size: u64, chunk_size: u32) -> Self {
+        let slot_offset = 0x2000;
+        let (slot_size, slot_count) = (0x1000u32, 1024u32);
+        let checkpoint_offset = slot_offset + slot_size as u64 * slot_count as u64;
+        let chunk = chunk_size as u64;
+        let per_chunk = 16 + chunk / 4096;
+        let mut chunk_count = size.saturating_sub(checkpoint_offset) / chunk;
+        loop {
+            let checkpoint_size = (0x200 + chunk_count * per_chunk).next_multiple_of(4096);
+            let data_offset = (checkpoint_offset + 2 * checkpoint_size).next_multiple_of(chunk);
+            let count = size.saturating_sub(data_offset) / chunk;
+            if count == chunk_count {
+                return CacheHeader {
+                    owner_guid,
+                    sequence: 1,
+                    slot_offset,
+                    slot_size,
+                    slot_count,
+                    checkpoint_offset,
+                    checkpoint_size: checkpoint_size as u32,
+                    checkpoint_count: 2,
+                    data_offset,
+                    chunk_size,
+                    chunk_count: chunk_count as u32,
+                };
+            }
+            chunk_count = count;
+        }
+    }
+
+    /// The header as written (the rest of its page is zero). The parity
+    /// journal's header has the same layout under its own signature.
+    pub fn encode(&self, signature: &[u8; 8]) -> Vec<u8> {
+        let mut b = vec![0u8; Self::SIZE];
+        b[..8].copy_from_slice(signature);
+        b[8..24].copy_from_slice(&self.owner_guid.to_mixed_endian());
+        b[0x18..0x1c].copy_from_slice(&1u32.to_le_bytes());
+        b[0x1c..0x20].copy_from_slice(&(Self::SIZE as u32).to_le_bytes());
+        b[0x28..0x30].copy_from_slice(&self.sequence.to_le_bytes());
+        b[0x30..0x38].copy_from_slice(&self.slot_offset.to_le_bytes());
+        b[0x38..0x3c].copy_from_slice(&self.slot_size.to_le_bytes());
+        b[0x3c..0x40].copy_from_slice(&self.slot_count.to_le_bytes());
+        b[0x40..0x48].copy_from_slice(&self.checkpoint_offset.to_le_bytes());
+        b[0x48..0x4c].copy_from_slice(&self.checkpoint_size.to_le_bytes());
+        b[0x4c..0x50].copy_from_slice(&self.checkpoint_count.to_le_bytes());
+        b[0x50..0x58].copy_from_slice(&self.data_offset.to_le_bytes());
+        b[0x58..0x5c].copy_from_slice(&self.chunk_size.to_le_bytes());
+        b[0x5c..0x60].copy_from_slice(&self.chunk_count.to_le_bytes());
+        let crc = crc32_excluding(&b, 0x24);
+        b[0x24..0x28].copy_from_slice(&crc.to_le_bytes());
+        b
+    }
+
     /// Returns `None` if the cache was never initialised.
     pub fn parse(b: &[u8]) -> Result<Option<Self>> {
         if &b[0..8] != SPCACHE_SIGNATURE {
@@ -1443,5 +1502,33 @@ mod tests {
         bad[0x40] ^= 1;
         let i = index(&[slot(1, &[(0, 2)]), bad]);
         assert_eq!(hit(&i, 0), Some(0x10_0000 + 2 * CHUNK));
+    }
+}
+
+#[cfg(test)]
+mod new_header_tests {
+    use super::*;
+
+    /// The geometry of new caches as Windows 11 24H2 lays them out: 1 GiB
+    /// with 512 KiB chunks (parity of 3 columns, 256 KiB interleave:
+    /// c9new, paritythin_26100, mapar_26100), 1 GiB with 128 KiB chunks
+    /// (parity3_26100, 64 KiB interleave) and 512 MiB with 512 KiB chunks
+    /// (wc64).
+    #[test]
+    fn new_caches_have_windows_geometry() {
+        for (size, chunk, checkpoint, data, count) in [
+            (1u64 << 30, 512 << 10, 294912, 5242880, 2038),
+            (1 << 30, 128 << 10, 393216, 5111808, 8153),
+            (512 << 20, 512 << 10, 147456, 4718592, 1015),
+        ] {
+            let h = CacheHeader::new(Guid::default(), size, chunk);
+            assert_eq!(
+                (h.checkpoint_offset, h.checkpoint_size, h.data_offset, h.chunk_count),
+                (4202496, checkpoint, data, count),
+                "{size} {chunk}"
+            );
+            let back = CacheHeader::parse(&h.encode(SPCACHE_SIGNATURE)).unwrap().unwrap();
+            assert_eq!(format!("{back:?}"), format!("{h:?}"));
+        }
     }
 }

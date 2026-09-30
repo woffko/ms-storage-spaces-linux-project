@@ -103,6 +103,8 @@ c9disk | - | blank:3; newpool; newspacex:c9diskm:res=Mirror,size=2048,prov=Fixed
 c9drain | - | blank:4; newpool; newspacex:c9drainm:res=Mirror,size=2048,prov=Fixed; write:c9drainm:0:262144:a; snap:r0; removedisk:0; waitjobs; snap:r1; dismount
 # Resizing and renaming spaces of each resiliency.
 c9resize | - | blank:3; newpool; newspacex:c9rs:res=Simple,size=1024; newspacex:c9rp:res=Parity,size=2048; newspacex:c9rm:res=Mirror,size=1024; snap:z0; resize:c9rp:4096; snap:z1; resize:c9rm:2048; snap:z2; rename:c9rs:c9rs2; snap:z3; dismount
+# More creation options, then deleting spaces with hidden parts.
+c9opts | - | blank:5; newpool; snap:q0; newspacex:c9m3:res=Mirror,copies=3,size=1024; snap:q1; newspacex:c9p4:res=Parity,cols=4,size=3072,wc=64; snap:q2; newspacex:c9pw0:res=Parity,size=2048,wc=0; snap:q3; newspacex:c9mw:res=Mirror,size=1024,wc=64; snap:q4; newspacex:c9s1:res=Simple,cols=1,il=64,au=256,size=512; snap:q5; newspacex:c9pt:res=Parity,prov=Thin,size=4096; snap:q6; removespace:c9p4; snap:q7; removespace:c9m3; snap:q8; dismount
 LIST
 exit $status
 }
