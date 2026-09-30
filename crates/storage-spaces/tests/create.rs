@@ -292,6 +292,7 @@ fn new_spaces_are_predicted_byte_for_byte() {
         ("c9opts", "q2", "q3"),
         ("c9opts2", "r1", "r2"),
         ("c9opts2", "r2", "r3"),
+        ("c9opts2", "r5", "r6"),
         ("c9l4k", "p0", "p1"),
         ("c94kn", "p0", "p1"),
     ] {

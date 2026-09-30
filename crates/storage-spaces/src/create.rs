@@ -453,7 +453,8 @@ impl NewSpace {
     /// Every write that creates the space in `pool`, whose database model
     /// is `db`, by device: the per-space databases (on the copies of the
     /// metadata space on `metadata_disks`, all copies if `None`), the
-    /// contents of the hidden spaces, then the pool database update
+    /// contents of the hidden spaces, zeros over the space's first logical
+    /// sector (its whole first stripe on parity), then the pool database update
     /// (sequence + 1 at `timestamp`) on every member that carries it.
     /// Windows writes in that order, so the space exists only once
     /// everything it needs is in place. (In pools of more than five disks
@@ -515,6 +516,24 @@ impl NewSpace {
                 {
                     out.push((device, at + column_offset % SLAB_SIZE, bytes.clone()));
                 }
+            }
+        }
+        // The first logical sector of the new disk is cleared (an old
+        // partition table must not show through): on every copy of column 0;
+        // on a parity space the whole first stripe, parity included, so that
+        // it stays consistent.
+        let first = self
+            .extents
+            .iter()
+            .filter(|e| e.virtual_slab == 0 && (self.resiliency == 3 || e.column == 0));
+        let clear = if self.resiliency == 3 {
+            1u64 << self.interleave_log2
+        } else {
+            pool.logical_sector_size as u64
+        };
+        for e in first {
+            if let Some((device, at)) = pool.slab_location(e.disk_id, e.physical_slab)? {
+                out.push((device, at, vec![0; clear as usize]));
             }
         }
         let sequence = db.sequence() + 1;

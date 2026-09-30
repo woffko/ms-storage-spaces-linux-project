@@ -209,6 +209,14 @@ page, and nothing else is written):
   the space's stripe width from the next chunk boundary to the end
   (**verified** for the caches of `c9new`, `paritythin_26100`,
   `parity3_26100` and `wc64` by the test `new_caches_have_windows_geometry`).
+* The first logical sector of the new space is cleared, so that an old
+  partition table cannot show through; nothing else of what the slabs held
+  is (scenario `c9zero`: over slabs filled with the verification pattern,
+  bytes 0-0x1ff of the space were zero afterwards and the pattern
+  continued at 0x200; `c9opts2`: the header of a deleted space's journal
+  at that place vanished, which the test checks). `NewSpace::plan` clears
+  the sector on every copy of a simple or mirror space and the whole first
+  stripe, parity included, of a parity space.
 * The extents of a fixed space take, on each disk, the first run of free
   physical slabs as long as the extent (four slabs with 1 GiB units:
   `c9opts2` skipped a run of three).
