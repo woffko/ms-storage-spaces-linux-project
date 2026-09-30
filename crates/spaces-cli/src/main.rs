@@ -228,6 +228,11 @@ enum Command {
         /// and a clean journal).
         #[arg(long)]
         without_cache_slots: bool,
+        /// Every non-zero page of the disks instead (pools holding metadata
+        /// only, such as the states of management scenarios; at most 64 MiB
+        /// per disk).
+        #[arg(long, conflicts_with = "without_cache_slots")]
+        all_pages: bool,
     },
     /// Turn member disk snapshots of tools/vm/Invoke-Scenario.ps1 into raw
     /// images (disk<N>.snap -> disk<N>.img in the same directory).
@@ -416,7 +421,8 @@ fn main() -> Result<()> {
             pool_dir,
             output,
             without_cache_slots,
-        } => fixture(&pool_dir, &output, without_cache_slots),
+            all_pages,
+        } => fixture(&pool_dir, &output, without_cache_slots, all_pages),
         #[cfg(unix)]
         Command::SnapshotToRaw { snapshots } => {
             for snap in snapshots {
@@ -1158,7 +1164,7 @@ fn cmd_status() -> Result<()> {
     Ok(())
 }
 
-fn fixture(dir: &std::path::Path, out: &std::path::Path, without_cache_slots: bool) -> Result<()> {
+fn fixture(dir: &std::path::Path, out: &std::path::Path, without_cache_slots: bool, all_pages: bool) -> Result<()> {
     use storage_spaces::io::{Recording, SparseImage};
     let mut paths = Vec::new();
     while dir.join(format!("disk{}.img", paths.len())).exists() {
@@ -1168,21 +1174,36 @@ fn fixture(dir: &std::path::Path, out: &std::path::Path, without_cache_slots: bo
         .iter()
         .map(|p| File::open(p).map(Recording::new))
         .collect::<std::io::Result<_>>()?;
-    let pool = Pool::open(devices.iter().collect::<Vec<_>>())?;
-    for s in pool.user_spaces() {
-        pool.open_space(s.id())?;
+    if !all_pages {
+        let pool = Pool::open(devices.iter().collect::<Vec<_>>())?;
+        for s in pool.user_spaces() {
+            pool.open_space(s.id())?;
+        }
     }
     std::fs::create_dir_all(out)?;
     let mut total = 0;
     for (i, dev) in devices.iter().enumerate() {
         let mut image = SparseImage::new(dev.size()?);
-        for (offset, len) in dev.reads() {
+        let reads = if all_pages {
+            // The whole disk, a MiB at a time.
+            let size = dev.size()?;
+            (0..size)
+                .step_by(1 << 20)
+                .map(|o| (o, (size - o).min(1 << 20) as usize))
+                .collect()
+        } else {
+            dev.reads()
+        };
+        for (offset, len) in reads {
             // Keep only non-zero 4 KiB pages of what was read.
             let mut buf = vec![0u8; len];
             dev.inner().read_exact_at(&mut buf, offset)?;
             for (k, page) in buf.chunks(4096).enumerate() {
                 if page.iter().any(|&b| b != 0) && !(without_cache_slots && page.starts_with(b"SPSLOT")) {
                     image.insert(offset + (k * 4096) as u64, page);
+                    if all_pages && image.stored() > 64 << 20 {
+                        anyhow::bail!("{}: more than 64 MiB of non-zero pages", paths[i].display());
+                    }
                 }
             }
         }

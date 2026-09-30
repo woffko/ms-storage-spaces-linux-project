@@ -222,3 +222,147 @@ mod tests {
         );
     }
 }
+
+/// GPT partition type of the Microsoft reserved partition.
+pub const MSR_PARTITION_TYPE: &str = "e3c9e316-0b5c-4db8-817d-f92df00215ae";
+
+/// Where the pool partition of a new member starts: 16 MiB, after the
+/// Microsoft reserved partition.
+pub const POOL_PARTITION_START: u64 = 16 << 20;
+
+/// The partition table Windows gives a disk it adds to a pool: a
+/// Microsoft reserved partition up to 16 MiB and the pool partition, named
+/// after the pool, from there to the last whole MiB before the backup
+/// table. `disk_size` in bytes, `sector` the logical sector size.
+#[derive(Debug, Clone)]
+pub struct PoolDiskTable {
+    pub disk_size: u64,
+    pub sector: u64,
+    pub disk_guid: Guid,
+    pub msr_guid: Guid,
+    pub pool_partition_guid: Guid,
+    pub pool_name: String,
+}
+
+impl PoolDiskTable {
+    const ENTRIES: u64 = 128;
+    const ENTRY_SIZE: u64 = 128;
+
+    fn table_sectors(&self) -> u64 {
+        (Self::ENTRIES * Self::ENTRY_SIZE).div_ceil(self.sector)
+    }
+
+    fn sectors(&self) -> u64 {
+        self.disk_size / self.sector
+    }
+
+    /// The pool partition's location.
+    pub fn pool_partition(&self) -> PartitionLocation {
+        let last_usable = self.sectors() - 2 - self.table_sectors();
+        let end = (last_usable + 1) * self.sector / (1 << 20) * (1 << 20);
+        PartitionLocation {
+            offset: POOL_PARTITION_START,
+            length: end - POOL_PARTITION_START,
+        }
+    }
+
+    fn entries(&self) -> Vec<u8> {
+        let first_usable = 2 + self.table_sectors();
+        let pool = self.pool_partition();
+        let mut table = vec![0u8; (Self::ENTRIES * Self::ENTRY_SIZE) as usize];
+        let parts = [
+            (
+                MSR_PARTITION_TYPE,
+                self.msr_guid,
+                first_usable,
+                POOL_PARTITION_START / self.sector - 1,
+                "Microsoft reserved partition",
+            ),
+            (
+                STORAGE_SPACES_PARTITION_TYPE,
+                self.pool_partition_guid,
+                pool.offset / self.sector,
+                (pool.offset + pool.length) / self.sector - 1,
+                self.pool_name.as_str(),
+            ),
+        ];
+        for (e, (kind, guid, first, last, name)) in table
+            .as_chunks_mut::<{ Self::ENTRY_SIZE as usize }>()
+            .0
+            .iter_mut()
+            .zip(parts)
+        {
+            e[0..16].copy_from_slice(&Guid::parse(kind).unwrap().to_mixed_endian());
+            e[16..32].copy_from_slice(&guid.to_mixed_endian());
+            e[32..40].copy_from_slice(&first.to_le_bytes());
+            e[40..48].copy_from_slice(&last.to_le_bytes());
+            for (k, unit) in name.encode_utf16().take(36).enumerate() {
+                e[56 + 2 * k..58 + 2 * k].copy_from_slice(&unit.to_le_bytes());
+            }
+        }
+        table
+    }
+
+    fn header(&self, current: u64, backup: u64, entries_lba: u64, entries_crc: u32) -> Vec<u8> {
+        let mut h = vec![0u8; self.sector as usize];
+        h[0..8].copy_from_slice(b"EFI PART");
+        h[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes());
+        h[12..16].copy_from_slice(&92u32.to_le_bytes());
+        h[24..32].copy_from_slice(&current.to_le_bytes());
+        h[32..40].copy_from_slice(&backup.to_le_bytes());
+        h[40..48].copy_from_slice(&(2 + self.table_sectors()).to_le_bytes());
+        h[48..56].copy_from_slice(&(self.sectors() - 2 - self.table_sectors()).to_le_bytes());
+        h[56..72].copy_from_slice(&self.disk_guid.to_mixed_endian());
+        h[72..80].copy_from_slice(&entries_lba.to_le_bytes());
+        h[80..84].copy_from_slice(&(Self::ENTRIES as u32).to_le_bytes());
+        h[84..88].copy_from_slice(&(Self::ENTRY_SIZE as u32).to_le_bytes());
+        h[88..92].copy_from_slice(&entries_crc.to_le_bytes());
+        let crc = crate::crc::crc32(&h[..92]);
+        h[16..20].copy_from_slice(&crc.to_le_bytes());
+        h
+    }
+
+    /// The protective MBR as Windows writes it: one partition of type 0xee
+    /// from LBA 1 with the size field all ones, and an end cylinder that is
+    /// the disk's last (255 heads, 63 sectors) truncated to 10 bits.
+    fn protective_mbr(&self) -> Vec<u8> {
+        let mut m = vec![0u8; self.sector as usize];
+        let cylinder = (self.sectors() / (255 * 63)).saturating_sub(1);
+        m[0x1be..0x1ce].copy_from_slice(&[
+            0x00,
+            0x00,
+            0x02,
+            0x00,
+            0xee,
+            0xfe,
+            0x3f | (((cylinder >> 8) & 3) as u8) << 6,
+            cylinder as u8,
+            1,
+            0,
+            0,
+            0,
+            0xff,
+            0xff,
+            0xff,
+            0xff,
+        ]);
+        m[0x1fe] = 0x55;
+        m[0x1ff] = 0xaa;
+        m
+    }
+
+    /// The byte ranges to write: the protective MBR, the primary header and
+    /// entries, and the backup entries and header at the end of the disk.
+    pub fn regions(&self) -> Vec<(u64, Vec<u8>)> {
+        let entries = self.entries();
+        let crc = crate::crc::crc32(&entries);
+        let last = self.sectors() - 1;
+        let backup_entries = last - self.table_sectors();
+        let mut primary = self.protective_mbr();
+        primary.extend(self.header(1, last, 2, crc));
+        primary.extend_from_slice(&entries);
+        let mut backup = entries;
+        backup.extend(self.header(last, 1, backup_entries, crc));
+        vec![(0, primary), (backup_entries * self.sector, backup)]
+    }
+}

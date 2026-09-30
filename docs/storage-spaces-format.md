@@ -34,7 +34,7 @@ Slabs are 256 MiB.
 | 0x08 | 2 | layout version, 3 on Windows 10/11 |
 | 0x0a | 2 | 0x0200 |
 | 0x0c | 4 | CRC-32 (zlib, stored BE) of bytes 0..0x200 with this field zeroed (**verified**) |
-| 0x10 | 8 | 1; 2 on disks whose header Windows rewrote (a retired disk, a replacement, a removed disk) |
+| 0x10 | 8 | 1 on the disks of `New-StoragePool`; 2 on disks added later (`Add-PhysicalDisk`, scenario `c9disk`) and on a retired disk after the repair |
 | 0x18 | 8 | FILETIME when the disk joined the pool |
 | 0x20 | 16 | pool GUID |
 | 0x30 | 16 | physical disk GUID (as in the `PD:{...}` part of the disk ObjectId) |
@@ -47,7 +47,9 @@ which ones does not follow from the metadata), and byte 0x41 and the disk
 record say which (**verified** by the test
 `disk_headers_are_reproduced_and_mark_database_copies`, which also
 re-encodes every header of the fixtures byte for byte). A retired disk
-keeps its old copy with 0x41 cleared.
+keeps its copy, no longer updated, and both flags until a repair has
+moved its data off; then Windows writes the current database to it once
+more with both flags cleared (`c9disk` d3, d4).
 
 GUIDs in the database are stored in plain big-endian byte order.
 
@@ -133,7 +135,33 @@ rewrote neither; a newer copy that does not decode made it treat that disk
 as lost ("Lost Communication", the space degraded) and write the good copy
 again with a sequence above every copy seen (5 after a broken 4).
 
-## Records
+## Creating a pool
+
+What `New-StoragePool` writes to blank disks (**verified** byte for byte
+by the test `new_pools_are_predicted_byte_for_byte`: pools of 3, 4 and 8
+disks with 512-byte sectors, 4 KiB logical sectors on the same disks, and
+4Kn disks, scenarios `c9new`, `c9four`, `c9eight`, `c9l4k`, `c94kn`;
+`storage_spaces::create` takes Windows' GUIDs and times as inputs and
+reproduces every page, and nothing else is written):
+
+* A GPT of 128 entries: a Microsoft reserved partition from the first
+  usable sector to 16 MiB, then the pool partition, named after the pool,
+  from 16 MiB to the last whole MiB before the backup table. The protective
+  MBR has one partition of type 0xee from LBA 1 with the size field all
+  ones and an end cylinder (255 heads, 63 sectors) truncated to 10 bits.
+  All GUIDs are time-based (version 1) on Windows; any unique GUIDs do.
+* On every disk the SPACEDB header (generation 1, the time it joined, the
+  database copy flag); on five disks at most the pool database.
+* The pool database, one update of sequence 1 at 0x1000 of the partition:
+  a page of 64 slots (header 0x08 = 00 01 02 00, 0x20 = 0x7fff80,
+  0x30 = 0x10000); the pool record; a disk record per disk (ids 1..n,
+  usage Auto-Select, the manufacturer and model the disk reports); the
+  internal metadata space (id n+1, role 1, an n-way mirror of one 256 MiB
+  slab with 16 MiB interleave, redundancy n-1); its extents, copy k on
+  disk k+1 at physical slab 0.
+* Nothing in the metadata space: its first database is written with the
+  first space.
+
 
 Every record body below is complete: `storage_spaces::records` decodes
 each field and re-encodes every pool, disk and space record of every

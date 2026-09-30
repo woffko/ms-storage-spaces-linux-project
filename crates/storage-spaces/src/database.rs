@@ -12,6 +12,7 @@
 use crate::crc::crc32_excluding;
 use crate::error::{Result, format_err};
 use crate::format::{RawRecord, SDBB_SIGNATURE, SDBC_SIGNATURE};
+use crate::guid::Guid;
 use crate::io::{ReadAt, read_vec};
 
 /// The eight header slots of 0x40 bytes.
@@ -33,7 +34,33 @@ pub struct Database {
     entry_size: usize,
 }
 
+/// The value at 0x20 of a new pool database header (meaning unknown: a
+/// size limit of about 8 MiB?).
+pub const POOL_DATABASE_LIMIT: u32 = 0x7f_ff80;
+/// The same for the per-space databases in the metadata space.
+pub const SPACE_DATABASE_LIMIT: u32 = 0x1_0000;
+
 impl Database {
+    /// A new, empty database of `owner` as Windows creates one: a page of
+    /// 64 slots, the 8 header slots and 56 free ones.
+    pub fn new(owner: Guid, limit: u32) -> Self {
+        let entry_size = 0x40;
+        let mut bytes = vec![0u8; PAGE];
+        bytes[..8].copy_from_slice(SDBC_SIGNATURE);
+        bytes[8..12].copy_from_slice(&[0, 1, 2, 0]);
+        bytes[0x10..0x20].copy_from_slice(&owner.0);
+        bytes[0x20..0x24].copy_from_slice(&limit.to_be_bytes());
+        bytes[0x24..0x28].copy_from_slice(&(entry_size as u32).to_be_bytes());
+        bytes[0x30..0x34].copy_from_slice(&0x1_0000u32.to_be_bytes());
+        let mut db = Database { bytes, entry_size };
+        for i in HEADER_SLOTS..db.slots() {
+            let e = db.slot_mut(i);
+            e[..4].copy_from_slice(SDBB_SIGNATURE);
+            e[4..8].copy_from_slice(&(i as u32).to_be_bytes());
+        }
+        db
+    }
+
     /// Reads the database whose header is at `offset`, with all `slots`
     /// formatted slots (the pool database has 64).
     pub fn read<D: ReadAt + ?Sized>(dev: &D, offset: u64, slots: usize) -> Result<Self> {

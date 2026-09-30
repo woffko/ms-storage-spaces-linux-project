@@ -1,0 +1,65 @@
+﻿{
+    "name":  "c9eight",
+    "windows_build":  "10.0.26100.0",
+    "pattern":  false,
+    "pool":  {
+                 "name":  "ss-c9eight",
+                 "guid":  "ef85cdcf-0c98-4309-99b0-2f118fce8f67",
+                 "version":  "Windows Server vNext",
+                 "version_number":  28,
+                 "size":  64281903104,
+                 "allocated":  2147483648,
+                 "logical_sector":  512,
+                 "physical_sector":  4096
+             },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "60022480EE15BA7EB5730FFDD09DF473",
+                      "size":  8589934592,
+                      "spaces_guid":  "c37a746f-9520-3274-a1a3-03b3d1369ea2"
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "600224808EE1B95AD70D8A312897854D",
+                      "size":  8589934592,
+                      "spaces_guid":  "2e27a8d2-3b5e-1ad7-0f9d-a38db25b6855"
+                  },
+                  {
+                      "image":  "disk2.vhdx",
+                      "unique_id":  "60022480D661EAC1CB79A893FBFB48CB",
+                      "size":  8589934592,
+                      "spaces_guid":  "c33908b4-f619-37c8-9455-4de8199da3d8"
+                  },
+                  {
+                      "image":  "disk3.vhdx",
+                      "unique_id":  "60022480AD916358384B7CEEA83FDF68",
+                      "size":  8589934592,
+                      "spaces_guid":  "f8aa7c9e-c579-dc2e-b0c8-d99ca1f96138"
+                  },
+                  {
+                      "image":  "disk4.vhdx",
+                      "unique_id":  "6002248013B402A98D65024E1C7275A3",
+                      "size":  8589934592,
+                      "spaces_guid":  "0288feb2-4de2-3cd3-c457-218743918748"
+                  },
+                  {
+                      "image":  "disk5.vhdx",
+                      "unique_id":  "600224806F524403FADCEBD9EE45D87C",
+                      "size":  8589934592,
+                      "spaces_guid":  "dc998872-1c46-2d8a-e41e-2c0bd9ae374c"
+                  },
+                  {
+                      "image":  "disk6.vhdx",
+                      "unique_id":  "600224802514C928D66448DB70C653E4",
+                      "size":  8589934592,
+                      "spaces_guid":  "c176fc35-8a5e-b178-749f-2d4dbfefaa14"
+                  },
+                  {
+                      "image":  "disk7.vhdx",
+                      "unique_id":  "60022480D411EF4870F3E209A1424D02",
+                      "size":  8589934592,
+                      "spaces_guid":  "8769b811-c175-1db7-151b-7484f261b564"
+                  }
+              ]
+}

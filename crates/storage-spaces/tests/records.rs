@@ -120,9 +120,9 @@ fn decoded_fields_are_the_known_ones() {
 
 /// Every member's SPACEDB header re-encodes byte for byte (the rest of its
 /// page is zero), and its byte 0x41 says whether the disk carries a copy of
-/// the pool database, as its disk record does (retired disks excepted:
-/// Windows stops updating them, the copy stays): pools of up to five disks
-/// carry one on every disk, larger pools on five.
+/// the pool database, as its disk record does: pools of up to five disks
+/// carry one on every disk, larger pools on five. A retired disk's copy is
+/// no longer updated (c9disk d3); a repair clears its flags (d4).
 #[test]
 fn disk_headers_are_reproduced_and_mark_database_copies() {
     use storage_spaces::format::DiskHeader;
@@ -163,7 +163,9 @@ fn disk_headers_are_reproduced_and_mark_database_copies() {
                 continue;
             };
             if record.usage == 5 {
-                assert!(!header.database_copy && !record.database_copy);
+                // A retired disk keeps its copy, no longer updated, until a
+                // repair moves its data off and clears both flags.
+                assert_eq!(header.database_copy, record.database_copy);
                 continue;
             }
             assert_eq!(

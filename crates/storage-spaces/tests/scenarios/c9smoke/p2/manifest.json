@@ -1,0 +1,29 @@
+﻿{
+    "name":  "c9smoke",
+    "windows_build":  "10.0.26100.0",
+    "pattern":  false,
+    "pool":  {
+                 "name":  "ss-c9smoke",
+                 "guid":  "929ae035-73f9-4436-8310-89b13c2cce5a",
+                 "version":  "Windows Server vNext",
+                 "version_number":  28,
+                 "size":  16070475776,
+                 "allocated":  536870912,
+                 "logical_sector":  512,
+                 "physical_sector":  4096
+             },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "600224807333E3ECCFC242D2B4F76786",
+                      "size":  8589934592,
+                      "spaces_guid":  "0fe1d80a-ba79-2cf1-1dd1-9b19f761baf9"
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "60022480E142DEAC1DD168843F0AB7F7",
+                      "size":  8589934592,
+                      "spaces_guid":  "4f0fc116-e1ba-5180-fcd5-f9c45d1fd508"
+                  }
+              ]
+}

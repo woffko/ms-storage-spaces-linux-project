@@ -30,6 +30,19 @@ impl Guid {
     pub fn is_nil(&self) -> bool {
         self.0 == [0; 16]
     }
+
+    /// Parses the text form ("8faf5ce7-80f6-ee4c-afa3-b001e56efc2d").
+    pub fn parse(s: &str) -> Option<Self> {
+        let hex: Vec<u8> = s.bytes().filter(|&c| c != b'-').collect();
+        if hex.len() != 32 || s.len() != 36 {
+            return None;
+        }
+        let mut g = [0u8; 16];
+        for (i, pair) in hex.as_chunks::<2>().0.iter().enumerate() {
+            g[i] = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+        }
+        Some(Guid(g))
+    }
 }
 
 impl fmt::Display for Guid {
@@ -52,6 +65,14 @@ impl fmt::Debug for Guid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_its_text_form() {
+        let g = Guid::parse("e75caf8f-f680-4cee-afa3-b001e56efc2d").unwrap();
+        assert_eq!(g.to_string(), "e75caf8f-f680-4cee-afa3-b001e56efc2d");
+        assert!(Guid::parse("e75caf8f-f680-4cee-afa3-b001e56efc2").is_none());
+        assert!(Guid::parse("x75caf8f-f680-4cee-afa3-b001e56efc2d").is_none());
+    }
 
     #[test]
     fn display_and_mixed_endian() {

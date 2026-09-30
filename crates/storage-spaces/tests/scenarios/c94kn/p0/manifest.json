@@ -1,0 +1,29 @@
+﻿{
+    "name":  "c94kn",
+    "windows_build":  "10.0.26100.0",
+    "pattern":  false,
+    "pool":  {
+                 "name":  "ss-c94kn",
+                 "guid":  "de79928b-69d2-4481-9eab-7e6adebbf131",
+                 "version":  "Windows Server vNext",
+                 "version_number":  28,
+                 "size":  16070475776,
+                 "allocated":  536870912,
+                 "logical_sector":  4096,
+                 "physical_sector":  4096
+             },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "6002248032678502CE0046D5204CDFD1",
+                      "size":  8589934592,
+                      "spaces_guid":  "d89bce49-fd84-2a57-3892-88947b706be4"
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "60022480054971E0767DDDB87AFF8498",
+                      "size":  8589934592,
+                      "spaces_guid":  "0976ffb7-ad68-fe9b-4160-c1efc2698c07"
+                  }
+              ]
+}
