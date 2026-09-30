@@ -99,9 +99,12 @@ rename, new space, extension, deletion):
   75 slots in use and 128 formatted, byte for byte as the model predicts;
   `lrc15` and `mapar_26100` also have 128).
 * An update writes the new version of every changed record, and every new
-  record, in order into the first run of free slots long enough for it,
-  while the old versions still occupy theirs; only then are the old
-  versions (and deleted records) freed. A rename or an extension therefore
+  record, in order into the first free slots, whether they are adjacent or
+  not, while the old versions still occupy theirs; only then are the old
+  versions (and deleted records) freed. A record split over non-adjacent
+  slots keeps its fragment numbers in order (**verified** by the test
+  `resized_and_renamed_spaces_are_predicted_byte_for_byte`, scenario
+  `c9resize`: a record of five slots took the free slots 30-31 and 71-73). A rename or an extension therefore
   moves the space record to new slots, and a later record may reuse the
   freed ones (`m5db`: the renamed space moved from 21 to 27, the next new
   space took 21).
@@ -225,6 +228,31 @@ page, and nothing else is written):
   the ids of later spaces grow in steps (44, 73/74, 76, 109/110, 115/116).
   Windows reads any unique ids (they are inputs of the model).
 
+
+## Changing a pool
+
+Each of these is one pool database update and writes nothing else
+(**verified** byte for byte on every copy by the tests
+`pool_changes_are_predicted_byte_for_byte` and
+`resized_and_renamed_spaces_are_predicted_byte_for_byte`, scenarios
+`c9ops` and `c9resize`; `storage_spaces::manage`):
+
+* `Set-StoragePool -NewFriendlyName`: the pool record with the new name and
+  the security descriptor space records get. The partitions keep the old
+  name.
+* `Set-PhysicalDisk -MediaType` / `-Usage`: the disk record rewritten; two
+  changes are two updates.
+* `Set-VirtualDisk -NewFriendlyName`: the space record with the new name and
+  the security descriptor.
+* `Resize-VirtualDisk` of a fixed space: the space record with the new size
+  and the security descriptor, and an extent per column and copy for the
+  new rows (virtual slabs continuing, allocation unit x data columns per
+  row group). The parity journal's header keeps its first run count.
+* `Set-StoragePool -IsReadOnly` writes nothing.
+* `Remove-StoragePool` (its spaces removed first) rewrites the partition
+  table without the pool partition, keeping the Microsoft reserved
+  partition; the SPACEDB header and the database stay behind it
+  (**verified** by the test `a_removed_pool_leaves_the_reserved_partition`).
 
 ## Deleting a space
 

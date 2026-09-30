@@ -266,7 +266,7 @@ impl PoolDiskTable {
         }
     }
 
-    fn entries(&self) -> Vec<u8> {
+    fn entries(&self, with_pool: bool) -> Vec<u8> {
         let first_usable = 2 + self.table_sectors();
         let pool = self.pool_partition();
         let mut table = vec![0u8; (Self::ENTRIES * Self::ENTRY_SIZE) as usize];
@@ -286,7 +286,8 @@ impl PoolDiskTable {
                 self.pool_name.as_str(),
             ),
         ];
-        for (e, (kind, guid, first, last, name)) in table
+        let parts = &parts[..if with_pool { 2 } else { 1 }];
+        for (e, &(kind, guid, first, last, name)) in table
             .as_chunks_mut::<{ Self::ENTRY_SIZE as usize }>()
             .0
             .iter_mut()
@@ -354,7 +355,19 @@ impl PoolDiskTable {
     /// The byte ranges to write: the protective MBR, the primary header and
     /// entries, and the backup entries and header at the end of the disk.
     pub fn regions(&self) -> Vec<(u64, Vec<u8>)> {
-        let entries = self.entries();
+        self.write(true)
+    }
+
+    /// The same without the pool partition, as `Remove-StoragePool` and
+    /// `Remove-PhysicalDisk` leave a disk (the Microsoft reserved partition
+    /// stays; the SPACEDB header and pool database stay behind it,
+    /// unreferenced).
+    pub fn regions_without_pool(&self) -> Vec<(u64, Vec<u8>)> {
+        self.write(false)
+    }
+
+    fn write(&self, with_pool: bool) -> Vec<(u64, Vec<u8>)> {
+        let entries = self.entries(with_pool);
         let crc = crate::crc::crc32(&entries);
         let last = self.sectors() - 1;
         let backup_entries = last - self.table_sectors();

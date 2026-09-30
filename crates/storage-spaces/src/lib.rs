@@ -27,6 +27,7 @@ mod guid;
 pub mod io;
 pub mod journal;
 pub mod layout;
+pub mod manage;
 mod pool;
 mod reader;
 pub mod records;

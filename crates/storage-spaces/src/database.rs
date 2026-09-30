@@ -148,22 +148,35 @@ impl Database {
             .max(1)
     }
 
-    /// Writes a new record into the first run of free slots long enough for
-    /// it; returns its id (its first slot). `None` if no run is free.
+    /// Writes a new record into the first free slots, in slot order, whether
+    /// they are adjacent or not (Windows splits a record over the free slots
+    /// it finds: `c9resize`); returns its id (its first slot). `None` if
+    /// fewer slots are free.
     pub fn insert(&mut self, kind: u8, version: u8, body: &[u8]) -> Option<u32> {
         let n = self.slots_for(body.len());
         // The id is the first slot; a slot another record claims as its id
-        // (only in damaged databases) is skipped.
-        let first = (HEADER_SLOTS..=self.slots().checked_sub(n)?).find(|&s| {
-            (s..s + n).all(|i| self.is_free(i)) && (HEADER_SLOTS..self.slots()).all(|i| self.record_id(i) != s as u32)
-        })?;
+        // (only in damaged databases) is not taken as the first.
+        let claimed = |s: usize| (HEADER_SLOTS..self.slots()).any(|i| self.record_id(i) == s as u32);
+        let mut slots = Vec::with_capacity(n);
+        for i in HEADER_SLOTS..self.slots() {
+            if self.is_free(i) && (!slots.is_empty() || !claimed(i)) {
+                slots.push(i);
+                if slots.len() == n {
+                    break;
+                }
+            }
+        }
+        if slots.len() < n {
+            return None;
+        }
+        let first = slots[0];
         let mut data = vec![kind, version, 0, 0];
         data.extend_from_slice(&(body.len() as u32).to_be_bytes());
         data.extend_from_slice(body);
         let payload = self.entry_size - FRAGMENT_HEAD;
         data.resize(n * payload, 0);
         for (k, chunk) in data.chunks(payload).enumerate() {
-            let i = first + k;
+            let i = slots[k];
             let e = self.slot_mut(i);
             e[..4].copy_from_slice(SDBB_SIGNATURE);
             e[4..8].copy_from_slice(&(i as u32).to_be_bytes());
@@ -193,7 +206,7 @@ impl Database {
     }
 
     /// One update: writes the new records (kind, version, body) in order,
-    /// each into the first free run of slots, and only then frees the
+    /// each into the first free slots, and only then frees the
     /// records `frees` (the old versions of changed records, or deleted
     /// ones). Returns the ids of the new records.
     pub fn update(&mut self, writes: &[(u8, u8, &[u8])], frees: &[u32]) -> Option<Vec<u32>> {
