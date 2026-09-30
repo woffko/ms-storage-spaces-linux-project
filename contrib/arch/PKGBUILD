@@ -3,7 +3,7 @@
 pkgname=storage-spaces
 pkgver=0.2.0
 pkgrel=1
-pkgdesc='Read Microsoft Storage Spaces pools (Windows 11) as read-only block devices'
+pkgdesc='Read, write and manage Microsoft Storage Spaces pools (Windows 11) on Linux'
 arch=('x86_64' 'aarch64')
 url='https://github.com/woffko/ms-storage-spaces-linux-project'
 license=('GPL-2.0-or-later')

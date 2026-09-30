@@ -33,10 +33,12 @@ Suggests: fuse3, ntfs-3g
 Section: admin
 Homepage: https://github.com/woffko/ms-storage-spaces-linux-project
 Priority: optional
-Description: read Microsoft Storage Spaces pools on Linux
+Description: read, write and manage Microsoft Storage Spaces pools on Linux
  Assembles Windows 11 Storage Spaces pools from their member disks and
- exposes every virtual disk as a read-only block device under
- /dev/mapper/ss-<pool>-<space>, attached automatically when the disks appear.
+ exposes every virtual disk as a block device under
+ /dev/mapper/ss-<pool>-<space>, attached automatically (read-only) when the
+ disks appear; spaces can be attached read-write, and pools, spaces and
+ disks created and changed the way Windows does.
 CONTROL
 cat > "$stage/DEBIAN/postinst" <<'POSTINST'
 #!/bin/sh
