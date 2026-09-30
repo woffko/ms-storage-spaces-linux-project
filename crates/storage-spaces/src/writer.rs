@@ -288,15 +288,7 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
         let sequence = a.db.sequence() + 1;
         let bodies: Vec<Vec<u8>> = records.iter().map(|r| r.encode(sequence)).collect();
         let writes: Vec<(u8, u8, &[u8])> = bodies.iter().map(|b| (4, 6, b.as_slice())).collect();
-        let mut db = a.db.clone();
-        while db.update(&writes, &[]).is_none() {
-            // No run of free slots is long enough: format another page.
-            if a.db.bytes().len() >= 4 << 20 {
-                return Err(Error::Pool("the pool database is full".into()));
-            }
-            a.db.grow();
-            db = a.db.clone();
-        }
+        let (mut db, _) = a.db.updated(&writes, &[])?;
         db.commit(sequence, filetime_now());
         pool.write_database(&db)?;
         a.db = db;

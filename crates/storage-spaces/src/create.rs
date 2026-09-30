@@ -162,11 +162,8 @@ impl NewPool {
             };
             records.push((EXTENT_RECORD, extent.encode(1)));
         }
-        let mut db = Database::new(self.guid, POOL_DATABASE_LIMIT);
         let writes: Vec<(u8, u8, &[u8])> = records.iter().map(|((k, v), b)| (*k, *v, b.as_slice())).collect();
-        if db.update(&writes, &[]).is_none() {
-            return Err(format_err!("the records of {n} disks do not fit a new pool database"));
-        }
+        let (mut db, _) = Database::new(self.guid, POOL_DATABASE_LIMIT).updated(&writes, &[])?;
         db.commit(1, self.created);
         Ok(db)
     }
@@ -258,12 +255,14 @@ pub struct NewHidden {
     pub child_guid: Guid,
     /// The child's size: 256 MiB, a cache its own size.
     pub size: u64,
-    /// Mirror placement of the child: redundancy, copies, interleave.
+    /// Mirror placement of the child: redundancy, copies, columns (a cache
+    /// may have several), interleave.
     pub redundancy: u64,
     pub copies: u64,
+    pub columns: u64,
     pub interleave_log2: u8,
-    /// Its slabs: (row, copy, disk id, physical slab).
-    pub slabs: Vec<(u64, u64, u64, u64)>,
+    /// Its slabs: (row, column, copy, disk id, physical slab).
+    pub slabs: Vec<(u64, u64, u64, u64, u64)>,
     /// FILETIME of the container's database in the metadata space.
     pub created: u64,
 }
@@ -352,20 +351,20 @@ impl NewSpace {
                 resiliency: 2,
                 redundancy: h.redundancy,
                 copies: h.copies,
-                columns: 1,
+                columns: h.columns,
                 interleave_log2: h.interleave_log2,
                 write_cache: if h.kind == Hidden::Cache { h.size } else { 0 },
                 parent: self.id,
                 ..self.space_body(sequence)
             };
             out.push((SPACE_RECORD, container.encode()?));
-            for &(row, copy, disk_id, physical_slab) in &h.slabs {
+            for &(row, column, copy, disk_id, physical_slab) in &h.slabs {
                 let extent = ExtentRecord {
                     flags: 4,
                     stale_marker: 0xffff_ffff,
                     space_id: h.child_id,
-                    virtual_slab: row,
-                    column: 0,
+                    virtual_slab: row * h.columns,
+                    column,
                     copy,
                     slab_count: 1,
                     disk_id,
@@ -494,24 +493,30 @@ impl NewSpace {
             }
         }
         for (i, offset, bytes) in self.hidden_contents() {
+            // Striped over the child's columns (the pieces written here stay
+            // within one interleave unit).
             let h = &self.hidden[i];
-            for &(row, _, disk_id, physical_slab) in &h.slabs {
-                if row == offset / SLAB_SIZE
+            let interleave = 1u64 << h.interleave_log2;
+            let unit = offset / interleave;
+            let column = unit % h.columns;
+            let column_offset = unit / h.columns * interleave + offset % interleave;
+            let row = column_offset / SLAB_SIZE;
+            if offset % interleave + bytes.len() as u64 > interleave {
+                return Err(format_err!("hidden space contents across interleave units"));
+            }
+            for &(r, c, _, disk_id, physical_slab) in &h.slabs {
+                if (r, c) == (row, column)
                     && let Some((device, at)) = pool.slab_location(disk_id, physical_slab)?
                 {
-                    out.push((device, at + offset % SLAB_SIZE, bytes.clone()));
+                    out.push((device, at + column_offset % SLAB_SIZE, bytes.clone()));
                 }
             }
         }
-        let mut db = db.clone();
-        let records = self.records(db.sequence() + 1)?;
+        let sequence = db.sequence() + 1;
+        let records = self.records(sequence)?;
         let writes: Vec<(u8, u8, &[u8])> = records.iter().map(|((k, v), b)| (*k, *v, b.as_slice())).collect();
-        if db.update(&writes, &[]).is_none() {
-            db.grow();
-            db.update(&writes, &[])
-                .ok_or_else(|| format_err!("the space's records do not fit the pool database"))?;
-        }
-        db.commit(db.sequence() + 1, timestamp);
+        let (mut db, _) = db.updated(&writes, &[])?;
+        db.commit(sequence, timestamp);
         for m in pool.members.iter().filter(|m| m.header.database_copy) {
             out.push((m.device, m.partition.offset + POOL_DB_OFFSET, db.bytes().to_vec()));
         }

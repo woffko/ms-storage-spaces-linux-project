@@ -225,10 +225,11 @@ fn new_space_of(
                 size: c.size,
                 redundancy: c.redundancy,
                 copies: c.copies,
+                columns: c.columns,
                 interleave_log2: c.interleave_log2,
                 slabs: extents_of(child.id)
                     .iter()
-                    .map(|e| (e.virtual_slab, e.copy, e.disk_id, e.physical_slab))
+                    .map(|e| (e.virtual_slab / c.columns, e.column, e.copy, e.disk_id, e.physical_slab))
                     .collect(),
                 created: created(c.number),
             }
@@ -286,6 +287,9 @@ fn new_spaces_are_predicted_byte_for_byte() {
         ("c9new", "p4", "p5"),
         ("c9one", "p0", "p1"),
         ("c9eight", "p0", "p1"),
+        ("c9opts", "q0", "q1"),
+        ("c9opts", "q1", "q2"),
+        ("c9opts", "q2", "q3"),
         ("c9l4k", "p0", "p1"),
         ("c94kn", "p0", "p1"),
     ] {

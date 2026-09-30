@@ -191,7 +191,12 @@ page, and nothing else is written):
   holds five, not the five that carry the pool database. They are written
   before the pool database update.
 * Hidden spaces: mirror copies of 256 MiB (the cache: its size) with the
-  space's interleave, 256 MiB allocation unit. The dirty region log starts
+  space's interleave, 256 MiB allocation unit; the dirty region log of a
+  three-way mirror has three copies. On Windows 11 24H2 with HDDs only,
+  parity spaces always get a write-back cache (1 GiB by default and when
+  none is asked for, 512 MiB when 64 MiB is asked for; two columns on five
+  disks, one on three), simple and mirror spaces none (asking for one
+  fails: `c9new`, `c9opts`). The dirty region log starts
   as an empty header (generation 0) at 0 and at its size less 8 KiB; the
   parity journal as its header alone (owner the space, 1024 slots of 4 KiB
   from 8 KiB, two checkpoint areas of 125 MiB at 6 MiB, then the space's

@@ -208,6 +208,23 @@ impl Database {
         Some(ids)
     }
 
+    /// [`Database::update`] applied to a copy, formatting another page of
+    /// slots whenever no run of free slots is long enough (as Windows does,
+    /// see [`Database::grow`]), up to 4 MiB.
+    pub fn updated(&self, writes: &[(u8, u8, &[u8])], frees: &[u32]) -> Result<(Database, Vec<u32>)> {
+        let mut base = self.clone();
+        loop {
+            let mut db = base.clone();
+            if let Some(ids) = db.update(writes, frees) {
+                return Ok((db, ids));
+            }
+            if base.bytes.len() >= MAX_PAGES * PAGE {
+                return Err(format_err!("the database is full"));
+            }
+            base.grow();
+        }
+    }
+
     /// The record with id `id`.
     pub fn record(&self, id: u32) -> Option<RawRecord> {
         crate::format::assemble_records(&self.bytes, self.entry_size)
