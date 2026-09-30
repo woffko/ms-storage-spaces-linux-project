@@ -399,3 +399,36 @@ fn windows_takes_a_pool_created_on_linux() {
         assert_eq!(x["windows"], x["linux"], "{name}");
     }
 }
+
+/// Every management operation of `spaces` on one pool (tools/mgmt-lifecycle.sh:
+/// create, grow, rename, delete spaces; rename the pool; add a disk, set it
+/// to SSD, retire another and remove it): Windows 11 attached the result as
+/// healthy with nothing to repair, its own Optimize-StoragePool completed,
+/// and every pattern read back afterwards.
+#[test]
+fn windows_takes_a_pool_managed_on_linux() {
+    let e = evidence("mgmt-lifecycle.json");
+    assert_eq!(e["pool_health"], serde_json::json!(["Healthy", "OK"]));
+    for key in ["attached", "repaired", "optimized"] {
+        let spaces = e[key].as_array().unwrap();
+        assert_eq!(spaces.len(), 4, "{key}");
+        for s in spaces {
+            assert_eq!(
+                (s[1].as_str(), s[2].as_str()),
+                (Some("Healthy"), Some("OK")),
+                "{key} {s}"
+            );
+        }
+    }
+    assert_eq!(e["attached_jobs"].as_array().unwrap().len(), 0);
+    assert_eq!(e["optimize_job"][0][1], "Completed");
+    assert!(e["disks_after"].as_array().unwrap().iter().all(|d| d[1] == "Healthy"));
+    assert!(
+        e["checks_after_optimize"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c[2] == true)
+    );
+    assert_eq!(e["checks_after_optimize"].as_array().unwrap().len(), 4);
+}

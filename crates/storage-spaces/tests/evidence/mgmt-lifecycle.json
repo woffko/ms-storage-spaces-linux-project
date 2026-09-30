@@ -1,0 +1,126 @@
+{
+ "windows_build": "10.0.26100.0",
+ "pool": "tools/mgmt-lifecycle.sh: a pool of three blank disks created on Linux; a simple, a mirror, a parity, a thin simple and a fifth space created; the simple space grown from 3 to 6 GiB and the parity space from 2 to 4 GiB; the simple space and the pool renamed; the fifth space deleted; the pattern written into the four spaces; a fourth disk added and set to SSD; the second disk retired (its data moved to the others) and removed; the three remaining disks brought to Windows",
+ "pool_health": [
+  "Healthy",
+  "OK"
+ ],
+ "attached": [
+  [
+   "lparity",
+   "Healthy",
+   "OK"
+  ],
+  [
+   "lthin",
+   "Healthy",
+   "OK"
+  ],
+  [
+   "lmirror",
+   "Healthy",
+   "OK"
+  ],
+  [
+   "lsimple2",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "attached_jobs": [],
+ "repaired": [
+  [
+   "lparity",
+   "Healthy",
+   "OK"
+  ],
+  [
+   "lthin",
+   "Healthy",
+   "OK"
+  ],
+  [
+   "lmirror",
+   "Healthy",
+   "OK"
+  ],
+  [
+   "lsimple2",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "optimized": [
+  [
+   "lparity",
+   "Healthy",
+   "OK"
+  ],
+  [
+   "lthin",
+   "Healthy",
+   "OK"
+  ],
+  [
+   "lmirror",
+   "Healthy",
+   "OK"
+  ],
+  [
+   "lsimple2",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "optimize_job": [
+  [
+   "ss-lifecycle2-Optimize",
+   "Completed",
+   100
+  ]
+ ],
+ "disks_after": [
+  [
+   "Auto-Select",
+   "Healthy",
+   "OK"
+  ],
+  [
+   "Auto-Select",
+   "Healthy",
+   "OK"
+  ],
+  [
+   "Auto-Select",
+   "Healthy",
+   "OK"
+  ]
+ ],
+ "checks_after_optimize": [
+  [
+   "lsimple2",
+   "pattern",
+   true
+  ],
+  [
+   "lmirror",
+   "pattern",
+   true
+  ],
+  [
+   "lparity",
+   "pattern",
+   true
+  ],
+  [
+   "lthin",
+   "pattern",
+   true
+  ]
+ ],
+ "events": [
+  "1043",
+  "1044",
+  "207"
+ ]
+}

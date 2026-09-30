@@ -854,9 +854,12 @@ pub fn plan_retire_disk<D: ReadAt>(pool: &Pool<D>, disk_id: u64) -> Result<Plan>
             .filter(|x| x.space_id == e.space_id && x.virtual_slab == e.virtual_slab)
             .collect();
         let exclude: Vec<u64> = row.iter().map(|x| x.disk_id).chain([disk_id]).collect();
-        let (target, slab) = slabs
-            .allocate(e.slab_count, &exclude)
-            .ok_or_else(|| Error::Pool("the other disks have no room for the retired disk's data".into()))?;
+        let (target, slab) = slabs.allocate(e.slab_count, &exclude).ok_or_else(|| {
+            Error::Pool(format!(
+                "no other disk has {} free slabs in a row for space {} slab {} (its row is on disks {:?})",
+                e.slab_count, e.space_id, e.virtual_slab, exclude
+            ))
+        })?;
         let next_copy = row
             .iter()
             .filter(|x| x.column == e.column)
