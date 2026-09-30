@@ -882,58 +882,29 @@ pub fn plan_retire_disk<D: ReadAt>(pool: &Pool<D>, disk_id: u64) -> Result<Plan>
             .max()
             .unwrap_or(0)
             + 1;
-        let regenerating = ExtentRecord {
-            copy: next_copy,
-            flags: e.flags | ExtentRecord::FLAG_REGENERATING,
-            disk_id: target,
-            physical_slab: slab,
-            ..e
-        };
-        let sequence = db.sequence() + 1;
-        let body = regenerating.encode(sequence);
-        let (mut next, ids) = db.updated(&[(4, 6, &body)], &[])?;
-        next.commit(sequence, now);
-        db = next;
-        write_db(
-            &mut plan,
-            &format!("new copy of space {} slab {}", e.space_id, e.virtual_slab),
-            &db,
-            false,
-        );
         let from = pool
             .slab_location(e.disk_id, e.physical_slab)?
             .ok_or_else(|| Error::Pool(format!("disk {} is not at hand", e.disk_id)))?;
-        let to = pool
-            .slab_location(target, slab)?
-            .ok_or_else(|| Error::Pool(format!("disk {target} is not at hand")))?;
-        plan.step(
-            format!("copy {} slabs of space {} to disk {target}", e.slab_count, e.space_id),
-            vec![Action::Copy {
-                from: Target::Member(from.0),
-                from_offset: from.1,
-                to: Target::Member(to.0),
-                to_offset: to.1,
-                len: e.slab_count * SLAB_SIZE,
-            }],
-        );
-        let sequence = db.sequence() + 1;
-        let body = ExtentRecord {
-            copy: e.copy,
-            flags: e.flags,
-            disk_id: target,
-            physical_slab: slab,
-            ..e
-        }
-        .encode(sequence);
-        let (mut next, _) = db.updated(&[(4, 6, &body)], &[old_id, ids[0]])?;
-        next.commit(sequence, now);
-        db = next;
-        write_db(
+        let rebuild = |to: Target, to_offset: u64| Action::Copy {
+            from: Target::Member(from.0),
+            from_offset: from.1,
+            to,
+            to_offset,
+            len: e.slab_count * SLAB_SIZE,
+        };
+        let mut write = |plan: &mut Plan, what: &str, db: &Database| write_db(plan, what, db, false);
+        relocate(
+            pool,
             &mut plan,
-            &format!("space {} slab {} moved", e.space_id, e.virtual_slab),
-            &db,
-            false,
-        );
+            &mut db,
+            now,
+            old_id,
+            &e,
+            next_copy,
+            (target, slab),
+            &rebuild,
+            &mut write,
+        )?;
     }
     // The databases of the metadata space: without the disk.
     let space_dbs = space_databases_without(pool, &db, disk_id, now)?;
@@ -1139,67 +1110,37 @@ pub fn plan_repair<D: ReadAt>(pool: &Pool<D>) -> Result<Plan> {
             .max()
             .unwrap_or(0)
             + 1;
-        let regenerating = ExtentRecord {
-            copy: next_copy,
-            flags: e.flags | ExtentRecord::FLAG_REGENERATING,
-            stale_marker: ExtentRecord::CURRENT,
-            disk_id: target,
-            physical_slab: slab,
-            ..e
+        let rebuild = |to: Target, to_offset: u64| {
+            let len = e.slab_count * SLAB_SIZE;
+            match source.len() {
+                1 => Action::Copy {
+                    from: source[0].0,
+                    from_offset: source[0].1,
+                    to,
+                    to_offset,
+                    len,
+                },
+                _ => Action::Xor {
+                    from: source.clone(),
+                    to,
+                    to_offset,
+                    len,
+                },
+            }
         };
-        let sequence = db.sequence() + 1;
-        let body = regenerating.encode(sequence);
-        let (mut next, ids) = db.updated(&[(4, 6, &body)], &[])?;
-        next.commit(sequence, now);
-        db = next;
-        write_db(
+        let mut write = |plan: &mut Plan, what: &str, db: &Database| write_db(plan, what, db);
+        relocate(
+            pool,
             &mut plan,
-            &format!("new copy of space {} slab {}", e.space_id, e.virtual_slab),
-            &db,
-        );
-        let (to, to_offset) = location(&ExtentRecord {
-            disk_id: target,
-            physical_slab: slab,
-            ..e
-        })?;
-        let len = e.slab_count * SLAB_SIZE;
-        let action = match source.len() {
-            1 => Action::Copy {
-                from: source[0].0,
-                from_offset: source[0].1,
-                to,
-                to_offset,
-                len,
-            },
-            _ => Action::Xor {
-                from: source,
-                to,
-                to_offset,
-                len,
-            },
-        };
-        plan.step(
-            format!("rebuild space {} slab {} on disk {target}", e.space_id, e.virtual_slab),
-            vec![action],
-        );
-        let sequence = db.sequence() + 1;
-        let body = ExtentRecord {
-            copy: e.copy,
-            flags: e.flags & !ExtentRecord::FLAG_REGENERATING,
-            stale_marker: ExtentRecord::CURRENT,
-            disk_id: target,
-            physical_slab: slab,
-            ..e
-        }
-        .encode(sequence);
-        let (mut next, _) = db.updated(&[(4, 6, &body)], &[old_id, ids[0]])?;
-        next.commit(sequence, now);
-        db = next;
-        write_db(
-            &mut plan,
-            &format!("space {} slab {} repaired", e.space_id, e.virtual_slab),
-            &db,
-        );
+            &mut db,
+            now,
+            old_id,
+            &e,
+            next_copy,
+            (target, slab),
+            &rebuild,
+            &mut write,
+        )?;
     }
     if plan.steps.is_empty() {
         plan.summary.push("nothing to repair".into());
@@ -1270,4 +1211,171 @@ fn space_databases_without<D: ReadAt>(pool: &Pool<D>, db: &Database, disk_id: u6
         }
     }
     Ok(space_dbs)
+}
+
+/// Moves extent `e` (record `old_id`) to physical slab `slab` of disk
+/// `target`: the data first written into the free slabs by `rebuild` (given
+/// their location) and made durable, then one database update records the
+/// extent there and frees the old place. A crash before the update leaves
+/// only unreferenced slabs written; the copies of the update agree on
+/// either place holding the data. (Windows, whose own moves go through a
+/// copy flagged as being regenerated, marked disks lost when it found such
+/// a copy of a dirty region log written by Linux after a crash.) `write`
+/// writes a database update to the members; `next_copy` is unused.
+#[allow(clippy::too_many_arguments)]
+fn relocate<D: ReadAt>(
+    pool: &Pool<D>,
+    plan: &mut Plan,
+    db: &mut Database,
+    now: u64,
+    old_id: u32,
+    e: &ExtentRecord,
+    _next_copy: u64,
+    (target, slab): (u64, u64),
+    rebuild: &dyn Fn(Target, u64) -> Action,
+    write: &mut dyn FnMut(&mut Plan, &str, &Database),
+) -> Result<()> {
+    let (device, at) = pool
+        .slab_location(target, slab)?
+        .ok_or_else(|| Error::Pool(format!("disk {target} is not at hand")))?;
+    plan.step(
+        format!("data of space {} slab {} to disk {target}", e.space_id, e.virtual_slab),
+        vec![rebuild(Target::Member(device), at)],
+    );
+    let sequence = db.sequence() + 1;
+    let body = ExtentRecord {
+        flags: e.flags & !ExtentRecord::FLAG_REGENERATING,
+        stale_marker: ExtentRecord::CURRENT,
+        disk_id: target,
+        physical_slab: slab,
+        ..*e
+    }
+    .encode(sequence);
+    let (mut next, _) = db.updated(&[(4, 6, &body)], &[old_id])?;
+    next.commit(sequence, now);
+    *db = next;
+    write(plan, &format!("space {} slab {} moved", e.space_id, e.virtual_slab), db);
+    Ok(())
+}
+
+/// `spaces pool optimize` (as `Optimize-StoragePool`): moves extents from
+/// the fullest eligible disk to the emptiest one whose row does not use it
+/// yet, one at a time with the moves of a retirement, until the disks' used
+/// slabs differ by less than an extent.
+pub fn plan_rebalance<D: ReadAt>(pool: &Pool<D>) -> Result<Plan> {
+    use crate::format::SpaceRole;
+    let mut db = check_pool(pool)?;
+    let now = filetime_now();
+    let mut plan = Plan {
+        summary: vec![format!("optimize pool \"{}\"", pool.name)],
+        steps: Vec::new(),
+    };
+    let copies: Vec<crate::Member> = pool
+        .members
+        .iter()
+        .filter(|m| m.header.database_copy)
+        .cloned()
+        .collect();
+    let mut write = |plan: &mut Plan, what: &str, db: &Database| {
+        for m in &copies {
+            plan.step(
+                format!("{what} on device {}", m.device),
+                vec![Action::Write {
+                    target: Target::Member(m.device),
+                    offset: m.partition.offset + POOL_DB_OFFSET,
+                    bytes: db.bytes().to_vec(),
+                }],
+            );
+        }
+    };
+    let metadata = pool
+        .spaces
+        .values()
+        .find(|s| s.info.role == SpaceRole::Metadata)
+        .map(|s| s.id());
+    for _ in 0..1024 {
+        let slabs = Slabs::of(&db)?;
+        let used: BTreeMap<u64, u64> = slabs
+            .disks
+            .iter()
+            .map(|(&d, (_, r))| (d, r.iter().map(|x| x.1).sum()))
+            .collect();
+        let Some((&fullest, &most)) = used.iter().max_by_key(|&(d, u)| (u, std::cmp::Reverse(*d))) else {
+            break;
+        };
+        let extents: Vec<(u32, ExtentRecord)> = assemble_records(db.bytes(), 0x40)?
+            .iter()
+            .filter_map(|r| match Record::decode(r) {
+                Ok(Record::Extent(e)) => Some((r.id, e)),
+                _ => None,
+            })
+            .collect();
+        // The first extent of the fullest disk that fits an emptier disk
+        // its row does not use, without making that disk the fuller one.
+        let mut chosen = None;
+        for (id, e) in extents
+            .iter()
+            .filter(|(_, e)| e.disk_id == fullest && Some(e.space_id) != metadata && e.is_current())
+        {
+            let row: Vec<&ExtentRecord> = extents
+                .iter()
+                .map(|(_, x)| x)
+                .filter(|x| x.space_id == e.space_id && x.virtual_slab == e.virtual_slab)
+                .collect();
+            let exclude: Vec<u64> = row.iter().map(|x| x.disk_id).collect();
+            // The emptiest disk the row does not use, if moving the extent
+            // there leaves it below what the fullest has now.
+            let target = used
+                .iter()
+                .filter(|(d, _)| !exclude.contains(d))
+                .min_by_key(|&(d, u)| (*u, *d))
+                .filter(|&(_, u)| u + e.slab_count < most)
+                .map(|(d, _)| *d);
+            if let Some(t) = target {
+                let next_copy = row
+                    .iter()
+                    .filter(|x| x.column == e.column)
+                    .map(|x| x.copy)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                chosen = Some((*id, *e, t, next_copy));
+                break;
+            }
+        }
+        let Some((old_id, e, target, next_copy)) = chosen else {
+            break;
+        };
+        let mut place = slabs.clone();
+        let exclude: Vec<u64> = used.keys().filter(|&&d| d != target).copied().collect();
+        let Some((disk, slab)) = place.allocate(e.slab_count, &exclude) else {
+            break;
+        };
+        let from = pool
+            .slab_location(e.disk_id, e.physical_slab)?
+            .ok_or_else(|| Error::Pool(format!("disk {} is not at hand", e.disk_id)))?;
+        let rebuild = |to: Target, to_offset: u64| Action::Copy {
+            from: Target::Member(from.0),
+            from_offset: from.1,
+            to,
+            to_offset,
+            len: e.slab_count * SLAB_SIZE,
+        };
+        relocate(
+            pool,
+            &mut plan,
+            &mut db,
+            now,
+            old_id,
+            &e,
+            next_copy,
+            (disk, slab),
+            &rebuild,
+            &mut write,
+        )?;
+    }
+    if plan.steps.is_empty() {
+        plan.summary.push("the disks are balanced".into());
+    }
+    Ok(plan)
 }

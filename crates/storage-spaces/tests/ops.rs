@@ -374,3 +374,63 @@ fn a_lost_disk_is_repaired_away_and_removed() {
     check_pool(&pool).unwrap();
     check_data(&pool, &spaces);
 }
+
+/// After a disk is added, optimizing moves extents onto it until the disks
+/// hold about as much, the data staying readable; a second optimization
+/// finds nothing to do.
+#[test]
+fn an_added_disk_is_filled_by_optimizing() {
+    use storage_spaces::ops::{plan_add_disk, plan_rebalance};
+    let mut new_guid = guids();
+    let (images, disks) = blank(4);
+    let base: Vec<Overlay<&SparseImage>> = images.iter().map(Overlay::new).collect();
+    let (plan, _) = plan_create_pool(&disks[..3], "optimize", None, &mut new_guid).unwrap();
+    plan.apply::<&Overlay<&SparseImage>, _>(&[], &base[..3].iter().collect::<Vec<_>>())
+        .unwrap();
+    let spaces = [("s", 1u8), ("m", 2), ("p", 3)];
+    for (name, tag) in spaces {
+        let pool = Pool::open(base[..3].iter().collect::<Vec<_>>()).unwrap();
+        let (plan, _) = plan_create_space(&pool, &spec(name, tag, 2048, false), &mut new_guid).unwrap();
+        plan.apply::<_, &Overlay<&SparseImage>>(&base[..3].iter().collect::<Vec<_>>(), &[])
+            .unwrap();
+        drop(pool);
+        let pool = Pool::open(base[..3].iter().collect::<Vec<_>>()).unwrap();
+        let w = pool.open_space_rw(pool.find_space(name).unwrap().id()).unwrap();
+        w.write_all_at(&data(tag, 8 << 20), 1 << 20).unwrap();
+        w.flush().unwrap();
+    }
+    let pool = Pool::open(base[..3].iter().collect::<Vec<_>>()).unwrap();
+    let plan = plan_add_disk(&pool, &disks[3], &mut new_guid).unwrap();
+    drop(pool);
+    plan.apply(&base[..3].iter().collect::<Vec<_>>(), &[&base[3]]).unwrap();
+    let used = |pool: &Pool<&Overlay<&SparseImage>>| -> Vec<u64> {
+        let mut u: Vec<u64> = pool
+            .disks
+            .keys()
+            .map(|d| {
+                pool.spaces
+                    .values()
+                    .flat_map(|s| s.extents.iter())
+                    .filter(|e| e.disk_id == *d)
+                    .map(|e| e.slab_count)
+                    .sum()
+            })
+            .collect();
+        u.sort();
+        u
+    };
+    let pool = Pool::open(base.iter().collect::<Vec<_>>()).unwrap();
+    let before = used(&pool);
+    assert!(before[0] <= 1, "{before:?}");
+    let plan = plan_rebalance(&pool).unwrap();
+    drop(pool);
+    plan.apply::<_, &Overlay<&SparseImage>>(&base.iter().collect::<Vec<_>>(), &[])
+        .unwrap();
+    let pool = Pool::open(base.iter().collect::<Vec<_>>()).unwrap();
+    assert!(pool.warnings.is_empty(), "{:?}", pool.warnings);
+    check_pool(&pool).unwrap();
+    check_data(&pool, &spaces);
+    let after = used(&pool);
+    assert!(after[3] - after[0] <= 4, "{before:?} -> {after:?}");
+    assert!(plan_rebalance(&pool).unwrap().steps.is_empty());
+}

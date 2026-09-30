@@ -51,6 +51,14 @@ pub enum PoolCommand {
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
+    /// Spread the extents evenly over the disks (after adding a disk), as
+    /// Optimize-StoragePool does.
+    Optimize {
+        #[arg(long)]
+        yes: bool,
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+    },
     /// Remove a pool without spaces: the pool partition leaves every
     /// member's partition table.
     Remove {
@@ -335,6 +343,7 @@ pub fn pool(command: PoolCommand) -> Result<()> {
         PoolCommand::Rename { name, yes, devices } => on_pool(&devices, yes, |p| ops::plan_rename_pool(p, &name)),
         PoolCommand::Remove { yes, devices } => on_pool(&devices, yes, ops::plan_remove_pool),
         PoolCommand::Repair { yes, devices } => on_pool(&devices, yes, ops::plan_repair),
+        PoolCommand::Optimize { yes, devices } => on_pool(&devices, yes, ops::plan_rebalance),
         PoolCommand::Create {
             name,
             logical_sector,

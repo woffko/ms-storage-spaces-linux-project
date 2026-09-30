@@ -290,18 +290,8 @@ pub fn add_disk<D: crate::io::ReadAt>(
         .map(|(o, b)| write(Target::New(0), *o, b.clone()))
         .collect();
     setup.push(write(Target::New(0), partition.offset, first_header.encode().to_vec()));
-    plan.step("new disk: partition table and header", setup);
-    for m in &copies {
-        plan.step(
-            format!("first update on device {}", m.device),
-            vec![write(
-                Target::Member(m.device),
-                m.partition.offset + POOL_DB_OFFSET,
-                first.bytes().to_vec(),
-            )],
-        );
-    }
     let mut space_dbs = Vec::new();
+    let mut new_copy = Vec::new();
     let numbers: Vec<u64> = all
         .iter()
         .filter(|r| r.kind == 3)
@@ -331,11 +321,29 @@ pub fn add_disk<D: crate::io::ReadAt>(
             }
         }
         new_disk.push((partition.offset + DATA_AREA_OFFSET + offset, updated.bytes().to_vec()));
-        space_dbs.push(write(
+        new_copy.push(write(
             Target::New(0),
             partition.offset + DATA_AREA_OFFSET + offset,
             updated.bytes().to_vec(),
         ));
+    }
+    // The new disk's copy of the metadata space is filled before the update
+    // that records it: after a crash between the two, Windows marked the disk
+    // holding that update lost while the copy was empty.
+    setup.extend(new_copy);
+    plan.step(
+        "new disk: partition table, header and its copy of the metadata space",
+        setup,
+    );
+    for m in &copies {
+        plan.step(
+            format!("first update on device {}", m.device),
+            vec![write(
+                Target::Member(m.device),
+                m.partition.offset + POOL_DB_OFFSET,
+                first.bytes().to_vec(),
+            )],
+        );
     }
     plan.step("databases in the metadata space", space_dbs);
     for m in pool.members.iter().filter(|m| m.header.database_copy) {

@@ -273,9 +273,14 @@ Each of these is one pool database update and writes nothing else
   writes that database and a header without the copy (generation 2) to the
   retired disk. `Optimize-StoragePool` after adding a disk moved one copy
   to it the same way. Windows' intermediate updates are not visible
-  (`c9disk`: five updates for the optimisation, five for the retirement);
-  Linux moves a copy by adding it with flag 0x01 (being regenerated),
-  copying the data, then recording it as current and freeing the old one.
+  (`c9disk`: five updates for the optimisation, five for the retirement).
+  Linux moves a copy by writing its data into free slabs first and then
+  recording, in one update, the extent there and the old place free; a
+  crash in between leaves only unreferenced slabs written. (A first
+  version recorded a copy flagged as being regenerated first, as Windows'
+  own moves leave it: after a crash there, Windows found a regenerating
+  copy of a dirty region log and marked the disks holding the log lost,
+  the pool read-only.)
 * `Remove-PhysicalDisk` of that disk (**verified** byte for byte by the
   test `a_removed_disk_is_predicted_byte_for_byte`): one update rewrites
   the disk's record; the next writes the metadata space with one copy
