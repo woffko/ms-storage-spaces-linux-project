@@ -551,6 +551,11 @@ rows of thin spaces not allocated yet (M7).
   it the same way, at the same address (evidence
   `windows-absent-disk-bugcheck.json`). VM experiments with disks absent
   stopped after the second crash, as the goal requires.
+* Still open (2026-09-30): M10.3 (creating tiers and mirror-accelerated
+  parity: needs experiments on the Windows VM); Windows round trips of the
+  NTFS spaces created on Linux, of a replaced disk and of a scrubbed pool;
+  the 24 h fuzz of all eleven targets (running since 2026-09-30 23:28 on
+  e5abb35); version 1.0.0 and the publication.
 
 ## Test infrastructure (continuous, feeds every stage)
 
