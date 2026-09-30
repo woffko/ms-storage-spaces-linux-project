@@ -277,6 +277,10 @@ enum Command {
         /// Number of bytes to check (default: whole space).
         #[arg(long)]
         length: Option<u64>,
+        /// The pattern's tag (default: the space's name; scenario writes use
+        /// their own).
+        #[arg(long)]
+        tag: Option<String>,
     },
 }
 
@@ -441,9 +445,15 @@ fn main() -> Result<()> {
             crash_after_writes,
             destage,
         } => write_pattern(&devices, &space, offset, length, &tag, crash_after_writes, destage),
-        Command::CheckPattern { devices, space, length } => {
+        Command::CheckPattern {
+            devices,
+            space,
+            length,
+            tag,
+        } => {
             let pool = open_pool(&devices)?;
-            check_pattern(&pool, find_space(&pool, &space)?, length)
+            let space = find_space(&pool, &space)?;
+            check_pattern(&pool, space, length, tag.as_deref().unwrap_or(space.name()))
         }
     }
 }
@@ -785,7 +795,7 @@ fn export(pool: &Pool<File>, space: &Space, output: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn check_pattern(pool: &Pool<File>, space: &Space, length: Option<u64>) -> Result<()> {
+fn check_pattern(pool: &Pool<File>, space: &Space, length: Option<u64>, tag: &str) -> Result<()> {
     let reader = open_space(pool, space.id())?;
     let total = length.unwrap_or(reader.size()).min(reader.size());
     const CHUNK: usize = 1 << 20;
@@ -794,7 +804,7 @@ fn check_pattern(pool: &Pool<File>, space: &Space, length: Option<u64>) -> Resul
     while offset < total {
         let n = CHUNK.min((total - offset) as usize);
         reader.read_exact_at(&mut buf[..n], offset)?;
-        if let Some(bad) = testpattern::verify(&buf[..n], offset, space.name()) {
+        if let Some(bad) = testpattern::verify(&buf[..n], offset, tag) {
             bail!("pattern mismatch at offset {bad:#x}");
         }
         offset += n as u64;

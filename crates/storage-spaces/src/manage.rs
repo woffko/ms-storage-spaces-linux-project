@@ -308,3 +308,90 @@ pub fn add_disk<D: crate::io::ReadAt>(
         database: second,
     })
 }
+
+/// `Remove-PhysicalDisk` of a disk that holds nothing any more (retired and
+/// repaired: no extent of a space on it, the databases of the metadata
+/// space no longer listing it): one update rewrites the disk's record,
+/// the next writes the metadata space with one copy fewer (its extents
+/// renumbered over the remaining disks), the pool record, and frees the
+/// old records and the disk's (`c9disk`, matched byte for byte). The disk
+/// itself keeps its header and database behind a partition table without
+/// the pool partition ([`crate::gpt::PoolDiskTable::regions_without_pool`]).
+pub fn remove_disk(db: &Database, disk_id: u64, timestamp: u64) -> Result<Database> {
+    use crate::format::{ExtentRecord, Record};
+    let all = records(db)?;
+    let decoded: Vec<(RawRecord, Record)> = all
+        .iter()
+        .filter_map(|r| Record::decode(r).ok().map(|d| (r.clone(), d)))
+        .collect();
+    let disk = decoded
+        .iter()
+        .find(|(_, d)| matches!(d, Record::Disk(d) if d.id == disk_id))
+        .map(|(r, _)| r.clone())
+        .ok_or_else(|| format_err!("no disk with id {disk_id}"))?;
+    let (metadata_record, mut metadata) = all
+        .iter()
+        .filter(|r| r.kind == 3)
+        .find_map(|r| {
+            SpaceBody::decode(false, &r.body)
+                .ok()
+                .filter(|s| s.role == 1)
+                .map(|s| (r.clone(), s))
+        })
+        .ok_or_else(|| format_err!("no metadata space"))?;
+    let mut in_use = false;
+    let mut remaining = Vec::new();
+    let mut old_extents = Vec::new();
+    for (r, d) in &decoded {
+        if let Record::Extent(e) = d {
+            if e.space_id == metadata.id {
+                old_extents.push(r.id);
+                if e.disk_id != disk_id {
+                    remaining.push(*e);
+                }
+            } else if e.disk_id == disk_id {
+                in_use = true;
+            }
+        }
+    }
+    if in_use {
+        return Err(format_err!(
+            "disk {disk_id} still holds data of a space; retire and repair first"
+        ));
+    }
+    let pool_record = all
+        .iter()
+        .find(|r| r.kind == 1)
+        .ok_or_else(|| format_err!("no pool record"))?;
+    // First update: the disk's record rewritten.
+    let s1 = db.sequence() + 1;
+    let (mut first, ids) = db.updated(&[(disk.kind, disk.version, &disk.body)], &[disk.id])?;
+    first.commit(s1, timestamp);
+    // Second: the metadata space, the pool record, the renumbered extents.
+    let s2 = s1 + 1;
+    metadata.sequence = s2;
+    metadata.copies -= 1;
+    metadata.redundancy = metadata.redundancy.saturating_sub(1);
+    if metadata.copies == 1 {
+        metadata.resiliency = 1;
+    }
+    let mut pool_body = PoolBody::decode(pool_record.version, &pool_record.body)?;
+    pool_body.sequence = s2;
+    remaining.sort_by_key(|e| e.copy);
+    let extents: Vec<Vec<u8>> = remaining
+        .iter()
+        .enumerate()
+        .map(|(k, e)| ExtentRecord { copy: k as u64, ..*e }.encode(s2))
+        .collect();
+    let (m, p) = (metadata.encode()?, pool_body.encode()?);
+    let mut writes: Vec<(u8, u8, &[u8])> = vec![
+        (metadata_record.kind, metadata_record.version, &m),
+        (pool_record.kind, pool_record.version, &p),
+    ];
+    writes.extend(extents.iter().map(|b| (4u8, 6u8, b.as_slice())));
+    let mut frees = vec![pool_record.id, metadata_record.id, ids[0]];
+    frees.extend(old_extents);
+    let (mut second, _) = first.updated(&writes, &frees)?;
+    second.commit(s2, timestamp);
+    Ok(second)
+}

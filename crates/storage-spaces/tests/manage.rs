@@ -263,3 +263,25 @@ fn an_added_disk_is_predicted_byte_for_byte() {
     }
     assert_writes("the new disk", added, None, &plan.new_disk);
 }
+
+/// Remove-PhysicalDisk of the retired, repaired disk (c9disk d4 -> d5): the
+/// pool database of the remaining disks and the removed disk's partition
+/// table are predicted byte for byte; nothing else changes.
+#[test]
+fn a_removed_disk_is_predicted_byte_for_byte() {
+    let old = c9disk("d4");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scenarios/c9disk/d5");
+    let new: Vec<SparseImage> = (0..3)
+        .map(|i| SparseImage::read_from(File::open(dir.join(format!("disk{i}.fixture"))).unwrap()).unwrap())
+        .collect();
+    let db = Database::read_formatted(&old[1], (16 << 20) + 0x1000).unwrap();
+    let windows = database(&new);
+    let predicted = manage::remove_disk(&db, disk_id(&old, 0), windows.timestamp()).unwrap();
+    assert!(predicted.bytes() == windows.bytes());
+    for (i, disk) in new.iter().enumerate() {
+        let writes = vec![((16u64 << 20) + 0x1000, predicted.bytes().to_vec())];
+        assert_writes(&format!("disk {}", i + 1), disk, Some(&old[i + 1]), &writes);
+    }
+    // A disk that still holds data is refused.
+    assert!(manage::remove_disk(&db, disk_id(&old, 1), 0).is_err());
+}

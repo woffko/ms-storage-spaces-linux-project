@@ -262,6 +262,29 @@ Each of these is one pool database update and writes nothing else
   again, with the copy (so generation 2: the generation counts how often
   the header was written); a second update rewrites the disk's record with
   the copy. Disk ids come from Windows' object id counter (44 here).
+* Retiring a disk (`Set-PhysicalDisk -Usage Retired`) rewrites its record
+  (usage 5, the database copy flag kept) and moves every extent off it:
+  each moved copy gets the next copy number beyond the policy's (copy 2 of
+  a two-way mirror) on another disk, the old extent goes; the dirty region
+  log's copy moved the same way. The retired disk's database copy stops at
+  that update. The databases in the metadata space drop the disk from
+  their lists by moving the last entry into its place. `Repair-VirtualDisk`
+  afterwards only rewrites the disk's record without the copy flag, and
+  writes that database and a header without the copy (generation 2) to the
+  retired disk. `Optimize-StoragePool` after adding a disk moved one copy
+  to it the same way. Windows' intermediate updates are not visible
+  (`c9disk`: five updates for the optimisation, five for the retirement);
+  Linux moves a copy by adding it with flag 0x01 (being regenerated),
+  copying the data, then recording it as current and freeing the old one.
+* `Remove-PhysicalDisk` of that disk (**verified** byte for byte by the
+  test `a_removed_disk_is_predicted_byte_for_byte`): one update rewrites
+  the disk's record; the next writes the metadata space with one copy
+  fewer, its extents renumbered over the remaining disks, and the pool
+  record, and frees the old records and the disk's. Only these two updates
+  match Windows' slots. The removed disk keeps its header and database
+  behind a partition table without the pool partition. Removing a disk
+  that still holds data failed with "not enough available capacity" on a
+  pool with plenty (`c9drain`); Windows moves data off retired disks.
 * `Remove-StoragePool` (its spaces removed first) rewrites the partition
   table without the pool partition, keeping the Microsoft reserved
   partition; the SPACEDB header and the database stay behind it
