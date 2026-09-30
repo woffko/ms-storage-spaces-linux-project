@@ -1,7 +1,7 @@
 //! Creating pools and spaces from fuzzed parameters: whatever the planners
 //! accept must, once applied to blank disks, open as a clean pool that the
 //! management checks accept, with every new space readable and writable
-//! at both ends.
+//! at both ends (a thin space's end only while the pool has free slabs).
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -76,7 +76,12 @@ fuzz_target!(|data: &[u8]| {
         assert!(size >= spec.size, "{size} < {}", spec.size);
         let block = [0xa5u8; 4096];
         for at in [0, size - 4096] {
-            w.write_all_at(&block, at).unwrap();
+            match w.write_all_at(&block, at) {
+                Ok(()) => {}
+                // A row of a thin space not allocated yet needs free slabs.
+                Err(e) if spec.thin && e.to_string().contains("the pool is full") => continue,
+                Err(e) => panic!("writing at {at:#x}: {e}"),
+            }
             let mut back = [0u8; 4096];
             w.read_exact_at(&mut back, at).unwrap();
             assert_eq!(back, block);
