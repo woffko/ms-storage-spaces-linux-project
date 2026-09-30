@@ -486,22 +486,43 @@ rows of thin spaces not allocated yet (M7).
   media and usage, adding a disk and removing a retired one are predicted
   byte for byte from Windows' choices (tests `create.rs`, `manage.rs`,
   scenarios `c9*`). Retirement, repair and optimisation move copies; their
-  intermediate updates are not visible, and Linux moves a copy with a
-  regenerating extent first.
+  intermediate updates are not visible. Linux moves a copy by writing its
+  data into free slabs first and then recording the move in one update.
 * Management infrastructure (item 2): `storage_spaces::plan` (steps made
   durable one after the other, printed before anything is written),
-  `storage_spaces::ops` (checks, defaults, slab placement; create pool,
-  create, delete, rename and resize spaces, rename the pool, disk
-  settings, add, retire and remove disks, remove the pool), `spaces pool
-  create` and `spaces space create` (write only with `--yes`, disks not
-  blank only with `--wipe`). Tests: every kind of space on a new pool;
-  crash replays of creating spaces and of retiring a disk (data readable
-  at every flush point); a disk added, retired and removed.
-* First Windows round trip of a pool created on Linux (`c9lnx`: three
-  disks, a simple, a mirror, a parity and a thin space filled with the
-  pattern from Linux): healthy, nothing to repair, every pattern read back
-  by Windows, the extents Windows lists equal to the database written on
-  Linux (evidence `mgmt-linux-pool.json`).
+  `storage_spaces::ops` (checks, defaults, slab placement), and the
+  commands `spaces pool create|rename|repair|optimize|scrub|remove`,
+  `spaces space create|delete|rename|resize` and `spaces disk
+  add|set|retire|remove` (write only with `--yes`, disks not blank only
+  with `--wipe`, members opened exclusively).
+* M9 (pool and disk operations): pool create, rename and remove; disk add,
+  media and usage settings, retire (data moved off), remove (also of a
+  missing disk after a repair).
+* M10.1-2 (space operations): create every kind of space Windows creates
+  on a pool of that size, delete, rename, resize.
+* M11.1-3 (maintenance): repair rebuilds copies on missing or out-of-date
+  disks (mirror copies copied, single parity columns rebuilt by XOR);
+  optimize spreads the extents over the disks; scrub compares mirror
+  copies and single parity stripes, telling mismatches apart from
+  differences where writes were under way (extent runs the dirty region
+  log lists, stripes the parity journal does not list as consistent) and
+  makes them agree on request.
+* Crash replays (`ops.rs`): creating a space, retiring a disk and
+  repairing, cut at every step, leave a pool whose data reads back.
+* Windows round trips (`roundtrip.rs`, evidence `mgmt-*.json`):
+  * `c9lnx`, created on Linux: healthy, nothing to repair, every pattern
+    read back, the extents Windows lists equal to the database written on
+    Linux;
+  * `lifecycle`, every operation on one pool: healthy, Repair and
+    Optimize complete, patterns read back after both;
+  * corpus pools `parity3_26100` and `mirror2_26100` changed on Linux (disk
+    added, space created and grown, first disk retired and removed):
+    healthy, Optimize completes, patterns read back;
+  * pools cut after a step of creating a space and of adding a disk:
+    healthy after Repair, patterns read back. Cutting a disk addition
+    after its first database update, before the new disk had its copy of
+    the metadata space, left that disk lost on Windows; the copy is now
+    written first.
 
 ## Test infrastructure (continuous, feeds every stage)
 

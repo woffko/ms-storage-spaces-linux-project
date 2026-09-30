@@ -1,0 +1,715 @@
+{
+ "note": "Windows round trips (tools/put-roundtrip.sh) of pools tools/mgmt-crash.sh left cut after a step of a management operation, as a power loss would; base: three disks, a two-way mirror (cmirror, 1 GiB) and a parity space (cparity, 2 GiB) filled with the pattern",
+ "windows_build": "10.0.26100.0",
+ "states": {
+  "create1": {
+   "what": "space create cut after step 1 of 4: the databases in the metadata space and the new space's first sector written, no pool database copy yet",
+   "attached": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Healthy",
+      "OK"
+     ],
+     [
+      "cparity",
+      "Healthy",
+      "OK"
+     ]
+    ],
+    "disks": [
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "connected": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Healthy",
+      "OK"
+     ],
+     [
+      "cparity",
+      "Healthy",
+      "OK"
+     ]
+    ],
+    "disks": [
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "repaired": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Healthy",
+      "OK"
+     ],
+     [
+      "cparity",
+      "Healthy",
+      "OK"
+     ]
+    ],
+    "disks": [
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "checks": [
+    [
+     "cmirror",
+     "pattern",
+     true
+    ],
+    [
+     "cparity",
+     "pattern",
+     true
+    ]
+   ]
+  },
+  "create2": {
+   "what": "space create cut after step 2 of 4: one of three pool database copies records the new space",
+   "attached": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Healthy",
+      "OK"
+     ],
+     [
+      "cparity",
+      "Healthy",
+      "OK"
+     ],
+     [
+      "cnew",
+      "Healthy",
+      "OK"
+     ]
+    ],
+    "disks": [
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "connected": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Healthy",
+      "OK"
+     ],
+     [
+      "cparity",
+      "Healthy",
+      "OK"
+     ],
+     [
+      "cnew",
+      "Healthy",
+      "OK"
+     ]
+    ],
+    "disks": [
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "repaired": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Healthy",
+      "OK"
+     ],
+     [
+      "cparity",
+      "Healthy",
+      "OK"
+     ],
+     [
+      "cnew",
+      "Healthy",
+      "OK"
+     ]
+    ],
+    "disks": [
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "checks": [
+    [
+     "cmirror",
+     "pattern",
+     true
+    ],
+    [
+     "cparity",
+     "pattern",
+     true
+    ]
+   ]
+  },
+  "adddisk": {
+   "what": "disk add cut after step 2 of 9: the new disk's partition table, header and metadata space copy written, the first update on one copy",
+   "attached": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Healthy",
+      "OK"
+     ],
+     [
+      "cparity",
+      "Healthy",
+      "OK"
+     ]
+    ],
+    "disks": [
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "connected": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Healthy",
+      "OK"
+     ],
+     [
+      "cparity",
+      "Healthy",
+      "OK"
+     ]
+    ],
+    "disks": [
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "repaired": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Healthy",
+      "OK"
+     ],
+     [
+      "cparity",
+      "Healthy",
+      "OK"
+     ]
+    ],
+    "disks": [
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "checks": [
+    [
+     "cmirror",
+     "pattern",
+     true
+    ],
+    [
+     "cparity",
+     "pattern",
+     true
+    ]
+   ]
+  },
+  "retire": {
+   "what": "disk retire on four disks cut after step 10 of 29: disk retired on every copy, a hidden slab moved, the mirror's slab copied to the new disk and its move recorded on one of three copies",
+   "attached": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Healthy",
+      "OK"
+     ],
+     [
+      "cparity",
+      "Healthy",
+      "OK"
+     ]
+    ],
+    "disks": [
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "connected": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Healthy",
+      "OK"
+     ],
+     [
+      "cparity",
+      "Healthy",
+      "OK"
+     ]
+    ],
+    "disks": [
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "repaired": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Healthy",
+      "OK"
+     ],
+     [
+      "cparity",
+      "Healthy",
+      "OK"
+     ]
+    ],
+    "disks": [
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "checks": [
+    [
+     "cmirror",
+     "pattern",
+     true
+    ],
+    [
+     "cparity",
+     "pattern",
+     true
+    ]
+   ]
+  }
+ },
+ "before_fix": {
+  "adddisk": {
+   "what": "the first version of disk add, cut after the first update on one copy, before the new disk had its metadata space copy",
+   "attached": {
+    "pool": [
+     "Unknown",
+     "Read-only"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Unhealthy",
+      "Detached"
+     ],
+     [
+      "cparity",
+      "Unhealthy",
+      "Detached"
+     ]
+    ],
+    "disks": [
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Warning",
+      "Lost Communication"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "connected": {
+    "pool": [
+     "Warning",
+     "Degraded"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Warning",
+      "Degraded Incomplete"
+     ],
+     [
+      "cparity",
+      "Warning",
+      "Degraded Incomplete"
+     ]
+    ],
+    "disks": [
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Warning",
+      "Lost Communication"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "repaired": {
+    "pool": [
+     "Warning",
+     "Degraded"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Warning",
+      "Degraded Incomplete"
+     ],
+     [
+      "cparity",
+      "Warning",
+      "Degraded Incomplete"
+     ]
+    ],
+    "disks": [
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Warning",
+      "Lost Communication"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "checks": [
+    [
+     "cmirror",
+     "pattern",
+     true
+    ],
+    [
+     "cparity",
+     "pattern",
+     true
+    ]
+   ]
+  },
+  "retire": {
+   "what": "the first version of disk retire, cut after a regenerating copy was recorded on every copy, before its data was copied",
+   "attached": {
+    "pool": [
+     "Unknown",
+     "Read-only"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Unhealthy",
+      "Detached"
+     ],
+     [
+      "cparity",
+      "Unhealthy",
+      "Detached"
+     ]
+    ],
+    "disks": [
+     [
+      "Warning",
+      "Lost Communication"
+     ],
+     [
+      "Warning",
+      "Lost Communication"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "connected": {
+    "pool": [
+     "Unhealthy",
+     "Read-only"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Unhealthy",
+      "Detached"
+     ],
+     [
+      "cparity",
+      "Unhealthy",
+      "Detached"
+     ]
+    ],
+    "disks": [
+     [
+      "Warning",
+      "Lost Communication"
+     ],
+     [
+      "Warning",
+      "Lost Communication"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "repaired": {
+    "pool": [
+     "Unhealthy",
+     "Read-only"
+    ],
+    "spaces": [
+     [
+      "cmirror",
+      "Unhealthy",
+      "Detached"
+     ],
+     [
+      "cparity",
+      "Unhealthy",
+      "Detached"
+     ]
+    ],
+    "disks": [
+     [
+      "Warning",
+      "Lost Communication"
+     ],
+     [
+      "Warning",
+      "Lost Communication"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ],
+     [
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "checks": [],
+   "error": "Exception calling \"Verify\" with \"3\" argument(s): \"Could not find file '\\\\.\\PhysicalDrive'.\""
+  }
+ }
+}

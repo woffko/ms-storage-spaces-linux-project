@@ -460,3 +460,51 @@ fn windows_takes_its_pools_changed_on_linux() {
         assert!(checks.iter().all(|c| c[2] == true), "{name}");
     }
 }
+
+/// Pools left cut after a step of a management operation, as a power loss
+/// would leave them (tools/mgmt-crash.sh): Windows 11 attached every one as
+/// healthy with every disk, repaired it, and read both spaces' patterns
+/// back. A disk addition cut before the new disk had its copy of the
+/// metadata space, and a retirement cut after recording a copy as being
+/// regenerated, had left disks lost and the pool read-only; both
+/// operations were changed to write data before recording it.
+#[test]
+fn windows_takes_pools_cut_during_management() {
+    let e = evidence("mgmt-crash.json");
+    let states = e["states"].as_object().unwrap();
+    assert_eq!(states.len(), 4);
+    for (name, s) in states {
+        for key in ["attached", "connected", "repaired"] {
+            let at = &s[key];
+            assert_eq!(at["pool"], serde_json::json!(["Healthy", "OK"]), "{name} {key}");
+            for space in at["spaces"].as_array().unwrap() {
+                assert_eq!(
+                    (&space[1], &space[2]),
+                    (&"Healthy".into(), &"OK".into()),
+                    "{name} {key}"
+                );
+            }
+            let disks = at["disks"].as_array().unwrap();
+            assert!(disks.len() >= 3);
+            assert!(
+                disks.iter().all(|d| d == &serde_json::json!(["Healthy", "OK"])),
+                "{name} {key}"
+            );
+        }
+        let checks = s["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 2, "{name}");
+        assert!(checks.iter().all(|c| c[2] == true), "{name}");
+    }
+    for (name, s) in e["before_fix"].as_object().unwrap() {
+        let repaired = &s["repaired"];
+        assert_ne!(repaired["pool"][0], "Healthy", "{name}");
+        assert!(
+            repaired["disks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d[1] == "Lost Communication"),
+            "{name}"
+        );
+    }
+}

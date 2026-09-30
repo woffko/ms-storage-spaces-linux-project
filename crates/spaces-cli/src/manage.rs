@@ -51,6 +51,17 @@ pub enum PoolCommand {
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
+    /// Read every copy of the mirror spaces and every stripe of the single
+    /// parity spaces and report what disagrees (read only); `--repair`
+    /// makes it agree, keeping the first mirror copy and the parity data.
+    Scrub {
+        #[arg(long)]
+        repair: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+    },
     /// Spread the extents evenly over the disks (after adding a disk), as
     /// Optimize-StoragePool does.
     Optimize {
@@ -344,6 +355,33 @@ pub fn pool(command: PoolCommand) -> Result<()> {
         PoolCommand::Remove { yes, devices } => on_pool(&devices, yes, ops::plan_remove_pool),
         PoolCommand::Repair { yes, devices } => on_pool(&devices, yes, ops::plan_repair),
         PoolCommand::Optimize { yes, devices } => on_pool(&devices, yes, ops::plan_rebalance),
+        PoolCommand::Scrub { repair, yes, devices } => {
+            if repair {
+                return on_pool(&devices, yes, |p| {
+                    let scrub = ops::scrub(p)?;
+                    scrub.lines.iter().for_each(|l| println!("{l}"));
+                    Ok(scrub.plan)
+                });
+            }
+            let files = devices
+                .iter()
+                .map(|p| File::open(p).with_context(|| p.display().to_string()))
+                .collect::<Result<Vec<_>>>()?;
+            let scrub = ops::scrub(&Pool::open(files)?)?;
+            scrub.lines.iter().for_each(|l| println!("{l}"));
+            if scrub.mismatches > 0 {
+                bail!(
+                    "scrubbing found {} mismatches; --repair makes them agree",
+                    scrub.mismatches
+                );
+            }
+            if scrub.unsettled > 0 {
+                println!("scrub: differences only where writes were under way (Windows settles them)");
+            } else {
+                println!("scrub: no differences");
+            }
+            Ok(())
+        }
         PoolCommand::Create {
             name,
             logical_sector,

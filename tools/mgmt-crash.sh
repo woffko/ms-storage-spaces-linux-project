@@ -7,9 +7,9 @@
 #             metadata space written, the pool database not yet)
 #   create2   space create cut after the first copy of the pool database
 #   adddisk   disk add cut after the new disk's first update on one copy
-#   retire    a fourth disk added, then disk retire cut after the first
-#             regenerating copy was recorded on every copy, before its data
-#             was copied
+#   retire    a fourth disk added, then disk retire cut in the middle of
+#             moving a mirror slab: its data copied to the new disk, the
+#             move recorded on one of the three pool database copies
 # Usage: tools/mgmt-crash.sh DIR
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -53,15 +53,16 @@ state() {
 state create1 1 space create --name cnew --resiliency simple --size 1G
 state create2 2 space create --name cnew --resiliency simple --size 1G
 state adddisk 2 disk add
-# Retire: on four disks (the parity space's rows use three), the disk
-# retired on its four copies, then the first new copy on the three others.
+# Retire: on four disks (the parity space's rows use three). Steps 1-4 mark
+# the disk retired, 5-8 move a hidden slab, 9 copies the mirror's slab and
+# 10 records the move on the first database copy.
 mkdir -p "$dir/retire"
 for i in 0 1 2; do cp --sparse=always "$dir/base/disk$i.img" "$dir/retire/disk$i.img"; done
 truncate -s 8G "$dir/retire/disk3.img"
 "$spaces" disk add --new "$dir/retire/disk3.img" --yes "$dir"/retire/disk{0,1,2}.img | tail -1
 four=("$dir"/retire/disk{0,1,2,3}.img)
 retired=$("$spaces" info "${four[@]}" | awk '/device 0$/ {print $1}')
-SPACES_STOP_AFTER_STEP=7 "$spaces" disk retire --disk "$retired" --yes "${four[@]}" | grep -E "^stopped|^step [1-8]:"
+SPACES_STOP_AFTER_STEP=10 "$spaces" disk retire --disk "$retired" --yes "${four[@]}" | grep -E "^stopped|^step (9|10):" || true
 manifest "$dir/retire"
 for s in cmirror cparity; do "$spaces" check-pattern "${four[@]}" --space "$s" --tag "$s" | tail -1; done
 echo "crash states: $dir/{create1,create2,adddisk,retire}"

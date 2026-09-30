@@ -281,6 +281,16 @@ impl Layout {
         self.base + self.run_first_row(row) * SLAB_SIZE * self.data_columns
     }
 
+    /// The copy numbers of a column (a moved copy may be numbered beyond the
+    /// policy's copies).
+    pub fn copies_of(&self, column: u64) -> Vec<u64> {
+        self.runs
+            .keys()
+            .filter(|(c, _)| *c == column)
+            .map(|(_, copy)| *copy)
+            .collect()
+    }
+
     /// Physical slab backing a row of a column copy, if allocated.
     pub fn physical(&self, column: u64, copy: u64, row: u64) -> Option<(u64, u64)> {
         let runs = self.runs.get(&(column, copy))?;

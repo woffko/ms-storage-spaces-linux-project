@@ -434,3 +434,88 @@ fn an_added_disk_is_filled_by_optimizing() {
     assert!(after[3] - after[0] <= 4, "{before:?} -> {after:?}");
     assert!(plan_rebalance(&pool).unwrap().steps.is_empty());
 }
+
+/// Scrubbing finds differences between mirror copies and parity units
+/// that do not match: where nothing was being written they are mismatches;
+/// in a mirror's extent runs written since Windows last had the pool (its
+/// dirty region table lists them) and in parity stripes the journal does
+/// not list as consistent (never written) they are unsettled. The repair
+/// makes both agree and the data reads back as before.
+#[test]
+fn scrubbing_finds_differences_and_makes_them_agree() {
+    use storage_spaces::layout::Location;
+    use storage_spaces::ops::scrub;
+    let mut new_guid = guids();
+    let (images, disks) = blank(3);
+    let base: Vec<Overlay<&SparseImage>> = images.iter().map(Overlay::new).collect();
+    let members = || base.iter().collect::<Vec<_>>();
+    let (plan, _) = plan_create_pool(&disks, "scrub", None, &mut new_guid).unwrap();
+    plan.apply::<&Overlay<&SparseImage>, _>(&[], &members()).unwrap();
+    let spaces = [("m", 2u8), ("p", 3)];
+    for (name, tag) in spaces.iter().copied().chain([("quiet", 2)]) {
+        let pool = Pool::open(members()).unwrap();
+        let (plan, _) = plan_create_space(&pool, &spec(name, tag, 1024, false), &mut new_guid).unwrap();
+        plan.apply::<_, &Overlay<&SparseImage>>(&members(), &[]).unwrap();
+        drop(pool);
+        if name == "quiet" {
+            continue;
+        }
+        let pool = Pool::open(members()).unwrap();
+        let w = pool.open_space_rw(pool.find_space(name).unwrap().id()).unwrap();
+        // Parity stripes 2-17 of the first row (256 KiB units, 2 data columns).
+        w.write_all_at(&data(tag, 8 << 20), 1 << 20).unwrap();
+        w.destage().unwrap();
+        w.flush().unwrap();
+    }
+    let pool = Pool::open(members()).unwrap();
+    let clean = scrub(&pool).unwrap();
+    assert_eq!((clean.mismatches, clean.unsettled), (0, 0), "{:?}", clean.lines);
+    assert!(clean.plan.steps.is_empty());
+
+    let corrupt = |disk: u64, slab: u64, offset: u64| {
+        let (device, at) = pool.slab_location(disk, slab).unwrap().unwrap();
+        base[device].write_all_at(&[0xa5; 4096], at + offset).unwrap();
+    };
+    let space = |name: &str| pool.open_space(pool.find_space(name).unwrap().id()).unwrap();
+    // The second copy of both mirrors, in rows 0 and 1: unsettled in the
+    // written one, mismatches in the other.
+    for name in ["m", "quiet"] {
+        let r = space(name);
+        let l = r.layout();
+        let second = l.copies_of(0)[1];
+        for (row, offset) in [(0, 3 << 20), (1, 5 << 20)] {
+            let (disk, slab) = l.physical(0, second, row).unwrap();
+            corrupt(disk, slab, offset);
+        }
+    }
+    // The parity unit of stripe 8 (written: a mismatch) and of a stripe of
+    // row 1 (never written: unsettled).
+    let r = space("p");
+    let l = r.layout();
+    for row in [0, 1] {
+        let loc = Location {
+            column: 0,
+            row,
+            offset_in_slab: 2 << 20,
+            contiguous: l.interleave,
+        };
+        let (disk, slab) = l.physical(l.parity_column(l.stripe_of(&loc)), 0, row).unwrap();
+        corrupt(disk, slab, 2 << 20);
+    }
+    drop(r);
+
+    let found = scrub(&pool).unwrap();
+    assert_eq!((found.mismatches, found.unsettled), (3, 3), "{:?}", found.lines);
+    assert_eq!(found.plan.steps.iter().map(|s| s.actions.len()).sum::<usize>(), 6);
+    drop(pool);
+    found.plan.apply::<_, &Overlay<&SparseImage>>(&members(), &[]).unwrap();
+    let pool = Pool::open(members()).unwrap();
+    let after = scrub(&pool).unwrap();
+    assert_eq!((after.mismatches, after.unsettled), (0, 0), "{:?}", after.lines);
+    check_pool(&pool).unwrap();
+    check_data(&pool, &spaces);
+    let r = pool.open_space(pool.find_space("quiet").unwrap().id()).unwrap();
+    let mut row1 = vec![1u8; 1 << 20];
+    r.read_exact_at(&mut row1, (256 << 20) + (5 << 20)).unwrap();
+    assert!(row1.iter().all(|&b| b == 0));
+}
