@@ -112,6 +112,15 @@ fn a_removed_pool_leaves_the_reserved_partition() {
             new.read_exact_at(&mut windows, offset).unwrap();
             assert!(windows == bytes, "{offset:#x}");
         }
+        // Editing the table on the disk gives the same.
+        let edits = storage_spaces::gpt::remove_partitions(old, storage_spaces::gpt::STORAGE_SPACES_PARTITION_TYPE)
+            .unwrap()
+            .unwrap();
+        for (offset, bytes) in edits {
+            let mut windows = vec![0u8; bytes.len()];
+            new.read_exact_at(&mut windows, offset).unwrap();
+            assert!(windows == bytes, "edited {offset:#x}");
+        }
         // Behind it, unchanged: the header and the database.
         let mut a = vec![0u8; 0x2000];
         let mut b = vec![0u8; 0x2000];
@@ -262,6 +271,26 @@ fn an_added_disk_is_predicted_byte_for_byte() {
         assert_writes(&format!("disk {i}"), &new[i], Some(disk), &writes);
     }
     assert_writes("the new disk", added, None, &plan.new_disk);
+    // The plan's steps give the same.
+    let members: Vec<storage_spaces::io::Overlay<&SparseImage>> =
+        old.iter().map(storage_spaces::io::Overlay::new).collect();
+    let blank = SparseImage::new(added.size);
+    let fresh = [storage_spaces::io::Overlay::new(&blank)];
+    plan.plan.apply(&members, &fresh).unwrap();
+    for (i, m) in members.iter().enumerate() {
+        for (offset, len) in new[i].ranges() {
+            let (mut a, mut b) = (vec![0u8; len], vec![0u8; len]);
+            new[i].read_exact_at(&mut a, offset).unwrap();
+            m.read_exact_at(&mut b, offset).unwrap();
+            assert!(a == b, "disk {i} at {offset:#x}");
+        }
+    }
+    for (offset, len) in added.ranges() {
+        let (mut a, mut b) = (vec![0u8; len], vec![0u8; len]);
+        added.read_exact_at(&mut a, offset).unwrap();
+        fresh[0].read_exact_at(&mut b, offset).unwrap();
+        assert!(a == b, "the new disk at {offset:#x}");
+    }
 }
 
 /// Remove-PhysicalDisk of the retired, repaired disk (c9disk d4 -> d5): the

@@ -174,3 +174,104 @@ fn a_crash_while_creating_a_space_leaves_a_pool_that_opens() {
             .unwrap();
     }
 }
+
+fn data(tag: u8, len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i as u8).wrapping_mul(31) ^ tag).collect()
+}
+
+/// Every space of the pool reads back its data.
+fn check_data<D: storage_spaces::io::ReadAt>(pool: &Pool<D>, spaces: &[(&str, u8)]) {
+    for (name, tag) in spaces {
+        let space = pool.find_space(name).unwrap_or_else(|| panic!("{name} is gone"));
+        let r = pool.open_space(space.id()).unwrap();
+        let want = data(*tag, 8 << 20);
+        let mut got = vec![0u8; want.len()];
+        r.read_exact_at(&mut got, 1 << 20).unwrap();
+        assert!(got == want, "{name}");
+    }
+}
+
+/// A disk added, a disk retired (its data moved away) and removed: the
+/// data of every space stays readable throughout, also at every point a
+/// crash could stop the retirement, and the pool opens clean at the end
+/// with the three remaining disks.
+#[test]
+fn disks_are_added_retired_and_removed() {
+    use storage_spaces::ops::{plan_add_disk, plan_remove_disk, plan_retire_disk};
+    let mut new_guid = guids();
+    let (images, disks) = blank(4);
+    let base: Vec<Overlay<&SparseImage>> = images.iter().map(Overlay::new).collect();
+    let (plan, _) = plan_create_pool(&disks[..3], "lifecycle", None, &mut new_guid).unwrap();
+    plan.apply::<&Overlay<&SparseImage>, _>(&[], &base[..3].iter().collect::<Vec<_>>())
+        .unwrap();
+    let spaces = [("s", 1u8), ("m", 2), ("p", 3)];
+    for (name, tag) in spaces {
+        let pool = Pool::open(base[..3].iter().collect::<Vec<_>>()).unwrap();
+        let (plan, _) = plan_create_space(&pool, &spec(name, tag, 1024, false), &mut new_guid).unwrap();
+        plan.apply::<_, &Overlay<&SparseImage>>(&base[..3].iter().collect::<Vec<_>>(), &[])
+            .unwrap();
+        drop(pool);
+        let pool = Pool::open(base[..3].iter().collect::<Vec<_>>()).unwrap();
+        let w = pool.open_space_rw(pool.find_space(name).unwrap().id()).unwrap();
+        w.write_all_at(&data(tag, 8 << 20), 1 << 20).unwrap();
+        w.flush().unwrap();
+    }
+    // Add the fourth disk.
+    let pool = Pool::open(base[..3].iter().collect::<Vec<_>>()).unwrap();
+    let plan = plan_add_disk(&pool, &disks[3], &mut new_guid).unwrap();
+    drop(pool);
+    plan.apply(&base[..3].iter().collect::<Vec<_>>(), &[&base[3]]).unwrap();
+    let pool = Pool::open(base.iter().collect::<Vec<_>>()).unwrap();
+    assert!(pool.warnings.is_empty(), "{:?}", pool.warnings);
+    assert_eq!(pool.members.len(), 4);
+    check_pool(&pool).unwrap();
+    check_data(&pool, &spaces);
+    // Retire disk 1, recording every write, and replay the crash points.
+    let first = pool.disks.values().find(|d| d.member == Some(0)).unwrap().id;
+    let plan = plan_retire_disk(&pool, first).unwrap();
+    drop(pool);
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let scratch: Vec<Overlay<&Overlay<&SparseImage>>> = base.iter().map(Overlay::new).collect();
+    let recorders: Vec<Recorder<&Overlay<&Overlay<&SparseImage>>>> = scratch
+        .iter()
+        .enumerate()
+        .map(|(i, d)| Recorder::new(d, i, log.clone()))
+        .collect();
+    plan.apply::<_, &Recorder<&Overlay<&Overlay<&SparseImage>>>>(&recorders.iter().collect::<Vec<_>>(), &[])
+        .unwrap();
+    let events = log.lock().unwrap().clone();
+    for end in (0..=events.len()).filter(|&e| e == 0 || matches!(events[e - 1], DeviceEvent::Flush { .. })) {
+        let replay: Vec<Overlay<&Overlay<&SparseImage>>> = base.iter().map(Overlay::new).collect();
+        for e in &events[..end] {
+            if let DeviceEvent::Write { device, offset, data } = e {
+                replay[*device].write_all_at(data, *offset).unwrap();
+            }
+        }
+        let pool = Pool::open(replay.iter().collect::<Vec<_>>()).unwrap();
+        check_data(&pool, &spaces);
+    }
+    // Carry it out, then remove the disk.
+    plan.apply::<_, &Overlay<&SparseImage>>(&base.iter().collect::<Vec<_>>(), &[])
+        .unwrap();
+    let pool = Pool::open(base.iter().collect::<Vec<_>>()).unwrap();
+    assert!(pool.warnings.is_empty(), "{:?}", pool.warnings);
+    check_pool(&pool).unwrap();
+    check_data(&pool, &spaces);
+    assert!(
+        pool.spaces
+            .values()
+            .all(|s| s.info.role == storage_spaces::format::SpaceRole::Metadata
+                || s.extents.iter().all(|e| e.disk_id != first))
+    );
+    let plan = plan_remove_disk(&pool, first).unwrap();
+    drop(pool);
+    plan.apply::<_, &Overlay<&SparseImage>>(&base.iter().collect::<Vec<_>>(), &[])
+        .unwrap();
+    let pool = Pool::open(base[1..].iter().collect::<Vec<_>>()).unwrap();
+    assert!(pool.warnings.is_empty(), "{:?}", pool.warnings);
+    assert_eq!(pool.members.len(), 3);
+    check_pool(&pool).unwrap();
+    check_data(&pool, &spaces);
+    // The removed disk is no member any more.
+    assert!(Pool::open(vec![&base[0]]).is_err());
+}

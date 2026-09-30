@@ -373,3 +373,29 @@ fn windows_reads_a_thin_mirror_after_linux_gave_rows_back() {
     assert_eq!(e["extents_windows"], e["extents_linux"]);
     assert_eq!(e["extents_windows"].as_array().unwrap().len(), 50);
 }
+
+/// A pool created on Linux (three blank disks; a simple, a mirror, a parity
+/// and a thin space, each filled with the pattern from Linux): Windows 11
+/// attached it as healthy with every space healthy and nothing to repair,
+/// read every pattern back, loaded the parity space's cache and journal,
+/// and listed the same extents as the database Linux wrote.
+#[test]
+fn windows_takes_a_pool_created_on_linux() {
+    let e = evidence("mgmt-linux-pool.json");
+    assert_eq!(e["pool_health"], serde_json::json!(["Healthy", "OK"]));
+    for s in e["attached"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(e["repaired"].as_array().unwrap())
+    {
+        assert_eq!((s[1].as_str(), s[2].as_str()), (Some("Healthy"), Some("OK")), "{s}");
+    }
+    assert_eq!(e["attached"].as_array().unwrap().len(), 4);
+    assert_eq!(e["attached_jobs"].as_array().unwrap().len(), 0);
+    assert!(e["checks"].as_array().unwrap().iter().all(|c| c[2] == true));
+    assert_eq!(e["checks"].as_array().unwrap().len(), 4);
+    for (name, x) in e["extents"].as_object().unwrap() {
+        assert_eq!(x["windows"], x["linux"], "{name}");
+    }
+}

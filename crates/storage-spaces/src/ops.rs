@@ -499,3 +499,508 @@ pub fn plan_create_space<D: ReadAt>(pool: &Pool<D>, spec: &SpaceSpec, guids: Gui
     database_steps(&mut plan, database);
     Ok((plan, new))
 }
+
+/// A plan that writes `db` (one update of the pool's database) to every
+/// member carrying a copy, one after the other.
+fn database_plan<D: ReadAt>(pool: &Pool<D>, summary: String, db: &Database) -> Plan {
+    let mut plan = Plan {
+        summary: vec![summary],
+        steps: Vec::new(),
+    };
+    let writes = pool
+        .members
+        .iter()
+        .filter(|m| m.header.database_copy)
+        .map(|m| (m.device, m.partition.offset + POOL_DB_OFFSET, db.bytes().to_vec()))
+        .collect();
+    database_steps(&mut plan, writes);
+    plan
+}
+
+fn space_id<D: ReadAt>(pool: &Pool<D>, name: &str) -> Result<u64> {
+    pool.user_spaces()
+        .find(|s| s.name() == name || s.id().to_string() == name || s.info.guid.to_string() == name)
+        .map(|s| s.id())
+        .ok_or_else(|| Error::Pool(format!("no space \"{name}\"")))
+}
+
+/// `spaces pool rename`.
+pub fn plan_rename_pool<D: ReadAt>(pool: &Pool<D>, name: &str) -> Result<Plan> {
+    let db = check_pool(pool)?;
+    if name.is_empty() {
+        return Err(Error::Pool("the name must not be empty".into()));
+    }
+    let next = crate::manage::rename_pool(&db, name, filetime_now())?;
+    Ok(database_plan(
+        pool,
+        format!("rename pool \"{}\" to \"{name}\"", pool.name),
+        &next,
+    ))
+}
+
+/// `spaces space rename`.
+pub fn plan_rename_space<D: ReadAt>(pool: &Pool<D>, space: &str, name: &str) -> Result<Plan> {
+    let db = check_pool(pool)?;
+    let id = space_id(pool, space)?;
+    if name.is_empty() || pool.find_space(name).is_some() {
+        return Err(Error::Pool(format!(
+            "a space named \"{name}\" exists or the name is empty"
+        )));
+    }
+    let next = crate::manage::rename_space(&db, id, name, filetime_now())?;
+    Ok(database_plan(
+        pool,
+        format!("rename space \"{space}\" to \"{name}\""),
+        &next,
+    ))
+}
+
+/// `spaces space delete`: its data is lost.
+pub fn plan_delete_space<D: ReadAt>(pool: &Pool<D>, space: &str) -> Result<Plan> {
+    let db = check_pool(pool)?;
+    let id = space_id(pool, space)?;
+    let next = crate::manage::delete_space(&db, id, filetime_now())?;
+    Ok(database_plan(
+        pool,
+        format!("delete space \"{space}\" and everything on it"),
+        &next,
+    ))
+}
+
+/// `spaces disk set`: media type (0 unspecified, 1 HDD, 2 SSD) and usage
+/// (1 Auto-Select, 2 Manual-Select, 3 Hot Spare).
+pub fn plan_set_disk<D: ReadAt>(pool: &Pool<D>, disk_id: u64, media: Option<u8>, usage: Option<u8>) -> Result<Plan> {
+    let db = check_pool(pool)?;
+    if !pool.disks.contains_key(&disk_id) {
+        return Err(Error::Pool(format!("no disk with id {disk_id}")));
+    }
+    if media.is_some_and(|m| m > 2) || usage.is_some_and(|u| !(1..=3).contains(&u)) {
+        return Err(Error::Pool(
+            "media 0-2, usage 1-3 (retiring moves data: spaces disk retire)".into(),
+        ));
+    }
+    let next = crate::manage::set_disk(&db, disk_id, media, usage, filetime_now())?;
+    Ok(database_plan(
+        pool,
+        format!("set disk {disk_id}: media {media:?}, usage {usage:?}"),
+        &next,
+    ))
+}
+
+/// `spaces space resize` to a larger size: a fixed space gets the extents
+/// of its new rows, a thin space only the new size (rows are allocated as
+/// they are written).
+pub fn plan_resize_space<D: ReadAt>(pool: &Pool<D>, space: &str, size: u64) -> Result<Plan> {
+    let db = check_pool(pool)?;
+    let id = space_id(pool, space)?;
+    let s = &pool.spaces[&id];
+    let policy = s
+        .info
+        .policy
+        .ok_or_else(|| Error::Pool("the space has no placement policy".into()))?;
+    if pool.children(id).any(|c| c.info.is_child && !c.extents.is_empty()) {
+        return Err(Error::Pool("resizing tiered spaces is not supported".into()));
+    }
+    let data_columns = policy.columns
+        - if policy.resiliency == crate::format::Resiliency::Parity {
+            policy.redundancy
+        } else {
+            0
+        };
+    let unit = s.info.allocation_unit;
+    let group = unit * data_columns;
+    let old = s.info.size.unwrap_or(0);
+    let size = size.div_ceil(group) * group;
+    if size <= old {
+        return Err(Error::Pool(format!("the space is {old} bytes; it can only grow")));
+    }
+    let mut extents = Vec::new();
+    if s.info.provisioning == crate::format::Provisioning::Fixed {
+        let mut slabs = Slabs::of(&db)?;
+        let per_extent = unit / SLAB_SIZE;
+        for g in old / group..size / group {
+            let mut used = Vec::new();
+            for column in 0..policy.columns {
+                for copy in 0..policy.copies {
+                    let (disk, slab) = slabs
+                        .allocate(per_extent, &used)
+                        .ok_or_else(|| Error::Pool("the pool has no room for the space's new rows".into()))?;
+                    used.push(disk);
+                    extents.push(ExtentRecord {
+                        flags: 0,
+                        stale_marker: 0xffff_ffff,
+                        space_id: id,
+                        virtual_slab: g * per_extent * data_columns,
+                        column,
+                        copy,
+                        slab_count: per_extent,
+                        disk_id: disk,
+                        physical_slab: slab,
+                    });
+                }
+            }
+        }
+    }
+    let next = crate::manage::resize_space(&db, id, size, &extents, filetime_now())?;
+    Ok(database_plan(
+        pool,
+        format!("resize space \"{space}\" from {old} to {size} bytes"),
+        &next,
+    ))
+}
+
+/// `spaces pool remove`: a pool without spaces; each member keeps its
+/// header and database behind a partition table without the pool
+/// partition (as `Remove-StoragePool` leaves it).
+pub fn plan_remove_pool<D: ReadAt>(pool: &Pool<D>) -> Result<Plan> {
+    check_pool(pool)?;
+    if let Some(s) = pool.user_spaces().next() {
+        return Err(Error::Pool(format!(
+            "the pool still has spaces (\"{}\"); delete them first",
+            s.name()
+        )));
+    }
+    let mut plan = Plan {
+        summary: vec![format!("remove pool \"{}\" ({})", pool.name, pool.guid)],
+        steps: Vec::new(),
+    };
+    for m in &pool.members {
+        let writes = crate::gpt::remove_partitions(&pool.devices[m.device], crate::gpt::STORAGE_SPACES_PARTITION_TYPE)?
+            .ok_or_else(|| Error::Pool(format!("device {} has no GPT", m.device)))?;
+        plan.step(
+            format!("device {}: partition table without the pool partition", m.device),
+            writes
+                .into_iter()
+                .map(|(offset, bytes)| Action::Write {
+                    target: Target::Member(m.device),
+                    offset,
+                    bytes,
+                })
+                .collect(),
+        );
+    }
+    Ok(plan)
+}
+
+/// `spaces disk add` of a blank disk (to a pool of at most four disks).
+pub fn plan_add_disk<D: ReadAt>(pool: &Pool<D>, disk: &BlankDisk, guids: Guids) -> Result<Plan> {
+    let db = check_pool(pool)?;
+    if disk.logical_sector > pool.logical_sector_size as u64 {
+        return Err(Error::Pool(format!(
+            "a disk of {}-byte sectors does not fit a pool of {}-byte sectors",
+            disk.logical_sector, pool.logical_sector_size
+        )));
+    }
+    let now = filetime_now();
+    let new = NewDisk {
+        size: disk.size,
+        sector: disk.logical_sector,
+        guid: guids(),
+        gpt_disk_guid: guids(),
+        msr_guid: guids(),
+        partition_guid: guids(),
+        joined: now,
+        manufacturer: disk.manufacturer.clone(),
+        model: disk.model.clone(),
+        database_copy: true,
+    };
+    let id = next_ids(&db)?;
+    Ok(crate::manage::add_disk(pool, &db, &new, id, now, |_| now)?.plan)
+}
+
+/// `spaces disk remove` of a retired disk that holds nothing any more (see
+/// [`plan_retire_disk`]): two database updates, then its partition table
+/// without the pool partition.
+pub fn plan_remove_disk<D: ReadAt>(pool: &Pool<D>, disk_id: u64) -> Result<Plan> {
+    let db = check_pool(pool)?;
+    let disk = pool
+        .disks
+        .get(&disk_id)
+        .ok_or_else(|| Error::Pool(format!("no disk with id {disk_id}")))?;
+    let member = disk
+        .member
+        .map(|m| &pool.members[m])
+        .ok_or_else(|| Error::Pool(format!("disk {disk_id} is not at hand")))?;
+    if disk.usage != crate::format::DiskUsage::Retired || member.header.database_copy {
+        return Err(Error::Pool(format!(
+            "disk {disk_id} must be retired first (spaces disk retire)"
+        )));
+    }
+    let (first, second) = crate::manage::remove_disk_updates(&db, disk_id, filetime_now())?;
+    let mut plan = Plan {
+        summary: vec![format!(
+            "remove disk {disk_id} ({}) from pool \"{}\"",
+            disk.guid, pool.name
+        )],
+        steps: Vec::new(),
+    };
+    let copies: Vec<&crate::Member> = pool.members.iter().filter(|m| m.header.database_copy).collect();
+    for (what, db) in [("first", &first), ("second", &second)] {
+        for m in &copies {
+            plan.step(
+                format!("{what} update on device {}", m.device),
+                vec![Action::Write {
+                    target: Target::Member(m.device),
+                    offset: m.partition.offset + POOL_DB_OFFSET,
+                    bytes: db.bytes().to_vec(),
+                }],
+            );
+        }
+    }
+    let table = crate::gpt::remove_partitions(&pool.devices[member.device], crate::gpt::STORAGE_SPACES_PARTITION_TYPE)?
+        .ok_or_else(|| Error::Pool(format!("disk {disk_id} has no GPT")))?;
+    plan.step(
+        format!("device {}: partition table without the pool partition", member.device),
+        table
+            .into_iter()
+            .map(|(offset, bytes)| Action::Write {
+                target: Target::Member(member.device),
+                offset,
+                bytes,
+            })
+            .collect(),
+    );
+    Ok(plan)
+}
+
+/// `spaces disk retire`: marks the disk retired and moves everything on it
+/// to the other disks, as Windows' retirement and repair leave it: the
+/// disk's record retired; each extent on it copied to another disk that
+/// holds nothing else of its row (a new copy flagged as being regenerated,
+/// the slabs copied, then recorded as the old copy and the old extent
+/// freed: a crash in between leaves the old copy current); the databases
+/// of the metadata space no longer listing the disk (its last entry moved
+/// into its place); finally the disk's record without its database copy,
+/// and the disk a last copy of the database and a header without the copy.
+/// Pools of at most five disks (every disk carries the database).
+pub fn plan_retire_disk<D: ReadAt>(pool: &Pool<D>, disk_id: u64) -> Result<Plan> {
+    use crate::create::SPACE_DATABASE_STRIDE;
+    use crate::format::{DATA_AREA_OFFSET, DiskHeader, Record, SpaceRole};
+    let mut db = check_pool(pool)?;
+    if pool.members.len() > DATABASE_COPIES {
+        return Err(Error::Pool(
+            "retiring disks of pools of more than five disks is not supported yet".into(),
+        ));
+    }
+    let disk = pool
+        .disks
+        .get(&disk_id)
+        .ok_or_else(|| Error::Pool(format!("no disk with id {disk_id}")))?;
+    let member = disk
+        .member
+        .map(|m| pool.members[m].clone())
+        .ok_or_else(|| Error::Pool(format!("disk {disk_id} is not at hand")))?;
+    let now = filetime_now();
+    let mut plan = Plan {
+        summary: vec![format!(
+            "retire disk {disk_id} ({}) and move its data to the others",
+            disk.guid
+        )],
+        steps: Vec::new(),
+    };
+    let others: Vec<crate::Member> = pool
+        .members
+        .iter()
+        .filter(|m| m.header.database_copy && m.device != member.device)
+        .cloned()
+        .collect();
+    let write_db = |plan: &mut Plan, what: &str, db: &Database, with_retired: bool| {
+        let mut to: Vec<&crate::Member> = others.iter().collect();
+        if with_retired {
+            to.push(&member);
+        }
+        for m in to {
+            plan.step(
+                format!("{what} on device {}", m.device),
+                vec![Action::Write {
+                    target: Target::Member(m.device),
+                    offset: m.partition.offset + POOL_DB_OFFSET,
+                    bytes: db.bytes().to_vec(),
+                }],
+            );
+        }
+    };
+    // Retired (every copy, the disk's own last).
+    if disk.usage != crate::format::DiskUsage::Retired {
+        db = crate::manage::set_disk(&db, disk_id, None, Some(5), now)?;
+        write_db(&mut plan, "disk retired", &db, true);
+    }
+    // The moves.
+    let metadata_id = pool
+        .spaces
+        .values()
+        .find(|s| s.info.role == SpaceRole::Metadata)
+        .map(|s| s.id())
+        .ok_or_else(|| Error::Pool("no metadata space".into()))?;
+    let decoded = |db: &Database| -> Result<Vec<(u32, ExtentRecord)>> {
+        Ok(assemble_records(db.bytes(), 0x40)?
+            .iter()
+            .filter_map(|r| match Record::decode(r) {
+                Ok(Record::Extent(e)) => Some((r.id, e)),
+                _ => None,
+            })
+            .collect())
+    };
+    let moving: Vec<(u32, ExtentRecord)> = decoded(&db)?
+        .into_iter()
+        .filter(|(_, e)| e.disk_id == disk_id && e.space_id != metadata_id)
+        .collect();
+    let mut slabs = Slabs::of(&db)?;
+    for (old_id, e) in moving {
+        let extents = decoded(&db)?;
+        let row: Vec<&ExtentRecord> = extents
+            .iter()
+            .map(|(_, x)| x)
+            .filter(|x| x.space_id == e.space_id && x.virtual_slab == e.virtual_slab)
+            .collect();
+        let exclude: Vec<u64> = row.iter().map(|x| x.disk_id).chain([disk_id]).collect();
+        let (target, slab) = slabs
+            .allocate(e.slab_count, &exclude)
+            .ok_or_else(|| Error::Pool("the other disks have no room for the retired disk's data".into()))?;
+        let next_copy = row
+            .iter()
+            .filter(|x| x.column == e.column)
+            .map(|x| x.copy)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let regenerating = ExtentRecord {
+            copy: next_copy,
+            flags: e.flags | ExtentRecord::FLAG_REGENERATING,
+            disk_id: target,
+            physical_slab: slab,
+            ..e
+        };
+        let sequence = db.sequence() + 1;
+        let body = regenerating.encode(sequence);
+        let (mut next, ids) = db.updated(&[(4, 6, &body)], &[])?;
+        next.commit(sequence, now);
+        db = next;
+        write_db(
+            &mut plan,
+            &format!("new copy of space {} slab {}", e.space_id, e.virtual_slab),
+            &db,
+            false,
+        );
+        let from = pool
+            .slab_location(e.disk_id, e.physical_slab)?
+            .ok_or_else(|| Error::Pool(format!("disk {} is not at hand", e.disk_id)))?;
+        let to = pool
+            .slab_location(target, slab)?
+            .ok_or_else(|| Error::Pool(format!("disk {target} is not at hand")))?;
+        plan.step(
+            format!("copy {} slabs of space {} to disk {target}", e.slab_count, e.space_id),
+            vec![Action::Copy {
+                from: Target::Member(from.0),
+                from_offset: from.1,
+                to: Target::Member(to.0),
+                to_offset: to.1,
+                len: e.slab_count * SLAB_SIZE,
+            }],
+        );
+        let sequence = db.sequence() + 1;
+        let body = ExtentRecord {
+            copy: e.copy,
+            flags: e.flags,
+            disk_id: target,
+            physical_slab: slab,
+            ..e
+        }
+        .encode(sequence);
+        let (mut next, _) = db.updated(&[(4, 6, &body)], &[old_id, ids[0]])?;
+        next.commit(sequence, now);
+        db = next;
+        write_db(
+            &mut plan,
+            &format!("space {} slab {} moved", e.space_id, e.virtual_slab),
+            &db,
+            false,
+        );
+    }
+    // The databases of the metadata space: without the disk.
+    let meta = &pool.spaces[&metadata_id];
+    let holders: Vec<&ExtentRecord> = meta.extents.iter().filter(|x| x.disk_id != disk_id).collect();
+    let mut space_dbs = Vec::new();
+    for number in assemble_records(db.bytes(), 0x40)?
+        .iter()
+        .filter(|r| r.kind == 3)
+        .filter_map(|r| SpaceBody::decode(false, &r.body).ok())
+        .filter(|s| s.role != 1)
+        .map(|s| s.number)
+    {
+        let offset = number * SPACE_DATABASE_STRIDE;
+        let Some((device, at)) = holders
+            .iter()
+            .find_map(|x| pool.slab_location(x.disk_id, x.physical_slab).ok().flatten())
+        else {
+            continue;
+        };
+        let old = Database::read_formatted(&pool.devices[device], at + offset)?;
+        let Some(list) = assemble_records(old.bytes(), 0x40)?.into_iter().find(|r| r.kind == 7) else {
+            continue;
+        };
+        let mut c = crate::format::Cursor::new(&list.body);
+        c.varint()?;
+        c.varint()?;
+        let n = c.varint()? as usize;
+        let mut disks: Vec<Guid> = (0..n).map(|_| c.guid()).collect::<Result<_>>()?;
+        let Some(pos) = disks.iter().position(|g| *g == disk.guid) else {
+            continue;
+        };
+        disks.swap_remove(pos);
+        let mut body = crate::format::encode_varint(0);
+        body.extend(crate::format::encode_varint(old.sequence() + 1));
+        body.extend(crate::format::encode_varint(disks.len() as u64));
+        for g in &disks {
+            body.extend_from_slice(&g.0);
+        }
+        let (mut updated, _) = old.updated(&[(7, list.version, &body)], &[list.id])?;
+        updated.commit(old.sequence() + 1, now);
+        for x in &holders {
+            if let Some((device, at)) = pool.slab_location(x.disk_id, x.physical_slab)? {
+                space_dbs.push(Action::Write {
+                    target: Target::Member(device),
+                    offset: at + offset,
+                    bytes: updated.bytes().to_vec(),
+                });
+            }
+        }
+    }
+    plan.step("databases in the metadata space without the disk", space_dbs);
+    // Its copy of the pool database, last.
+    let sequence = db.sequence() + 1;
+    let (old, mut record) = assemble_records(db.bytes(), 0x40)?
+        .into_iter()
+        .filter(|r| r.kind == 2)
+        .find_map(|r| {
+            DiskBody::decode(&r.body)
+                .ok()
+                .filter(|d| d.id == disk_id)
+                .map(|d| (r, d))
+        })
+        .ok_or_else(|| Error::Pool(format!("no disk record {disk_id}")))?;
+    record.sequence = sequence;
+    record.database_copy = false;
+    let body = record.encode();
+    let (mut next, _) = db.updated(&[(old.kind, old.version, &body)], &[old.id])?;
+    next.commit(sequence, now);
+    write_db(&mut plan, "disk without its database copy", &next, false);
+    let header = DiskHeader {
+        generation: member.header.generation + 1,
+        database_copy: false,
+        ..member.header.clone()
+    };
+    let mut page = header.encode().to_vec();
+    page.resize(POOL_DB_OFFSET as usize, 0);
+    page.extend_from_slice(next.bytes());
+    plan.step(
+        format!("device {}: last database and header without the copy", member.device),
+        vec![Action::Write {
+            target: Target::Member(member.device),
+            offset: member.partition.offset,
+            bytes: page,
+        }],
+    );
+    let _ = DATA_AREA_OFFSET;
+    Ok(plan)
+}

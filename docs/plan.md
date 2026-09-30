@@ -476,6 +476,33 @@ rows of thin spaces not allocated yet (M7).
 * With the 24 h fuzzing clean, the state is v0.2.0-ready: Stage 2 (M6-M8)
   is complete.
 
+### Stage 3 progress (from 2026-09-30)
+
+* What Windows writes (Goal C, item 1): complete record models checked
+  byte for byte on every record of the corpus; `New-StoragePool` (1, 3, 4
+  and 8 disks, 4 KiB sectors, 4Kn), `New-VirtualDisk` (simple, mirror,
+  three-way mirror, parity with caches of one and two columns, thin simple,
+  mirror and parity, over deleted spaces), deletion, renaming, resizing,
+  media and usage, adding a disk and removing a retired one are predicted
+  byte for byte from Windows' choices (tests `create.rs`, `manage.rs`,
+  scenarios `c9*`). Retirement, repair and optimisation move copies; their
+  intermediate updates are not visible, and Linux moves a copy with a
+  regenerating extent first.
+* Management infrastructure (item 2): `storage_spaces::plan` (steps made
+  durable one after the other, printed before anything is written),
+  `storage_spaces::ops` (checks, defaults, slab placement; create pool,
+  create, delete, rename and resize spaces, rename the pool, disk
+  settings, add, retire and remove disks, remove the pool), `spaces pool
+  create` and `spaces space create` (write only with `--yes`, disks not
+  blank only with `--wipe`). Tests: every kind of space on a new pool;
+  crash replays of creating spaces and of retiring a disk (data readable
+  at every flush point); a disk added, retired and removed.
+* First Windows round trip of a pool created on Linux (`c9lnx`: three
+  disks, a simple, a mirror, a parity and a thin space filled with the
+  pattern from Linux): healthy, nothing to repair, every pattern read back
+  by Windows, the extents Windows lists equal to the database written on
+  Linux (evidence `mgmt-linux-pool.json`).
+
 ## Test infrastructure (continuous, feeds every stage)
 
 T1. **Windows 11 only.** All pools are created by Windows 11 test VMs: the

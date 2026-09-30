@@ -9,6 +9,7 @@ mod attach;
 mod dump;
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 mod fuse;
+mod manage;
 mod nbd;
 #[cfg(target_os = "linux")]
 mod scan;
@@ -269,6 +270,16 @@ enum Command {
     },
     /// Verify the test pattern written by tools/vm/New-TestPool.ps1.
     #[command(hide = true)]
+    /// Pool management: create a pool of blank disks.
+    Pool {
+        #[command(subcommand)]
+        command: manage::PoolCommand,
+    },
+    /// Space management: create spaces.
+    Space {
+        #[command(subcommand)]
+        command: manage::SpaceCommand,
+    },
     CheckPattern {
         #[arg(required = true)]
         devices: Vec<PathBuf>,
@@ -445,6 +456,8 @@ fn main() -> Result<()> {
             crash_after_writes,
             destage,
         } => write_pattern(&devices, &space, offset, length, &tag, crash_after_writes, destage),
+        Command::Pool { command } => manage::pool(command),
+        Command::Space { command } => manage::space(command),
         Command::CheckPattern {
             devices,
             space,

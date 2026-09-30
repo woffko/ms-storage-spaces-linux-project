@@ -379,3 +379,47 @@ impl PoolDiskTable {
         vec![(0, primary), (backup_entries * self.sector, backup)]
     }
 }
+
+/// The writes that take every partition of type `kind` out of the GPT of
+/// `dev` (both copies, checksums recomputed), keeping everything else: what
+/// `Remove-StoragePool` and `Remove-PhysicalDisk` do to a member's pool
+/// partition. `None` without a GPT.
+pub fn remove_partitions<D: ReadAt + ?Sized>(dev: &D, kind: &str) -> Result<Option<crate::create::DiskWrites>> {
+    let kind = Guid::parse(kind).ok_or_else(|| crate::error::format_err!("bad partition type {kind}"))?;
+    let Some(sector) = [512u64, 4096].into_iter().find(|&s| {
+        let mut sig = [0u8; 8];
+        dev.read_exact_at(&mut sig, s).is_ok() && &sig == b"EFI PART"
+    }) else {
+        return Ok(None);
+    };
+    let primary = read_vec(dev, sector, sector as usize)?;
+    let backup_lba = u64::from_le_bytes(primary[32..40].try_into().unwrap());
+    let count = u32::from_le_bytes(primary[80..84].try_into().unwrap()) as usize;
+    let entry_size = u32::from_le_bytes(primary[84..88].try_into().unwrap()) as usize;
+    if !(128..=4096).contains(&entry_size) || count > 4096 {
+        return Err(crate::error::format_err!("implausible GPT"));
+    }
+    let backup = read_vec(dev, backup_lba * sector, sector as usize)?;
+    if &backup[..8] != b"EFI PART" {
+        return Err(crate::error::format_err!("the backup GPT header is missing"));
+    }
+    let mut out = Vec::new();
+    for mut header in [primary, backup] {
+        let lba = u64::from_le_bytes(header[72..80].try_into().unwrap());
+        let mut entries = read_vec(dev, lba * sector, count * entry_size)?;
+        for e in entries.chunks_exact_mut(entry_size) {
+            if Guid::from_mixed_endian(e[..16].try_into().unwrap()) == kind {
+                e.fill(0);
+            }
+        }
+        header[88..92].copy_from_slice(&crate::crc::crc32(&entries).to_le_bytes());
+        let size = u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize;
+        header[16..20].fill(0);
+        let crc = crate::crc::crc32(&header[..size.min(header.len())]);
+        header[16..20].copy_from_slice(&crc.to_le_bytes());
+        let at = u64::from_le_bytes(header[24..32].try_into().unwrap());
+        out.push((lba * sector, entries));
+        out.push((at * sector, header));
+    }
+    Ok(Some(out))
+}
