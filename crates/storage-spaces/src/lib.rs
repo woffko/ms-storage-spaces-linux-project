@@ -28,6 +28,8 @@ pub mod io;
 pub mod journal;
 pub mod layout;
 pub mod manage;
+pub mod ops;
+pub mod plan;
 mod pool;
 mod reader;
 pub mod records;
