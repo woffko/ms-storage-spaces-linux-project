@@ -9,6 +9,8 @@ The script attaches the disks and writes roundtrip.json there:
   attached   pool, space and disk health as Windows first sees them
   connected  after clearing a read-only pool and connecting detached spaces
   repaired   after Repair-VirtualDisk of every space (not with -NoRepair)
+  optimized  after Optimize-StoragePool and its jobs (with -Optimize); the
+             extents and checks come after it
   extents    Get-PhysicalExtent of every space
   checks     the verification pattern of every pattern space, chkdsk and
              the file hashes of an NTFS space
@@ -29,6 +31,7 @@ param(
     [string] $Root = 'C:\sstest\roundtrip',
     [switch] $NoRepair,
     [int] $WaitSeconds = 0,
+    [switch] $Optimize,
     [int] $ProbeStrideKB = 0,
     [string] $Written = ''
 )
@@ -180,6 +183,15 @@ try {
             Repair-VirtualDisk -FriendlyName $vd.FriendlyName
         }
         $result.repaired = Get-State
+    }
+
+    if ($Optimize) {
+        Optimize-StoragePool -FriendlyName $poolName
+        do {
+            Start-Sleep -Seconds 5
+            $running = @(Get-StorageJob | Where-Object { $_.JobState -eq 'Running' -or $_.JobState -eq 'New' })
+        } while ($running.Count -gt 0)
+        $result.optimized = Get-State
     }
 
     $result.extents = [ordered]@{}

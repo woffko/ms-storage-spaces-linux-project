@@ -270,15 +270,20 @@ enum Command {
     },
     /// Verify the test pattern written by tools/vm/New-TestPool.ps1.
     #[command(hide = true)]
-    /// Pool management: create a pool of blank disks.
+    /// Pool management: create, rename and remove pools.
     Pool {
         #[command(subcommand)]
         command: manage::PoolCommand,
     },
-    /// Space management: create spaces.
+    /// Space management: create, delete, rename and grow spaces.
     Space {
         #[command(subcommand)]
         command: manage::SpaceCommand,
+    },
+    /// Disk management: add, set, retire and remove disks.
+    Disk {
+        #[command(subcommand)]
+        command: manage::DiskCommand,
     },
     CheckPattern {
         #[arg(required = true)]
@@ -458,6 +463,7 @@ fn main() -> Result<()> {
         } => write_pattern(&devices, &space, offset, length, &tag, crash_after_writes, destage),
         Command::Pool { command } => manage::pool(command),
         Command::Space { command } => manage::space(command),
+        Command::Disk { command } => manage::disk(command),
         Command::CheckPattern {
             devices,
             space,

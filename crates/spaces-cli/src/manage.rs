@@ -33,6 +33,72 @@ pub enum PoolCommand {
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
+    /// Rename the pool (its partitions keep the old name, as on Windows).
+    Rename {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        yes: bool,
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+    },
+    /// Remove a pool without spaces: the pool partition leaves every
+    /// member's partition table.
+    Remove {
+        #[arg(long)]
+        yes: bool,
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DiskCommand {
+    /// Add a blank disk (`--new`) to the pool of the other devices.
+    Add {
+        /// The blank disk.
+        #[arg(long)]
+        new: PathBuf,
+        #[arg(long)]
+        wipe: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+    },
+    /// Set a disk's media type (unspecified, hdd, ssd) or usage
+    /// (auto-select, manual-select, hot-spare).
+    Set {
+        /// The disk's id (spaces info).
+        #[arg(long)]
+        disk: u64,
+        #[arg(long)]
+        media: Option<String>,
+        #[arg(long)]
+        usage: Option<String>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+    },
+    /// Retire a disk: move everything on it to the other disks.
+    Retire {
+        #[arg(long)]
+        disk: u64,
+        #[arg(long)]
+        yes: bool,
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+    },
+    /// Remove a retired disk from the pool.
+    Remove {
+        #[arg(long)]
+        disk: u64,
+        #[arg(long)]
+        yes: bool,
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -61,6 +127,37 @@ pub enum SpaceCommand {
         /// Parity: size of the write-back cache (default 1G, at least 512M).
         #[arg(long, value_parser = parse_size)]
         write_cache: Option<u64>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+    },
+    /// Delete a space and everything on it.
+    Delete {
+        #[arg(long)]
+        space: String,
+        #[arg(long)]
+        yes: bool,
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+    },
+    /// Rename a space.
+    Rename {
+        #[arg(long)]
+        space: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        yes: bool,
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+    },
+    /// Grow a space (the file system inside is not grown).
+    Resize {
+        #[arg(long)]
+        space: String,
+        #[arg(long, value_parser = parse_size)]
+        size: u64,
         #[arg(long)]
         yes: bool,
         #[arg(required = true)]
@@ -190,8 +287,31 @@ fn run<M: storage_spaces::io::WriteAt, N: storage_spaces::io::WriteAt>(
     Ok(true)
 }
 
+/// Plans with the pool of `devices`, then carries the plan out on them
+/// (reopened after the pool's own handles are closed).
+fn on_pool(
+    devices: &[PathBuf],
+    yes: bool,
+    make: impl FnOnce(&Pool<File>) -> storage_spaces::Result<Plan>,
+) -> Result<()> {
+    let pool = Pool::open(open_rw(devices)?)?;
+    let plan = make(&pool)?;
+    drop(pool);
+    let members = open_rw(devices)?;
+    if run::<File, File>(&plan, yes, &members, &[])? {
+        drop(members);
+        let pool = Pool::open(open_rw(devices)?)?;
+        for w in &pool.warnings {
+            eprintln!("warning: {w}");
+        }
+    }
+    Ok(())
+}
+
 pub fn pool(command: PoolCommand) -> Result<()> {
     match command {
+        PoolCommand::Rename { name, yes, devices } => on_pool(&devices, yes, |p| ops::plan_rename_pool(p, &name)),
+        PoolCommand::Remove { yes, devices } => on_pool(&devices, yes, ops::plan_remove_pool),
         PoolCommand::Create {
             name,
             logical_sector,
@@ -260,8 +380,100 @@ pub fn pool(command: PoolCommand) -> Result<()> {
     }
 }
 
+pub fn disk(command: DiskCommand) -> Result<()> {
+    match command {
+        DiskCommand::Add {
+            new,
+            wipe,
+            yes,
+            devices,
+        } => {
+            let pool = Pool::open(open_rw(&devices)?)?;
+            let file = open_rw(std::slice::from_ref(&new))?.remove(0);
+            if !is_blank(&file)? && !wipe {
+                bail!("{} is not blank; --wipe overwrites it", new.display());
+            }
+            let blank = describe(&new, &file)?;
+            let plan = ops::plan_add_disk(&pool, &blank, &mut random_guids())?;
+            drop(pool);
+            let members = open_rw(&devices)?;
+            run(&plan, yes, &members, &[file])?;
+            Ok(())
+        }
+        DiskCommand::Set {
+            disk,
+            media,
+            usage,
+            yes,
+            devices,
+        } => {
+            let media = media
+                .map(|m| match m.as_str() {
+                    "unspecified" => Ok(0),
+                    "hdd" => Ok(1),
+                    "ssd" => Ok(2),
+                    other => Err(anyhow::anyhow!("media {other}: unspecified, hdd or ssd")),
+                })
+                .transpose()?;
+            let usage = usage
+                .map(|u| match u.as_str() {
+                    "auto-select" => Ok(1),
+                    "manual-select" => Ok(2),
+                    "hot-spare" => Ok(3),
+                    other => Err(anyhow::anyhow!(
+                        "usage {other}: auto-select, manual-select or hot-spare"
+                    )),
+                })
+                .transpose()?;
+            on_pool(&devices, yes, |p| ops::plan_set_disk(p, disk, media, usage))
+        }
+        DiskCommand::Retire { disk, yes, devices } => on_pool(&devices, yes, |p| ops::plan_retire_disk(p, disk)),
+        DiskCommand::Remove { disk, yes, devices } => {
+            let pool = Pool::open(open_rw(&devices)?)?;
+            let plan = ops::plan_remove_disk(&pool, disk)?;
+            let removed = pool
+                .disks
+                .get(&disk)
+                .and_then(|d| d.member)
+                .map(|m| pool.members[m].device);
+            drop(pool);
+            let members = open_rw(&devices)?;
+            if run::<File, File>(&plan, yes, &members, &[])? {
+                drop(members);
+                let rest: Vec<PathBuf> = devices
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| Some(*i) != removed)
+                    .map(|(_, p)| p.clone())
+                    .collect();
+                let pool = Pool::open(open_rw(&rest)?)?;
+                for w in &pool.warnings {
+                    eprintln!("warning: {w}");
+                }
+                if let Some(i) = removed {
+                    println!("{} is no pool member any more", devices[i].display());
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 pub fn space(command: SpaceCommand) -> Result<()> {
     match command {
+        SpaceCommand::Delete { space, yes, devices } => on_pool(&devices, yes, |p| ops::plan_delete_space(p, &space)),
+        SpaceCommand::Rename {
+            space,
+            name,
+            yes,
+            devices,
+        } => on_pool(&devices, yes, |p| ops::plan_rename_space(p, &space, &name)),
+        SpaceCommand::Resize {
+            space,
+            size,
+            yes,
+            devices,
+        } => on_pool(&devices, yes, |p| ops::plan_resize_space(p, &space, size)),
         SpaceCommand::Create {
             name,
             resiliency,
