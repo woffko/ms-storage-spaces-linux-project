@@ -11,12 +11,13 @@
 #   4. expose it again read-only and verify the fio data once more (it
 #      reached the images), and check that the verification pattern outside
 #      the fio range is intact
+# POOLS overrides the directory of the pools (default /srv/spaces/pools).
 # Usage: sudo tools/rw-kernel-check.sh POOL BACKEND [MIB] [START]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 pool=$1 backend=$2 mib=${3:-512} start_mib=${4:-256}
 spaces=$PWD/target/release/spaces
-src=/srv/spaces/pools/$pool
+src=${POOLS:-/srv/spaces/pools}/$pool
 work=/srv/spaces/work/$pool-$backend
 space=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8-sig"))["space"]["name"])' "$src/manifest.json")
 pattern=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1],encoding="utf-8-sig")); print(m["pattern_size"] if m["pattern"] else 0)' "$src/manifest.json")

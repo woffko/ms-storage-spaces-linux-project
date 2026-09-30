@@ -15,12 +15,13 @@
 # thin pool can allocate. TRIM_MB adds a step after 3: write a file of that
 # size, delete it and fstrim (thin spaces give rows back); trim.txt records
 # the slabs allocated before and after.
+# POOLS overrides the directory of the pools (default /srv/spaces/pools).
 # Usage: sudo tools/rw-ntfs-check.sh POOL [DRIVER] [SKIP] [COPY_MB] [OPS]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 pool=$1 driver=${2:-ntfs3} skip=${3:-} copy_mb=${4:-300} ops=${5:-3000}
 spaces=$PWD/target/release/spaces
-src=/srv/spaces/pools/$pool
+src=${POOLS:-/srv/spaces/pools}/$pool
 work=/srv/spaces/work/$pool-$driver
 mnt=/mnt/rw-ntfs-check
 space=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8-sig"))["space"]["name"])' "$src/manifest.json")

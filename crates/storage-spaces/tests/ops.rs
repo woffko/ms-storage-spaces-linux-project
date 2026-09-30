@@ -519,3 +519,32 @@ fn scrubbing_finds_differences_and_makes_them_agree() {
     r.read_exact_at(&mut row1, (256 << 20) + (5 << 20)).unwrap();
     assert!(row1.iter().all(|&b| b == 0));
 }
+
+/// Sizes are rounded up to whole rows without wrapping: a size near 2^64
+/// once became a space of 0 bytes. Spaces hold at most 2^32 slabs (1 EiB),
+/// on creation and when grown.
+#[test]
+fn huge_sizes_are_refused_not_wrapped() {
+    use storage_spaces::ops::{MAX_SPACE_SIZE, plan_resize_space};
+    let mut new_guid = guids();
+    let (images, disks) = blank(2);
+    let base: Vec<Overlay<&SparseImage>> = images.iter().map(Overlay::new).collect();
+    let members = || base.iter().collect::<Vec<_>>();
+    let (plan, _) = plan_create_pool(&disks, "huge", None, &mut new_guid).unwrap();
+    plan.apply::<&Overlay<&SparseImage>, _>(&[], &members()).unwrap();
+    let pool = Pool::open(members()).unwrap();
+    for size in [u64::MAX, u64::MAX - 1000, MAX_SPACE_SIZE + 1] {
+        let mut s = spec("x", 1, 0, true);
+        s.size = size;
+        assert!(plan_create_space(&pool, &s, &mut new_guid).is_err(), "{size}");
+    }
+    let mut s = spec("x", 1, 0, true);
+    s.size = MAX_SPACE_SIZE;
+    let (_, space) = plan_create_space(&pool, &s, &mut new_guid).unwrap();
+    assert_eq!(space.size, MAX_SPACE_SIZE);
+    let (plan, _) = plan_create_space(&pool, &spec("x", 1, 1024, false), &mut new_guid).unwrap();
+    drop(pool);
+    plan.apply::<_, &Overlay<&SparseImage>>(&members(), &[]).unwrap();
+    let pool = Pool::open(members()).unwrap();
+    assert!(plan_resize_space(&pool, "x", u64::MAX).is_err());
+}

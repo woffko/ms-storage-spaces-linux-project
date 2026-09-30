@@ -50,7 +50,12 @@ fuzz_target!(|data: &[u8]| {
         let spec = SpaceSpec {
             name: format!("s{i}"),
             resiliency: 1 + next() % 3,
-            size: u64::from(next()) << 26 | u64::from(next() % 16) << 20,
+            // Mostly up to 16 GiB, sometimes anything (rounding must not wrap).
+            size: if next() == 0xff {
+                u64::from_le_bytes(std::array::from_fn(|_| next()))
+            } else {
+                u64::from(next()) << 26 | u64::from(next() % 16) << 20
+            },
             thin: next() & 1 == 1,
             copies: [None, Some(2), Some(3)][next() as usize % 3],
             columns: [None, Some(1), Some(2), Some(u64::from(next() % 9))][next() as usize % 4],

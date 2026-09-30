@@ -9,7 +9,7 @@ ssh_cmd=(ssh -o BatchMode=yes -o ConnectTimeout=5 -o IdentitiesOnly=yes -o HostK
   -i "$HOME/.ssh/rustadmin_vm_ed25519")
 if [[ ${1:-} == -sync ]]; then
   cd "$(dirname "$0")/.."
-  rsync -a --delete --exclude /target/ --exclude /testdata/ --exclude /.git/ \
+  rsync -a --delete --exclude /target/ --exclude /testdata/ --exclude /.git/ --exclude /fuzz/target/ --exclude /fuzz/corpus/ --exclude /fuzz/artifacts/ \
     -e "${ssh_cmd[*]}" ./ "$host:Linux_Storage_Spaces/"
 else
   "${ssh_cmd[@]}" "$host" "cd ~/Linux_Storage_Spaces 2>/dev/null; export PATH=\$HOME/.cargo/bin:\$PATH; $1"

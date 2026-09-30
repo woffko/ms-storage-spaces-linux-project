@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -497,22 +497,37 @@ fn open_pool_with(paths: &[PathBuf], exclusive: bool) -> Result<Pool<File>> {
     open_pool_mode(paths, exclusive, false)
 }
 
+/// Opens a member. Exclusively: a block device (also through a symlink)
+/// with O_EXCL, which fails while it is mounted, assembled or opened so by
+/// another process, an image file with an exclusive lock that other
+/// `spaces` processes opening it exclusively respect.
+pub(crate) fn open_member(p: &Path, write: bool, exclusive: bool) -> Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(write);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+        if exclusive && std::fs::metadata(p).is_ok_and(|m| m.file_type().is_block_device()) {
+            const O_EXCL: i32 = 0o200;
+            options.custom_flags(O_EXCL);
+        }
+    }
+    let file = options
+        .open(p)
+        .with_context(|| format!("cannot open {}", p.display()))?;
+    if exclusive && file.metadata()?.is_file() {
+        file.try_lock().map_err(|e| match e {
+            std::fs::TryLockError::WouldBlock => anyhow::anyhow!("{} is in use by another process", p.display()),
+            std::fs::TryLockError::Error(e) => anyhow::Error::new(e).context(format!("cannot lock {}", p.display())),
+        })?;
+    }
+    Ok(file)
+}
+
 fn open_pool_mode(paths: &[PathBuf], exclusive: bool, write: bool) -> Result<Pool<File>> {
     let files = paths
         .iter()
-        .map(|p| {
-            let mut options = std::fs::OpenOptions::new();
-            options.read(true).write(write);
-            #[cfg(target_os = "linux")]
-            if exclusive && p.starts_with("/dev") {
-                use std::os::unix::fs::OpenOptionsExt;
-                const O_EXCL: i32 = 0o200;
-                options.custom_flags(O_EXCL);
-            }
-            #[cfg(not(target_os = "linux"))]
-            let _ = exclusive;
-            options.open(p).with_context(|| format!("cannot open {}", p.display()))
-        })
+        .map(|p| open_member(p, write, exclusive))
         .collect::<Result<Vec<_>>>()?;
     let pool = Pool::open(files)?;
     for w in &pool.warnings {

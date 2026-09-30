@@ -1,7 +1,8 @@
 # Security review
 
 Scope: the `spaces` command and the `storage-spaces` library as of the
-write support (0.2.0). Reviewed 2026-09-29.
+write support (0.2.0), reviewed 2026-09-29; pool management (`spaces pool`,
+`space`, `disk`; Stage 3), reviewed 2026-09-30.
 
 ## Threat model
 
@@ -16,6 +17,9 @@ write support (0.2.0). Reviewed 2026-09-29.
 * **Writes.** Writing happens only when asked for (`--rw`); on a pool whose
   metadata was crafted to mislead, writes must still stay inside the pool
   partitions of its member disks.
+* **Management.** `spaces pool|space|disk` change metadata and move data
+  only when asked for (`--yes`), only on the disks named, never on disks in
+  use, and leave a pool that opens after a crash at any point.
 
 ## Findings and mitigations
 
@@ -28,6 +32,9 @@ write support (0.2.0). Reviewed 2026-09-29.
 | Where writes go | Every slab write resolves through `Pool::slab_location`, which refuses slabs beyond the member's pool partition; database copies go to the fixed offset in that partition. A misleading pool can at worst overwrite its own partitions, which `--rw` asked for. Checked by the fuzz target `pool_write` and the test `writes_on_corrupted_metadata_stay_in_the_pool_partitions`: whatever the metadata, no write lands outside a member's pool partition. Found by `pool_write`: a user space whose record claims a part of an address space, as only tiers do, made writes start below its layout (a panic); such spaces are now refused for writing. |
 | What is written | `--rw` is refused unless the pool is clean and every structure the writes touch is understood (see the user guide); the udev rule and `storage-spaces-attach.service` never pass `--rw`. |
 | Exposure to other users | Block devices (`/dev/mapper/ss-*`, `/dev/ublkb*`, `/dev/nbd*`, loop devices) are created by the kernel as root:disk 0660. NBD sockets are made owner-only (0600) right after they are bound, before connections are accepted (found in this review: they followed the caller's umask); the attach path keeps them in `/run/storage-spaces` (root, 0755). The FUSE mount is read-only and without `allow_other`, so only root can open it. State files are root's. |
+| Which disks management writes | Every command prints its plan and writes only with `--yes`. `pool create` and `disk add` refuse disks that are not blank (a partition table, file system or pool data in the first or last MiB) unless `--wipe`. Members are opened exclusively: block devices with O_EXCL, which fails while they are mounted, assembled or served, and image files with an exclusive lock that every `spaces` process opening them for writing takes (found in this review: only paths spelled under `/dev` got O_EXCL, so a block device named through a symlink did not, and image files had no exclusion at all: a management command could change a pool whose images `serve-ublk --rw` was writing). |
+| Management on hostile metadata | Planning starts with `check_pool`: the pool must be clean (no missing disk, stale copy or torn record; repair and removing a missing disk accept missing disks and nothing else) and every record decode into a model that encodes back to the same bytes, so nothing unknown is rewritten. The fuzz target `manage` runs every planner on patched pools and checks every action of the plan: writes only inside the members' pool partitions (removing a pool: only its partition tables), or to the disk being added. Sizes are rounded to whole rows with checked arithmetic and bounded to 2^32 slabs (found in this review: a size near 2^64 wrapped to a space of 0 bytes, and a record's allocation unit of 0 would have divided by zero when growing its space); the fuzz target `create` now draws sizes from the whole 64-bit range. |
+| Crashes during management | A plan's steps are made durable one after the other; pool database copies are written one per step; data is copied into free slabs before the one database update that records the move. Tests replay a crash after every step of creating a space, retiring a disk and repairing (`ops.rs`), and Windows 11 took pools cut after steps of creating a space, adding and retiring a disk (`mgmt-crash.json`). |
 | Denial of service by panics | A panic ends the attach or serving process for that pool only; the fuzz targets check the parsers do not panic. |
 
 ## Remaining risks
@@ -36,3 +43,9 @@ write support (0.2.0). Reviewed 2026-09-29.
   (hostile) data; that is inherent in reading it.
 * Writing trusts the pool it was asked to write: with `--rw` on a crafted
   pool, the data of its spaces can end up anywhere inside its partitions.
+* Image files are locked with advisory locks: other programs (a hypervisor
+  using the same images, `dd`) are not kept out.
+* Windows 11 24H2 bugchecked when a pool of four disks arrived with one
+  disk absent, whoever had created the pool (`docs/plan.md`, Stage 3
+  progress). Handing Windows a pool with a disk missing is a risk to the
+  Windows machine, not to the pool.

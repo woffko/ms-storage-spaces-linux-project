@@ -1,0 +1,43 @@
+{
+ "note": "tools/linux-created-checks.sh on the Linux test VM (Ubuntu 22.04, kernel 6.8): pools of three sparse 8 GiB images made by spaces pool create and spaces space create, one space each with the first 256 MiB of pattern; fio (random writes of 4 KiB to 1 MiB, crc32c verification) over 512 MiB above the pattern through each backend, read back read-only, pattern intact; NTFS by mkntfs, written through ntfs-3g by tools/ntfs-stress.py, every file's hash checked read-only",
+ "fio": {
+  "lnx_simple": {
+   "space": "simple, 3 GiB",
+   "ublk": "PASS",
+   "nbd": "PASS",
+   "dm": "PASS"
+  },
+  "lnx_mirror": {
+   "space": "two-way mirror, 2 GiB",
+   "ublk": "PASS",
+   "nbd": "PASS"
+  },
+  "lnx_parity": {
+   "space": "parity with its cache, 2 GiB",
+   "ublk": "PASS",
+   "nbd": "PASS"
+  },
+  "lnx_thin": {
+   "space": "thin two-way mirror, 4 GiB",
+   "ublk": "PASS",
+   "nbd": "PASS"
+  }
+ },
+ "fio_mib": 512,
+ "ntfs_3g": {
+  "lnx_mirror": {
+   "files": 573,
+   "mib": 232,
+   "operations": 3000,
+   "modelled": true,
+   "mismatching_read_only": 0
+  },
+  "lnx_parity": {
+   "files": 573,
+   "mib": 232,
+   "operations": 3000,
+   "modelled": true,
+   "mismatching_read_only": 0
+  }
+ }
+}

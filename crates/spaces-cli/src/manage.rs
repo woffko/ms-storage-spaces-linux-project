@@ -1,8 +1,9 @@
 //! `spaces pool`, `spaces space` and `spaces disk`: pool management. Every
 //! command computes its plan first and prints it; it writes only with
-//! `--yes`. Devices are opened exclusively (O_EXCL on block devices).
+//! `--yes`. Devices are opened exclusively (O_EXCL on block devices, a lock
+//! on image files).
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -240,20 +241,7 @@ fn random_guids() -> impl FnMut() -> Guid {
 }
 
 fn open_rw(paths: &[PathBuf]) -> Result<Vec<File>> {
-    paths
-        .iter()
-        .map(|p| {
-            let mut options = OpenOptions::new();
-            options.read(true).write(true);
-            #[cfg(target_os = "linux")]
-            if p.starts_with("/dev") {
-                use std::os::unix::fs::OpenOptionsExt;
-                const O_EXCL: i32 = 0o200;
-                options.custom_flags(O_EXCL);
-            }
-            options.open(p).with_context(|| format!("cannot open {}", p.display()))
-        })
-        .collect()
+    paths.iter().map(|p| crate::open_member(p, true, true)).collect()
 }
 
 /// A sysfs attribute of a block device (through its parent for partitions).

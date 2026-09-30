@@ -152,6 +152,22 @@ pub struct BlankDisk {
     pub model: String,
 }
 
+/// Largest space: 2^32 slabs (1 EiB), what extent records may address.
+pub const MAX_SPACE_SIZE: u64 = SLAB_SIZE << 32;
+
+/// `size` rounded up to whole rows of `data_columns` allocation units of
+/// `unit` bytes, refused beyond [`MAX_SPACE_SIZE`] (and for a row size that
+/// is no whole number of slabs, from a record not understood).
+fn whole_rows(size: u64, unit: u64, data_columns: u64) -> Result<u64> {
+    let row = unit
+        .checked_mul(data_columns)
+        .filter(|r| *r > 0 && r.is_multiple_of(SLAB_SIZE))
+        .ok_or_else(|| Error::Pool(format!("rows of {data_columns} units of {unit} bytes")))?;
+    size.checked_next_multiple_of(row)
+        .filter(|s| *s <= MAX_SPACE_SIZE)
+        .ok_or_else(|| Error::Pool(format!("{size} bytes: spaces hold at most {MAX_SPACE_SIZE} bytes")))
+}
+
 /// `spaces pool create`: a pool of `disks` named `name`, with the given
 /// logical sector size (default: the largest of the disks'). The first five
 /// disks carry the pool database. Each disk gets its header and database,
@@ -338,7 +354,7 @@ pub fn plan_create_space<D: ReadAt>(pool: &Pool<D>, spec: &SpaceSpec, guids: Gui
     if spec.size == 0 {
         return Err(Error::Pool("the size must not be 0".into()));
     }
-    let size = spec.size.div_ceil(group) * group;
+    let size = whole_rows(spec.size, unit, data_columns)?;
 
     // Ids and numbers: the space, then (as Windows) the cache, then the
     // journal or dirty region log.
@@ -367,8 +383,7 @@ pub fn plan_create_space<D: ReadAt>(pool: &Pool<D>, spec: &SpaceSpec, guids: Gui
     };
     let cache = if spec.resiliency == 3 {
         let columns = (n / 2).max(1);
-        let size = spec.write_cache.unwrap_or(1 << 30);
-        let size = size.div_ceil(SLAB_SIZE * columns) * SLAB_SIZE * columns;
+        let size = whole_rows(spec.write_cache.unwrap_or(1 << 30), SLAB_SIZE, columns)?;
         if size < 512 << 20 {
             return Err(Error::Pool("the write-back cache must be at least 512 MiB".into()));
         }
@@ -601,16 +616,18 @@ pub fn plan_resize_space<D: ReadAt>(pool: &Pool<D>, space: &str, size: u64) -> R
     if pool.children(id).any(|c| c.info.is_child && !c.extents.is_empty()) {
         return Err(Error::Pool("resizing tiered spaces is not supported".into()));
     }
-    let data_columns = policy.columns
-        - if policy.resiliency == crate::format::Resiliency::Parity {
+    let data_columns = policy
+        .columns
+        .checked_sub(if policy.resiliency == crate::format::Resiliency::Parity {
             policy.redundancy
         } else {
             0
-        };
+        })
+        .ok_or_else(|| Error::Pool("more parity than columns".into()))?;
     let unit = s.info.allocation_unit;
-    let group = unit * data_columns;
     let old = s.info.size.unwrap_or(0);
-    let size = size.div_ceil(group) * group;
+    let size = whole_rows(size, unit, data_columns)?;
+    let group = unit * data_columns;
     if size <= old {
         return Err(Error::Pool(format!("the space is {old} bytes; it can only grow")));
     }

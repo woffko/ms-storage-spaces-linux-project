@@ -523,6 +523,14 @@ rows of thin spaces not allocated yet (M7).
     after its first database update, before the new disk had its copy of
     the metadata space, left that disk lost on Windows; the copy is now
     written first.
+* New spaces pass the Stage 2 write checks (tools/linux-created-checks.sh,
+  evidence `linux-created-checks.json`): fio with crc32c verification
+  through ublk, nbd and dm on simple, mirror, parity and thin spaces
+  created on Linux, and NTFS through ntfs-3g on the mirror and parity
+  ones. (Their Windows round trip waits for the VM.)
+* Security review of management (docs/security.md): members are now locked
+  exclusively also as image files and through symlinks; sizes are rounded
+  with checked arithmetic and bounded to 2^32 slabs.
 * Fuzz targets for the management code: `records` (the complete record
   models and the disk header encode back to what they decoded), `create`
   (pools and spaces from fuzzed parameters open clean, pass the checks and

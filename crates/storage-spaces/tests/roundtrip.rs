@@ -528,3 +528,26 @@ fn windows_bugchecks_on_an_absent_disk_whoever_created_the_pool() {
     assert!(crashes.iter().any(|c| c["pool"].as_str().unwrap().contains("Windows")));
     assert_eq!(e["all_disks"]["pool"], serde_json::json!(["Healthy", "OK"]));
 }
+
+/// Spaces created on Linux pass the write checks of Stage 2 through the
+/// kernel (tools/linux-created-checks.sh on the Linux test VM): fio with
+/// crc32c verification through ublk and nbd (and dm for the simple space)
+/// on a simple, a mirror, a parity and a thin mirror space, and NTFS
+/// written through ntfs-3g on the mirror and the parity space, every file
+/// read back as modelled.
+#[test]
+fn linux_created_spaces_pass_the_write_checks() {
+    let e = evidence("linux-created-checks.json");
+    let fio = e["fio"].as_object().unwrap();
+    assert_eq!(fio.len(), 4);
+    for (name, r) in fio {
+        for backend in ["ublk", "nbd"] {
+            assert_eq!(r[backend], "PASS", "{name} {backend}");
+        }
+    }
+    assert_eq!(fio["lnx_simple"]["dm"], "PASS");
+    for (name, r) in e["ntfs_3g"].as_object().unwrap() {
+        assert_eq!(r["modelled"], true, "{name}");
+        assert_eq!(r["mismatching_read_only"], 0, "{name}");
+    }
+}
