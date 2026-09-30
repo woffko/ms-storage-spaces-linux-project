@@ -3,17 +3,21 @@
 [![CI](https://github.com/woffko/ms-storage-spaces-linux-project/actions/workflows/ci.yml/badge.svg)](https://github.com/woffko/ms-storage-spaces-linux-project/actions/workflows/ci.yml)
 [![License: GPL-2.0-or-later](https://img.shields.io/badge/license-GPL--2.0--or--later-blue.svg)](LICENSE)
 
-Read and write Microsoft Storage Spaces pools on Linux: `spaces` assembles a
-pool from its member disks and exposes every virtual disk ("space") as a
-Linux block device, read-only unless asked otherwise, attached
-automatically at boot or when the disks are plugged in, so the NTFS (or any
-other) file system inside mounts like on an ordinary disk. Written in Rust, from a reverse-engineered description of the
-on-disk format that is checked against pools created by Windows.
+Read, write and manage Microsoft Storage Spaces pools on Linux: `spaces`
+assembles a pool from its member disks and exposes every virtual disk
+("space") as a Linux block device, read-only unless asked otherwise,
+attached automatically at boot or when the disks are plugged in, so the
+NTFS (or any other) file system inside mounts like on an ordinary disk. It
+also creates pools and spaces and adds, retires and replaces disks the way
+Windows does, so that Windows takes the result as its own. Written in Rust,
+from a reverse-engineered description of the on-disk format that is checked
+against pools created by Windows.
 
-> **Status: pools created by Windows 11; reading, and writing to simple,
-> mirror and single parity spaces, fixed and thin (`attach --rw`, new).** Pool management is
-> planned (see [the plan](docs/plan.md)); ReFS will follow. The pool disks
-> are written only for spaces attached read-write.
+> **Status: pools created by Windows 11; reading; writing to simple, mirror
+> and single parity spaces, fixed and thin (`attach --rw`); pool management
+> (`spaces pool|space|disk`, new).** ReFS will follow (see
+> [the plan](docs/plan.md)). The pool disks are written only for spaces
+> attached read-write and by management commands given `--yes`.
 
 ## What works
 
@@ -35,7 +39,9 @@ on-disk format that is checked against pools created by Windows.
 | Writing simple, mirror and single parity spaces, fixed and thin | `attach --rw`; Windows reads the result back |
 | Thin spaces: rows allocated as they are written, discards (TRIM) give them back | `attach --rw` (256 MiB allocation units) |
 | Writing dual parity, tiers, degraded pools | refused |
-| Pool management, ReFS | not yet |
+| Creating pools and simple, mirror and single parity spaces (fixed and thin); deleting, renaming, growing spaces | `spaces pool create`, `spaces space ...`; Windows takes the pools as healthy |
+| Adding, retiring, removing and replacing disks; repair, optimize, scrub; health in Windows' terms | `spaces disk ...`, `spaces pool ...` |
+| Creating storage tiers or dual parity spaces; ReFS | not yet |
 
 ## Quick start
 
@@ -65,8 +71,18 @@ spaces info /dev/sdb /dev/sdc
 spaces export /dev/sdb /dev/sdc --space "My space" --output space.img
 ```
 
-See the [user guide](docs/user-guide.md) for details, writing, degraded
-pools and pools after a crash, and `man contrib/man/spaces.8`.
+Managing a pool (every command prints its plan and writes only with
+`--yes`):
+
+```sh
+sudo spaces pool create --name Data --yes /dev/sdb /dev/sdc /dev/sdd
+sudo spaces space create --name Files --resiliency mirror --size 1T --yes /dev/sdb /dev/sdc /dev/sdd
+sudo spaces pool health /dev/sdb /dev/sdc /dev/sdd
+```
+
+See the [user guide](docs/user-guide.md) for details, writing, managing
+pools, degraded pools and pools after a crash, and
+`man contrib/man/spaces.8`.
 
 ### Backends
 
@@ -102,13 +118,20 @@ pools and pools after a crash, and `man contrib/man/spaces.8`.
   verification through every backend, and by NTFS written on Linux that
   Windows then attaches as healthy, with chkdsk clean and every file
   intact, also after crashes and after TRIM.
-* The parsers and the write path are fuzzed with cargo-fuzz (`fuzz/`).
+* Management is checked by predicting byte for byte what Windows writes
+  when it creates pools and spaces, changes and deletes them and adds and
+  removes disks; by replaying a crash after every step of each operation;
+  by Windows taking pools created and changed on Linux (also pools cut
+  short by a crash) as healthy, repairing and optimizing them; and by the
+  write checks above on spaces created on Linux.
+* The parsers, the write path and the management planners are fuzzed with
+  cargo-fuzz (`fuzz/`).
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `crates/storage-spaces` | library: metadata parsing, space layouts, reader and writer |
+| `crates/storage-spaces` | library: metadata parsing, space layouts, reader, writer and management planners |
 | `crates/spaces-cli` | the `spaces` command and its block device backends |
 | `docs/` | format description, user guide, project plan, prior art |
 | `tools/` | test pool generators for the Windows VM, corpus and VM test scripts |
@@ -122,7 +145,8 @@ pools and pools after a crash, and `man contrib/man/spaces.8`.
 2. **Writes** to the exposed block devices, with Windows accepting the pool
    afterwards (done: simple, mirror and single parity spaces, thin
    allocation and TRIM).
-3. **Pool management**: creating, extending and repairing pools and spaces.
+3. **Pool management**: creating, extending and repairing pools and spaces
+   (done, except creating storage tiers and dual parity spaces).
 
 ReFS support is planned as a separate track. Details in
 [docs/plan.md](docs/plan.md).

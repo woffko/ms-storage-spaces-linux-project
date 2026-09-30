@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.0.0 (unreleased)
+
+Pool management, the way Windows 11 24H2 does it: Windows takes pools
+created and changed on Linux as healthy, repairs and optimizes them.
+
+### Management
+
+* `spaces pool create`: a pool (version 28) of blank disks (`--wipe` for
+  others), 512-byte or 4 KiB logical sectors, 512e and 4Kn disks; the
+  partition tables, disk headers and pool database Windows would write.
+* `spaces space create`: simple, two- and three-way mirror and single
+  parity spaces, fixed and thin, with Windows' defaults (columns,
+  interleave, the parity space's write-back cache and journal, the mirror's
+  dirty region log); `space delete`, `rename`, `resize` (growing).
+* `spaces disk add` (also to a pool missing a disk), `disk set` (media
+  type, usage), `disk retire` (everything moved off the disk), `disk
+  remove` (a retired disk, or a missing one after a repair).
+* `spaces pool rename`, `pool remove`, `pool repair` (copies on missing or
+  out-of-date disks rebuilt elsewhere: mirror copies copied, parity columns
+  recomputed), `pool optimize` (extents spread over the disks), `pool
+  scrub` (mirror copies and parity compared, `--repair` makes them agree),
+  `pool health` (HealthStatus and OperationalStatus as Windows would show
+  them).
+* Every command prints its plan and writes only with `--yes`, in steps
+  that each end with a flush; data is copied before the metadata points at
+  it, so a crash at any point leaves a pool that opens (replayed after
+  every step in the tests; Windows took pools cut short this way as
+  healthy).
+* Member disks are opened exclusively for writing: O_EXCL on block devices
+  (also through symlinks), an exclusive lock on image files.
+* Checked byte for byte against what Windows writes for every operation it
+  exposes, by Windows round trips of pools created and changed on Linux,
+  and by fio and NTFS write checks on spaces created on Linux.
+* Not supported: creating storage tiers, mirror-accelerated parity and
+  dual parity spaces; new spaces in pools of version 29 (Insider builds).
+
+### Known issue in Windows
+
+* Windows 11 24H2 bugchecks (0x50 in spaceport.sys) when a pool of four
+  disks with simple, mirror and parity spaces arrives with one disk absent,
+  whether Linux or Windows created the pool.
+
 ## 0.2.0 (unreleased)
 
 Writing, for spaces whose state is fully understood.

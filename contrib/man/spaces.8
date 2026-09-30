@@ -1,6 +1,6 @@
 .TH SPACES 8 "2026-09-29" "storage-spaces 0.2" "System Administration"
 .SH NAME
-spaces \- read and write Microsoft Storage Spaces pools on Linux
+spaces \- read, write and manage Microsoft Storage Spaces pools on Linux
 .SH SYNOPSIS
 .RB [ \-\-unclean\-parity
 .IR refuse | data ]
@@ -53,14 +53,40 @@ spaces \- read and write Microsoft Storage Spaces pools on Linux
 .I device ...
 .B \-\-new
 .I device ...
+.br
+.B spaces pool
+.BR create | rename | repair | optimize | scrub | health | remove
+.RI [ options ]
+.RB [ \-\-yes ]
+.I device ...
+.br
+.B spaces space
+.BR create | delete | rename | resize
+.RI [ options ]
+.RB [ \-\-yes ]
+.I device ...
+.br
+.B spaces disk
+.BR add | set | retire | remove
+.RI [ options ]
+.RB [ \-\-yes ]
+.I device ...
 .SH DESCRIPTION
 .B spaces
 reads the metadata of Microsoft Storage Spaces pools created by Windows 11
 (pool versions 28 and 29) from their member disks and exposes the virtual
 disks ("spaces") as Linux block devices, read-only unless a space is
 attached with
-.BR \-\-rw ;
-pool members are never written otherwise.
+.BR \-\-rw .
+The
+.BR pool ,
+.B space
+and
+.B disk
+commands create and change pools as Windows 11 24H2 does; they write only
+with
+.BR \-\-yes .
+Pool members are never written otherwise.
 .PP
 Supported: simple, two- and three-way mirror, single and dual parity spaces
 (including the local reconstruction code of 11 and more columns), storage
@@ -70,8 +96,12 @@ pools with missing, failing or retired disks as far as the redundancy
 allows, and pools after a crash. Writing: simple, mirror and single parity
 spaces of clean pools, fixed and thin (not dual parity, storage tiers,
 degraded pools, or rows of thin spaces with other allocation units than
-256 MiB that are not allocated yet). Not supported yet: pool management,
-pools created by other Windows releases.
+256 MiB that are not allocated yet). Management: creating pools (version
+28) and simple, mirror and single parity spaces, fixed and thin; deleting,
+renaming and growing spaces; adding, retiring, removing and replacing
+disks; repair, optimize, scrub and a health report in Windows' terms. Not
+supported: creating storage tiers or dual parity spaces, new spaces in
+pools of version 29, pools created by other Windows releases.
 .SH COMMANDS
 .TP
 .B scan
@@ -125,6 +155,82 @@ Print the pool metadata one fact per line (every copy of the pool
 database, its records raw and decoded, the dirty region log, parity journal
 and write-back cache of each space), or the lines only one of two states of
 a pool has, for comparing a pool before and after a change.
+.SH MANAGEMENT
+Every
+.BR pool ,
+.B space
+and
+.B disk
+command takes the pool's disks (block devices or image files), prints the
+plan of what it would write and writes it only with
+.BR \-\-yes ,
+in steps that each end with a flush, so that a crash leaves a pool that
+opens in the state before or after a step. The disks are opened
+exclusively (O_EXCL, a lock on image files): detach the pool first. Only
+clean pools are changed (every disk present, no out-of-date copy, every
+record understood), except that
+.BR "pool repair" ,
+.B disk add
+and
+.B disk remove
+accept missing disks, to replace them. Disks are named by their ids as
+.B info
+lists them.
+.TP
+.B pool create \-\-name \fIname\fR [\-\-logical\-sector 512|4096] [\-\-wipe]
+A pool of the given disks, which must be blank (nothing in their first and
+last MiB) unless
+.B \-\-wipe
+is given, which destroys what they hold.
+.TP
+.B pool rename \-\-name \fIname\fR, \fBpool remove
+Rename the pool; remove a pool without spaces (its partitions leave the
+disks' partition tables).
+.TP
+.B pool repair
+Rebuild every copy on a missing disk or out of date on another disk, from a
+current mirror copy or the other parity columns.
+.TP
+.B pool optimize
+Spread the extents evenly over the disks, as after adding one.
+.TP
+.B pool scrub [\-\-repair]
+Compare every copy of the mirror spaces and every stripe of the single
+parity spaces; differences where writes were under way are counted apart.
+.B \-\-repair
+makes everything agree (the first mirror copy, parity from the data).
+.TP
+.B pool health
+The HealthStatus and OperationalStatus Windows would show for the pool, its
+disks and spaces with the disks given, and the disk failures each space
+still survives.
+.TP
+.B space create \-\-name \fIname\fR \-\-resiliency simple|mirror|parity \-\-size \fIsize\fR
+With
+.BR \-\-thin ,
+.BI \-\-copies " 2|3" ,
+.BI \-\-columns " n" ,
+.BI \-\-interleave " size" ,
+.BI \-\-write\-cache " size"
+(parity); Windows' defaults otherwise. Sizes such as 10G are rounded up to
+whole rows.
+.TP
+.B space delete\fR|\fBrename\fR|\fBresize \-\-space \fIname\fR
+Delete a space and its data, rename it
+.RB ( \-\-name ),
+or grow it
+.RB ( \-\-size ;
+the file system inside is not grown).
+.TP
+.B disk add \-\-new \fIdevice\fR [\-\-wipe]
+Add a blank disk to the pool of the other devices (at most four).
+.TP
+.B disk set \-\-disk \fIid\fR [\-\-media unspecified|hdd|ssd] [\-\-usage auto\-select|manual\-select|hot\-spare]
+Change a disk's media type or usage.
+.TP
+.B disk retire \-\-disk \fIid\fR, \fBdisk remove \-\-disk \fIid
+Move everything off a disk; remove a disk that holds nothing any more, or a
+missing one after a repair.
 .SH OPTIONS
 .TP
 .BR \-\-unclean\-parity " " refuse | data
@@ -185,6 +291,12 @@ spaces attach
 mount \-o ro /dev/mapper/ss\-Storage_pool\-Data\-p2 /mnt
 spaces detach
 spaces attach \-\-rw \-\-space Data
+.PP
+spaces pool create \-\-name Data \-\-yes /dev/sdb /dev/sdc /dev/sdd
+spaces space create \-\-name Files \-\-resiliency mirror \-\-size 1T \\
+    \-\-yes /dev/sdb /dev/sdc /dev/sdd
+spaces pool health /dev/sdb /dev/sdc /dev/sdd
+spaces disk add \-\-new /dev/sde \-\-yes /dev/sdb /dev/sdc /dev/sdd
 .fi
 .SH SEE ALSO
 .BR dmsetup (8),

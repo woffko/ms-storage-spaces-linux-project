@@ -31,15 +31,19 @@ pub enum PoolCommand {
         /// Write; without it the plan is only printed.
         #[arg(long)]
         yes: bool,
+        /// The pool's disks (block devices or image files).
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
     /// Rename the pool (its partitions keep the old name, as on Windows).
     Rename {
+        /// The new name.
         #[arg(long)]
         name: String,
+        /// Write; without it the plan is only printed.
         #[arg(long)]
         yes: bool,
+        /// The pool's disks (block devices or image files).
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
@@ -47,8 +51,10 @@ pub enum PoolCommand {
     /// from another copy, parity columns from the others) on other disks;
     /// a missing disk can be removed afterwards (spaces disk remove).
     Repair {
+        /// Write; without it the plan is only printed.
         #[arg(long)]
         yes: bool,
+        /// The pool's disks (block devices or image files).
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
@@ -56,6 +62,7 @@ pub enum PoolCommand {
     /// (HealthStatus / OperationalStatus of the pool, its disks and spaces;
     /// read only). Disks of the pool that are not given count as missing.
     Health {
+        /// The pool's disks (block devices or image files).
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
@@ -63,26 +70,33 @@ pub enum PoolCommand {
     /// parity spaces and report what disagrees (read only); `--repair`
     /// makes it agree, keeping the first mirror copy and the parity data.
     Scrub {
+        /// Plan making what disagrees agree (written with --yes).
         #[arg(long)]
         repair: bool,
+        /// Write; without it the plan is only printed.
         #[arg(long)]
         yes: bool,
+        /// The pool's disks (block devices or image files).
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
     /// Spread the extents evenly over the disks (after adding a disk), as
     /// Optimize-StoragePool does.
     Optimize {
+        /// Write; without it the plan is only printed.
         #[arg(long)]
         yes: bool,
+        /// The pool's disks (block devices or image files).
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
     /// Remove a pool without spaces: the pool partition leaves every
     /// member's partition table.
     Remove {
+        /// Write; without it the plan is only printed.
         #[arg(long)]
         yes: bool,
+        /// The pool's disks (block devices or image files).
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
@@ -95,10 +109,13 @@ pub enum DiskCommand {
         /// The blank disk.
         #[arg(long)]
         new: PathBuf,
+        /// Overwrite the new disk if it is not blank.
         #[arg(long)]
         wipe: bool,
+        /// Write; without it the plan is only printed.
         #[arg(long)]
         yes: bool,
+        /// The pool's disks (block devices or image files).
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
@@ -108,30 +125,41 @@ pub enum DiskCommand {
         /// The disk's id (spaces info).
         #[arg(long)]
         disk: u64,
+        /// unspecified, hdd or ssd.
         #[arg(long)]
         media: Option<String>,
+        /// auto-select, manual-select or hot-spare.
         #[arg(long)]
         usage: Option<String>,
+        /// Write; without it the plan is only printed.
         #[arg(long)]
         yes: bool,
+        /// The pool's disks (block devices or image files).
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
     /// Retire a disk: move everything on it to the other disks.
     Retire {
+        /// The disk's id (spaces info).
         #[arg(long)]
         disk: u64,
+        /// Write; without it the plan is only printed.
         #[arg(long)]
         yes: bool,
+        /// The pool's disks (block devices or image files).
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
-    /// Remove a retired disk from the pool.
+    /// Remove a disk from the pool: a retired one that holds nothing any
+    /// more, or a missing one after `spaces pool repair`.
     Remove {
+        /// The disk's id (spaces info).
         #[arg(long)]
         disk: u64,
+        /// Write; without it the plan is only printed.
         #[arg(long)]
         yes: bool,
+        /// The pool's disks (block devices or image files).
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
@@ -139,8 +167,9 @@ pub enum DiskCommand {
 
 #[derive(Subcommand)]
 pub enum SpaceCommand {
-    /// Create a space.
+    /// Create a space, with Windows' defaults for what is not given.
     Create {
+        /// The space's name.
         #[arg(long)]
         name: String,
         /// simple, mirror or parity (single parity).
@@ -155,6 +184,8 @@ pub enum SpaceCommand {
         /// Mirror: 2 (default) or 3 copies.
         #[arg(long)]
         copies: Option<u64>,
+        /// Columns (default as Windows: simple one per disk up to 8, mirror
+        /// disks / copies, parity 3).
         #[arg(long)]
         columns: Option<u64>,
         /// Interleave, e.g. 256K (default).
@@ -163,39 +194,52 @@ pub enum SpaceCommand {
         /// Parity: size of the write-back cache (default 1G, at least 512M).
         #[arg(long, value_parser = parse_size)]
         write_cache: Option<u64>,
+        /// Write; without it the plan is only printed.
         #[arg(long)]
         yes: bool,
+        /// The pool's disks (block devices or image files).
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
     /// Delete a space and everything on it.
     Delete {
+        /// The space's name.
         #[arg(long)]
         space: String,
+        /// Write; without it the plan is only printed.
         #[arg(long)]
         yes: bool,
+        /// The pool's disks (block devices or image files).
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
     /// Rename a space.
     Rename {
+        /// The space's name.
         #[arg(long)]
         space: String,
+        /// The new name.
         #[arg(long)]
         name: String,
+        /// Write; without it the plan is only printed.
         #[arg(long)]
         yes: bool,
+        /// The pool's disks (block devices or image files).
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
     /// Grow a space (the file system inside is not grown).
     Resize {
+        /// The space's name.
         #[arg(long)]
         space: String,
+        /// The new size, e.g. 20G (rounded up to whole rows; only growing).
         #[arg(long, value_parser = parse_size)]
         size: u64,
+        /// Write; without it the plan is only printed.
         #[arg(long)]
         yes: bool,
+        /// The pool's disks (block devices or image files).
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },

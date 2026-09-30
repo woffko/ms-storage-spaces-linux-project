@@ -4,7 +4,9 @@
 pool version 28; Insider builds: pool version 29) and exposes their virtual
 disks ("spaces") as Linux block devices. They are read-only, and the pool
 disks are never written, unless a space is attached read-write
-(`attach --rw`, see [Writing](#writing)).
+(`attach --rw`, see [Writing](#writing)) or the pool is changed with
+`spaces pool`, `spaces space` or `spaces disk` (see
+[Managing pools](#managing-pools)).
 
 ## Supported configurations
 
@@ -26,7 +28,9 @@ disks are never written, unless a space is attached read-write
 | Pools created by Windows 8/10/Server | not supported |
 | Writing: simple, mirror, single parity, fixed and thin (256 MiB allocation units) | `attach --rw` |
 | Writing: dual parity, tiers, degraded pools | not supported (refused) |
-| Pool management (creating pools and spaces, adding disks) | not supported |
+| Creating pools (version 28) and simple, mirror and single parity spaces, fixed and thin; deleting, renaming, growing spaces | `spaces pool`, `spaces space` |
+| Adding, retiring, removing and replacing disks; repair, optimize, scrub, health | `spaces disk`, `spaces pool` |
+| Creating storage tiers, dual parity spaces; new spaces in version 29 pools | not supported |
 
 ## Installing
 
@@ -148,6 +152,140 @@ Guarantees and risks:
   (on any disk, not only here); ntfs-3g is not affected.
 * Writing is new: keep a backup of data you care about.
 
+## Managing pools
+
+`spaces pool`, `spaces space` and `spaces disk` change pools the way
+Windows 11 24H2 does, so that Windows takes the result as its own: pools
+created and changed on Linux attach in Windows as healthy, and its Repair
+and Optimize work on them. Every command works on the disks given (block
+devices or image files) and:
+
+* computes a plan and prints it; nothing is written without `--yes`;
+* opens the disks exclusively: a disk that is mounted, attached (also by
+  `spaces attach`) or used by another program fails with "busy" or "in
+  use"; detach the pool first;
+* works on clean pools only: every disk present, no copy out of date,
+  every record understood. Attach a pool that is not clean to Windows
+  first, or see [Replacing a failed disk](#replacing-a-failed-disk);
+* writes in steps that each end with a flush, so that after a crash or
+  power loss at any point the pool opens in the state before or after a
+  step; data being moved is copied before the metadata points at it.
+
+### Creating a pool and spaces
+
+```sh
+sudo spaces pool create --name Data /dev/sdb /dev/sdc /dev/sdd            # prints the plan
+sudo spaces pool create --name Data --yes /dev/sdb /dev/sdc /dev/sdd
+sudo spaces space create --name Files --resiliency mirror --size 1T --yes /dev/sdb /dev/sdc /dev/sdd
+sudo spaces attach
+```
+
+`pool create` takes blank disks only: a partition table, file system or
+other data in the first or last MiB makes it refuse, unless `--wipe` (which
+destroys everything on those disks). The disks get the layout
+`New-StoragePool` gives them (a Microsoft reserved partition and the pool
+partition); up to five of them carry a copy of the pool database.
+`--logical-sector 4096` makes the spaces use 4 KiB sectors.
+
+`space create` takes Windows' defaults for what is not given:
+
+| Option | Default |
+|---|---|
+| `--resiliency simple` | one column per disk (up to 8) |
+| `--resiliency mirror` | two copies (`--copies 3` needs five disks), disks / copies columns (up to 8) |
+| `--resiliency parity` | single parity, three columns, a write-back cache of 1 GiB (`--write-cache`, at least 512 MiB) |
+| `--thin` | fixed provisioning otherwise; thin spaces take 256 MiB allocation units |
+| `--interleave` | 256K |
+
+Sizes (`10G`, `500M`, `2T`) are rounded up to whole rows (fixed spaces:
+1 GiB per data column). As on Windows, a new space's slabs are not cleared:
+only its first sector (a parity space: its first stripe) is, so that no old
+partition table shows up. Create a partition table and a file system as on
+any disk, through `spaces attach --rw`.
+
+```sh
+sudo spaces space rename --space Files --name Archive --yes DISKS...
+sudo spaces space resize --space Archive --size 2T --yes DISKS...   # grows; grow the file system yourself
+sudo spaces space delete --space Archive --yes DISKS...
+sudo spaces pool rename --name Data2 --yes DISKS...
+sudo spaces pool remove --yes DISKS...                               # a pool without spaces
+```
+
+### Disks
+
+`spaces info DISKS...` lists the disks of a pool with their ids.
+
+```sh
+sudo spaces disk add --new /dev/sde --yes /dev/sdb /dev/sdc /dev/sdd   # the pool's disks, then the new one
+sudo spaces pool optimize --yes /dev/sdb /dev/sdc /dev/sdd /dev/sde    # spread the spaces over it
+sudo spaces disk set --disk 4 --media ssd --yes DISKS...               # or --usage manual-select, hot-spare
+sudo spaces disk retire --disk 2 --yes DISKS...                        # move everything off disk 2
+sudo spaces disk remove --disk 2 --yes DISKS...                        # then take it out of the pool
+```
+
+`disk add` takes a blank disk (`--wipe` as above) and a pool of at most
+four disks. `disk retire` moves every extent of the disk to the others
+(pools of up to five disks); it needs room there, and the rows of every
+space need enough other disks (a three-column parity space needs three
+disks besides the retired one). `disk remove` removes a disk that holds
+nothing any more; the disk keeps its data behind a partition table without
+the pool partition.
+
+### Replacing a failed disk
+
+With a disk missing, the pool database and the spaces' redundancy still
+allow a repair:
+
+```sh
+sudo spaces pool health /dev/sdb /dev/sdc                   # what is missing, what is degraded
+sudo spaces disk add --new /dev/sdf --yes /dev/sdb /dev/sdc  # a new disk, if the others have no room
+sudo spaces pool repair --yes /dev/sdb /dev/sdc /dev/sdf    # rebuild the lost copies
+sudo spaces disk remove --disk 3 --yes /dev/sdb /dev/sdc /dev/sdf   # the missing disk
+```
+
+`pool repair` rebuilds every copy that is on a missing disk or out of date
+on another disk: mirror copies from a current copy, single parity columns
+from the other columns. Without the new disk it uses the disks at hand if
+their rows allow it.
+
+### Health, scrub
+
+`spaces pool health DISKS...` shows what Windows would show
+(`Get-StoragePool`, `Get-VirtualDisk`, `Get-PhysicalDisk`) for the pool with
+the disks given, and how many more disk failures every space survives:
+
+| Shown | Meaning |
+|---|---|
+| Healthy / OK | every copy current and at hand |
+| Warning / Incomplete | copies on missing disks; the space still survives a disk failure |
+| Warning / Degraded | out-of-date copies (a disk that missed writes); still survives a failure |
+| Unhealthy / No Redundancy | survives no further failure |
+| Unhealthy / Detached | data lost, or the pool lost its quorum |
+| pool Warning / Degraded | disks missing, more than half of the database copies at hand |
+| pool Unhealthy / Read-only | half of the database copies or fewer at hand |
+| disk Warning / Lost Communication | the disk is missing |
+
+`spaces pool scrub DISKS...` reads every copy of every mirror space and
+every stripe of every single parity space and reports what disagrees
+(read-only). Differences where writes were under way (extent runs the
+dirty region log lists, stripes the parity journal does not list as
+consistent) are what a crash leaves and are counted apart; Windows settles
+them when it takes the pool. `--repair --yes` makes everything agree,
+keeping the first mirror copy and recomputing parity from the data.
+
+### Limits
+
+* Storage tiers, mirror-accelerated parity and dual parity spaces are not
+  created (existing ones are read, and their pools can be changed
+  otherwise).
+* Pools of version 29 (Insider builds) get no new spaces; their records
+  differ there. Other changes keep each record's own layout.
+* Windows 11 24H2 crashed (a bugcheck in its Storage Spaces driver) when a
+  pool of four disks with simple, mirror and parity spaces arrived with one
+  disk absent,
+  whether Linux or Windows had created the pool. Replace or remove a failed
+  disk on Linux before handing the pool to Windows.
+
 ## Pools with missing disks
 
 `attach` skips pools with missing disks. `spaces info <disks...>` shows which
@@ -248,4 +386,10 @@ which helps with bug reports.
   use `--backend nbd`.
 * `cannot open /dev/...: Device or resource busy`: another process (a mount,
   mdadm, LVM, a second `spaces` instance) holds the disk.
+* `... is in use by another process` (an image file): another `spaces`
+  process has it open for writing (`serve-ublk --rw`, a management command).
+* `the pool is not in a clean state`: a management command was given a pool
+  with a missing disk or out-of-date copies; see
+  [Replacing a failed disk](#replacing-a-failed-disk) or attach it to
+  Windows first.
 * Logs of serving processes: `journalctl -u 'storage-spaces-*'`.
