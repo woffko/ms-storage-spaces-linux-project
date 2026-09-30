@@ -161,7 +161,8 @@ pub fn add_disk<D: crate::io::ReadAt>(
     use crate::create::SPACE_DATABASE_STRIDE;
     use crate::format::{DATA_AREA_OFFSET, DiskHeader, ExtentRecord, POOL_DB_OFFSET};
     use crate::gpt::PoolDiskTable;
-    if pool.members.len() >= crate::create::DATABASE_COPIES {
+    // Every disk of the pool counts, missing ones too: each carries a copy.
+    if pool.disks.len() >= crate::create::DATABASE_COPIES {
         return Err(format_err!(
             "adding a disk to a pool of five or more disks is not supported yet"
         ));

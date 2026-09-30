@@ -140,6 +140,15 @@ again with a sequence above every copy seen (5 after a broken 4).
 
 ## Creating a pool
 
+Pools of version 28 (Windows 11 24H2) only. Insider build 26340 (version
+29) writes other layouts in a new pool: pool records of version 16, space
+records of version 17 (layout byte 1), child records of version 5, and a
+write-back cache (role 11) under simple and mirror spaces too (pools
+`simple1c`, `mirror2` against `simple1c_26100`, `mirror2_26100`). `spaces`
+edits the records of such pools in their own layout (the test
+`version_29_pools_are_edited_but_get_no_new_spaces`) but creates no spaces
+there.
+
 What `New-StoragePool` writes to blank disks (**verified** byte for byte
 by the test `new_pools_are_predicted_byte_for_byte`: pools of 3, 4 and 8
 disks with 512-byte sectors, 4 KiB logical sectors on the same disks, and
@@ -290,6 +299,12 @@ Each of these is one pool database update and writes nothing else
   behind a partition table without the pool partition. Removing a disk
   that still holds data failed with "not enough available capacity" on a
   pool with plenty (`c9drain`); Windows moves data off retired disks.
+* A failed disk is replaced by adding a disk to the pool that misses it,
+  repairing (the lost copies rebuilt on the new disk) and removing the
+  missing disk; adding writes the pool database and the databases in the
+  metadata space to the disks at hand only (the test
+  `a_failed_disk_is_replaced`, with a crash after every step of the
+  addition).
 * `Remove-StoragePool` (its spaces removed first) rewrites the partition
   table without the pool partition, keeping the Microsoft reserved
   partition; the SPACEDB header and the database stay behind it

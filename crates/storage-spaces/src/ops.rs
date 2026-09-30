@@ -319,6 +319,16 @@ fn database_steps(plan: &mut Plan, writes: Vec<(usize, u64, Vec<u8>)>) {
 /// `spaces space create`.
 pub fn plan_create_space<D: ReadAt>(pool: &Pool<D>, spec: &SpaceSpec, guids: Guids) -> Result<(Plan, NewSpace)> {
     let db = check_pool(pool)?;
+    // Pool version 29 (Insider build 26340) writes other record layouts
+    // (space records of version 17) and gives every space a write-back
+    // cache: new spaces there are not known byte for byte.
+    if pool.version != crate::create::POOL_VERSION {
+        return Err(Error::Pool(format!(
+            "creating spaces is known for pools of version {} (Windows 11 24H2) only; this one is version {}",
+            crate::create::POOL_VERSION,
+            pool.version
+        )));
+    }
     if pool.find_space(&spec.name).is_some() || spec.name.is_empty() {
         return Err(Error::Pool(format!(
             "a space named \"{}\" exists or the name is empty",
@@ -700,8 +710,11 @@ pub fn plan_remove_pool<D: ReadAt>(pool: &Pool<D>) -> Result<Plan> {
 }
 
 /// `spaces disk add` of a blank disk (to a pool of at most four disks).
+/// The pool may miss disks: a new disk replaces a failed one by adding it,
+/// repairing onto it (`plan_repair`) and removing the missing disk
+/// (`plan_remove_disk`).
 pub fn plan_add_disk<D: ReadAt>(pool: &Pool<D>, disk: &BlankDisk, guids: Guids) -> Result<Plan> {
-    let db = check_pool(pool)?;
+    let db = check_pool_missing_disks(pool)?;
     if disk.logical_sector > pool.logical_sector_size as u64 {
         return Err(Error::Pool(format!(
             "a disk of {}-byte sectors does not fit a pool of {}-byte sectors",

@@ -548,3 +548,120 @@ fn huge_sizes_are_refused_not_wrapped() {
     let pool = Pool::open(members()).unwrap();
     assert!(plan_resize_space(&pool, "x", u64::MAX).is_err());
 }
+
+/// A failed disk replaced: on three disks, a parity space of three columns
+/// cannot be rebuilt without a new disk. The new disk is added to the pool
+/// that misses one (data readable at every point a crash could stop it),
+/// the repair rebuilds the lost copies on it, and the missing disk is
+/// removed; the pool is clean again with the new disk.
+#[test]
+fn a_failed_disk_is_replaced() {
+    use storage_spaces::ops::{plan_add_disk, plan_remove_disk, plan_repair};
+    let mut new_guid = guids();
+    let (images, disks) = blank(4);
+    let base: Vec<Overlay<&SparseImage>> = images.iter().map(Overlay::new).collect();
+    let (plan, _) = plan_create_pool(&disks[..3], "replace", None, &mut new_guid).unwrap();
+    plan.apply::<&Overlay<&SparseImage>, _>(&[], &base[..3].iter().collect::<Vec<_>>())
+        .unwrap();
+    let spaces = [("m", 2u8), ("p", 3)];
+    for (name, tag) in spaces {
+        let pool = Pool::open(base[..3].iter().collect::<Vec<_>>()).unwrap();
+        let (plan, _) = plan_create_space(&pool, &spec(name, tag, 1024, false), &mut new_guid).unwrap();
+        plan.apply::<_, &Overlay<&SparseImage>>(&base[..3].iter().collect::<Vec<_>>(), &[])
+            .unwrap();
+        drop(pool);
+        let pool = Pool::open(base[..3].iter().collect::<Vec<_>>()).unwrap();
+        let w = pool.open_space_rw(pool.find_space(name).unwrap().id()).unwrap();
+        w.write_all_at(&data(tag, 8 << 20), 1 << 20).unwrap();
+        w.flush().unwrap();
+    }
+    // Disk 2 fails; the repair has nowhere to rebuild the parity column.
+    let pool = Pool::open(base[..3].iter().collect::<Vec<_>>()).unwrap();
+    let lost = pool.disks.values().find(|d| d.member == Some(2)).unwrap().id;
+    drop(pool);
+    let left = [&base[0], &base[1]];
+    let pool = Pool::open(left.to_vec()).unwrap();
+    assert!(plan_repair(&pool).is_err());
+    let plan = plan_add_disk(&pool, &disks[3], &mut new_guid).unwrap();
+    drop(pool);
+    // Every crash point of the addition.
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let scratch: Vec<Overlay<&Overlay<&SparseImage>>> = [&base[0], &base[1], &base[3]]
+        .iter()
+        .map(|d| Overlay::new(*d))
+        .collect();
+    let recorders: Vec<Recorder<&Overlay<&Overlay<&SparseImage>>>> = scratch
+        .iter()
+        .enumerate()
+        .map(|(i, d)| Recorder::new(d, i, log.clone()))
+        .collect();
+    plan.apply(&[&recorders[0], &recorders[1]], &[&recorders[2]]).unwrap();
+    let events = log.lock().unwrap().clone();
+    for end in (0..=events.len()).filter(|&e| e == 0 || matches!(events[e - 1], DeviceEvent::Flush { .. })) {
+        let replay: Vec<Overlay<&Overlay<&SparseImage>>> = [&base[0], &base[1], &base[3]]
+            .iter()
+            .map(|d| Overlay::new(*d))
+            .collect();
+        for e in &events[..end] {
+            if let DeviceEvent::Write { device, offset, data } = e {
+                replay[*device].write_all_at(data, *offset).unwrap();
+            }
+        }
+        // The new disk takes part once its partition table is written.
+        let pool = Pool::open(replay.iter().collect::<Vec<_>>())
+            .or_else(|_| Pool::open(replay[..2].iter().collect::<Vec<_>>()))
+            .unwrap();
+        check_data(&pool, &spaces);
+    }
+    plan.apply(&left, &[&base[3]]).unwrap();
+    let now = [&base[0], &base[1], &base[3]];
+    let pool = Pool::open(now.to_vec()).unwrap();
+    assert_eq!(pool.disks.len(), 4);
+    assert!(
+        pool.warnings.iter().all(|w| w.ends_with("is missing")),
+        "{:?}",
+        pool.warnings
+    );
+    check_data(&pool, &spaces);
+    let plan = plan_repair(&pool).unwrap();
+    drop(pool);
+    plan.apply::<_, &Overlay<&SparseImage>>(&now, &[]).unwrap();
+    let pool = Pool::open(now.to_vec()).unwrap();
+    let plan = plan_remove_disk(&pool, lost).unwrap();
+    drop(pool);
+    plan.apply::<_, &Overlay<&SparseImage>>(&now, &[]).unwrap();
+    let pool = Pool::open(now.to_vec()).unwrap();
+    assert!(pool.warnings.is_empty(), "{:?}", pool.warnings);
+    check_pool(&pool).unwrap();
+    check_data(&pool, &spaces);
+    let h = storage_spaces::health::health(&pool).unwrap();
+    assert!(h.spaces.iter().all(|s| s.state.to_string() == "Healthy / OK"), "{h:?}");
+}
+
+/// Pools of version 29 (Insider build 26340): records are edited in their
+/// own layout (a rename keeps the space record's version 17), but new
+/// spaces, whose records and defaults differ there, are refused.
+#[test]
+fn version_29_pools_are_edited_but_get_no_new_spaces() {
+    use storage_spaces::ops::plan_rename_space;
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mirror2");
+    let images: Vec<SparseImage> = (0..)
+        .map_while(|i| std::fs::File::open(dir.join(format!("disk{i}.fixture"))).ok())
+        .map(|f| SparseImage::read_from(f).unwrap())
+        .collect();
+    let devices: Vec<Overlay<&SparseImage>> = images.iter().map(Overlay::new).collect();
+    let pool = Pool::open(devices.iter().collect::<Vec<_>>()).unwrap();
+    assert_eq!(pool.version, 29);
+    let mut new_guid = guids();
+    let err = plan_create_space(&pool, &spec("new", 1, 1024, false), &mut new_guid).unwrap_err();
+    assert!(err.to_string().contains("version 29"), "{err}");
+    let plan = plan_rename_space(&pool, "mirror2", "renamed").unwrap();
+    drop(pool);
+    plan.apply::<_, &Overlay<&SparseImage>>(&devices.iter().collect::<Vec<_>>(), &[])
+        .unwrap();
+    let pool = Pool::open(devices.iter().collect::<Vec<_>>()).unwrap();
+    assert!(pool.warnings.is_empty(), "{:?}", pool.warnings);
+    let space = pool.find_space("renamed").unwrap();
+    assert_eq!(space.info.record_version, 17);
+    check_pool(&pool).unwrap();
+}

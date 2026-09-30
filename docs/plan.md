@@ -495,9 +495,13 @@ rows of thin spaces not allocated yet (M7).
   `spaces space create|delete|rename|resize` and `spaces disk
   add|set|retire|remove` (write only with `--yes`, disks not blank only
   with `--wipe`, members opened exclusively).
-* M9 (pool and disk operations): pool create, rename and remove; disk add,
-  media and usage settings, retire (data moved off), remove (also of a
-  missing disk after a repair).
+* M9 (pool and disk operations): pool create, rename and remove; disk add
+  (also to a pool missing a disk, to replace it), media and usage
+  settings, retire (data moved off), remove (also of a missing disk after
+  a repair). Pools are created with version 28 (Windows 11 24H2, the
+  current release); version 29 (Insider 26340) writes other record
+  layouts and defaults, so spaces are not created in such pools (their
+  records are edited in their own layout).
 * M10.1-2 (space operations): create every kind of space Windows creates
   on a pool of that size, delete, rename, resize.
 * M11.1-3 (maintenance): repair rebuilds copies on missing or out-of-date
