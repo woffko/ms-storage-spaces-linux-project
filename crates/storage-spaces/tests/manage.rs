@@ -158,3 +158,108 @@ fn resized_and_renamed_spaces_are_predicted_byte_for_byte() {
         manage::rename_space(&db, pool.find_space("c9rs").unwrap().id(), "c9rs2", windows.timestamp()).unwrap();
     assert!(predicted.bytes() == windows.bytes());
 }
+
+fn c9disk(label: &str) -> Vec<SparseImage> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/scenarios/c9disk")
+        .join(label);
+    (0..)
+        .map_while(|i| File::open(dir.join(format!("disk{i}.fixture"))).ok())
+        .map(|f| SparseImage::read_from(f).unwrap())
+        .collect()
+}
+
+/// Every page of `actual` equals `base` with `writes` applied.
+fn assert_writes(what: &str, actual: &SparseImage, base: Option<&SparseImage>, writes: &[(u64, Vec<u8>)]) {
+    let mut predicted = SparseImage::new(actual.size);
+    if let Some(base) = base {
+        for (offset, len) in base.ranges() {
+            let mut b = vec![0u8; len];
+            base.read_exact_at(&mut b, offset).unwrap();
+            predicted.insert(offset, &b);
+        }
+    }
+    for (offset, bytes) in writes {
+        predicted.insert(*offset, bytes);
+    }
+    let mut pages = std::collections::BTreeSet::new();
+    for image in [actual, &predicted] {
+        for (offset, len) in image.ranges() {
+            pages.extend((offset / 4096..(offset + len as u64).div_ceil(4096)).map(|p| p * 4096));
+        }
+    }
+    for page in pages {
+        let (mut a, mut p) = (vec![0u8; 4096], vec![0u8; 4096]);
+        actual.read_exact_at(&mut a, page).unwrap();
+        predicted.read_exact_at(&mut p, page).unwrap();
+        assert!(a == p, "{what}: page {page:#x} differs");
+    }
+}
+
+/// Add-PhysicalDisk of a blank disk to a pool of three (c9disk d0 -> d1):
+/// the pool database (two updates), the databases of the metadata space on
+/// every copy, and every page of the new disk are predicted byte for byte.
+#[test]
+fn an_added_disk_is_predicted_byte_for_byte() {
+    use storage_spaces::create::{NewDisk, SPACE_DATABASE_STRIDE};
+    use storage_spaces::records::DiskBody;
+    let (old, new) = (c9disk("d0"), c9disk("d1"));
+    let old_pool = Pool::open(old.iter().collect::<Vec<_>>()).unwrap();
+    let new_pool = Pool::open(new.iter().collect::<Vec<_>>()).unwrap();
+    let db = database(&old);
+    let windows = database(&new);
+    // The new disk, as Windows set it up.
+    let added = &new[3];
+    let mut gpt = vec![0u8; 1024 + 256];
+    added.read_exact_at(&mut gpt, 0).unwrap();
+    let mixed = |b: &[u8]| storage_spaces::Guid::from_mixed_endian(b.try_into().unwrap());
+    let mut page = [0u8; 4096];
+    added.read_exact_at(&mut page, 16 << 20).unwrap();
+    let header = DiskHeader::parse(&page).unwrap();
+    let record = storage_spaces::format::assemble_records(windows.bytes(), 0x40)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.kind == 2)
+        .map(|r| DiskBody::decode(&r.body).unwrap())
+        .find(|d| d.guid == header.disk_guid)
+        .unwrap();
+    let disk = NewDisk {
+        size: added.size,
+        sector: 512,
+        guid: header.disk_guid,
+        gpt_disk_guid: mixed(&gpt[512 + 56..512 + 72]),
+        msr_guid: mixed(&gpt[1024 + 16..1024 + 32]),
+        partition_guid: mixed(&gpt[1024 + 128 + 16..1024 + 128 + 32]),
+        joined: header.format_time,
+        manufacturer: record.manufacturer.clone(),
+        model: record.model.clone(),
+        database_copy: true,
+    };
+    // The times of the databases in the metadata space.
+    let meta = new_pool
+        .spaces
+        .values()
+        .find(|s| s.info.role == storage_spaces::format::SpaceRole::Metadata)
+        .unwrap();
+    let e = &meta.extents[0];
+    let (device, at) = new_pool.slab_location(e.disk_id, e.physical_slab).unwrap().unwrap();
+    let times = |number: u64| {
+        let mut h = [0u8; 0x50];
+        new[device]
+            .read_exact_at(&mut h, at + number * SPACE_DATABASE_STRIDE)
+            .unwrap();
+        u64::from_be_bytes(h[0x48..0x50].try_into().unwrap())
+    };
+    let plan = storage_spaces::manage::add_disk(&old_pool, &db, &disk, record.id, windows.timestamp(), times).unwrap();
+    assert!(plan.database.bytes() == windows.bytes());
+    for (i, disk) in old.iter().enumerate() {
+        let writes: Vec<(u64, Vec<u8>)> = plan
+            .members
+            .iter()
+            .filter(|(d, _, _)| *d == i)
+            .map(|(_, o, b)| (*o, b.clone()))
+            .collect();
+        assert_writes(&format!("disk {i}"), &new[i], Some(disk), &writes);
+    }
+    assert_writes("the new disk", added, None, &plan.new_disk);
+}

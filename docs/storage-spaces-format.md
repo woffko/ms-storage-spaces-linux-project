@@ -34,7 +34,7 @@ Slabs are 256 MiB.
 | 0x08 | 2 | layout version, 3 on Windows 10/11 |
 | 0x0a | 2 | 0x0200 |
 | 0x0c | 4 | CRC-32 (zlib, stored BE) of bytes 0..0x200 with this field zeroed (**verified**) |
-| 0x10 | 8 | 1 on the disks of `New-StoragePool`; 2 on disks added later (`Add-PhysicalDisk`, scenario `c9disk`) and on a retired disk after the repair |
+| 0x10 | 8 | how often the header was written: 1 on the disks of `New-StoragePool`; 2 on disks added later (written without, then with the database copy: `c9disk`), on a retired disk after the repair (copy cleared) and on a removed disk |
 | 0x18 | 8 | FILETIME when the disk joined the pool |
 | 0x20 | 16 | pool GUID |
 | 0x30 | 16 | physical disk GUID (as in the `PD:{...}` part of the disk ObjectId) |
@@ -249,6 +249,19 @@ Each of these is one pool database update and writes nothing else
   new rows (virtual slabs continuing, allocation unit x data columns per
   row group). The parity journal's header keeps its first run count.
 * `Set-StoragePool -IsReadOnly` writes nothing.
+* `Add-PhysicalDisk` of a blank disk to a pool of three (**verified** byte
+  for byte on every page by the test `an_added_disk_is_predicted_byte_for_byte`,
+  scenario `c9disk`): the new disk gets the partition table and a header
+  without a database copy; one update writes the disk's record (without
+  the copy), the pool record (only its sequence changes), the metadata
+  space with one more copy and redundancy, and that copy's extent
+  (physical slab 0 of the new disk), freeing the old pool and metadata
+  space records; the databases in the metadata space get their disk list
+  rewritten (sequence 2, the new disk included) on every copy, the new
+  disk's included; the new disk gets the pool database and its header
+  again, with the copy (so generation 2: the generation counts how often
+  the header was written); a second update rewrites the disk's record with
+  the copy. Disk ids come from Windows' object id counter (44 here).
 * `Remove-StoragePool` (its spaces removed first) rewrites the partition
   table without the pool partition, keeping the Microsoft reserved
   partition; the SPACEDB header and the database stay behind it

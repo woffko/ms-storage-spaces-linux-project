@@ -228,9 +228,9 @@ enum Command {
         /// and a clean journal).
         #[arg(long)]
         without_cache_slots: bool,
-        /// Every non-zero page of the disks instead (pools holding metadata
-        /// only, such as the states of management scenarios; at most 64 MiB
-        /// per disk).
+        /// Every non-zero page of the disks instead, except pages of the
+        /// verification pattern (the states of management scenarios; at
+        /// most 64 MiB per disk).
         #[arg(long, conflicts_with = "without_cache_slots")]
         all_pages: bool,
     },
@@ -1199,7 +1199,8 @@ fn fixture(dir: &std::path::Path, out: &std::path::Path, without_cache_slots: bo
             let mut buf = vec![0u8; len];
             dev.inner().read_exact_at(&mut buf, offset)?;
             for (k, page) in buf.chunks(4096).enumerate() {
-                if page.iter().any(|&b| b != 0) && !(without_cache_slots && page.starts_with(b"SPSLOT")) {
+                let pattern = all_pages && page.starts_with(storage_spaces::testpattern::MAGIC);
+                if page.iter().any(|&b| b != 0) && !pattern && !(without_cache_slots && page.starts_with(b"SPSLOT")) {
                     image.insert(offset + (k * 4096) as u64, page);
                     if all_pages && image.stored() > 64 << 20 {
                         anyhow::bail!("{}: more than 64 MiB of non-zero pages", paths[i].display());
