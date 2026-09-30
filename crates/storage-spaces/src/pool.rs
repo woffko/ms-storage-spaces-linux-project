@@ -36,6 +36,8 @@ pub struct PhysicalDisk {
     pub media: MediaType,
     pub guid: Guid,
     pub name: String,
+    /// Whether the disk carries a copy of the pool database.
+    pub database_copy: bool,
     /// Index into [`Pool::members`] if the disk was supplied.
     pub member: Option<usize>,
 }
@@ -241,6 +243,7 @@ impl<D: ReadAt> Pool<D> {
                     media: d.media,
                     guid: d.guid,
                     name: d.name,
+                    database_copy: d.database_copy,
                     member,
                 },
             );

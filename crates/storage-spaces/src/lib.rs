@@ -24,6 +24,7 @@ pub mod format;
 pub mod gf16;
 pub mod gpt;
 mod guid;
+pub mod health;
 pub mod io;
 pub mod journal;
 pub mod layout;

@@ -17,6 +17,28 @@ pub enum Condition {
     Failed,
 }
 
+/// What is left of a space's redundancy (see [`Layout::redundancy`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Redundancy {
+    /// Disk failures still survived; `None` when some data is lost.
+    pub left: Option<u64>,
+    /// Some copies or columns are on missing disks.
+    pub missing: bool,
+    /// Some copies are out of date.
+    pub stale: bool,
+}
+
+impl Redundancy {
+    /// The worse of two parts of one space (its tiers, its cache).
+    pub fn and(self, other: Redundancy) -> Redundancy {
+        Redundancy {
+            left: self.left.min(other.left),
+            missing: self.missing || other.missing,
+            stale: self.stale || other.stale,
+        }
+    }
+}
+
 /// Largest slab number or count accepted from extent records.
 const MAX_SLABS: u64 = 1 << 32;
 
@@ -69,6 +91,8 @@ pub struct Layout {
     runs: BTreeMap<(u64, u64), Vec<Run>>,
     /// Out-of-date copies per column.
     stale: BTreeMap<u64, Vec<Run>>,
+    /// The copies of `stale` with a stale marker (not those being rebuilt).
+    outdated: BTreeMap<u64, Vec<Run>>,
 }
 
 impl Layout {
@@ -112,6 +136,7 @@ impl Layout {
         // Out-of-date copies and copies being rebuilt are not read, but
         // remembered so that a row without a current copy is an error.
         let mut stale: BTreeMap<u64, Vec<Run>> = BTreeMap::new();
+        let mut outdated: BTreeMap<u64, Vec<Run>> = BTreeMap::new();
         // Copy numbers can exceed the policy while a copy is regenerated.
         let copies = extents
             .iter()
@@ -162,6 +187,9 @@ impl Layout {
                 runs.entry((e.column, e.copy)).or_default().push(run);
             } else {
                 stale.entry(e.column).or_default().push(run);
+                if e.stale_marker != ExtentRecord::CURRENT {
+                    outdated.entry(e.column).or_default().push(run);
+                }
             }
         }
         for list in runs.values_mut() {
@@ -185,6 +213,7 @@ impl Layout {
             interleave: policy.interleave,
             runs,
             stale,
+            outdated,
         })
     }
 
@@ -360,6 +389,76 @@ impl Layout {
             worst = worst.max(row_condition);
         }
         worst
+    }
+
+    /// Disk failures the space still survives with only the disks for
+    /// which `present` returns true (`None`: some data is lost), and
+    /// whether copies are on missing disks or out of date. Out-of-date
+    /// copies on disks for which `evacuating` returns true (present disks
+    /// being retired: their copies stay valid until moved, and Windows
+    /// counts them) count as current; copies being rebuilt do not count.
+    /// Rows without any extent (thin provisioning) do not count.
+    pub fn redundancy(&self, present: impl Fn(u64) -> bool, evacuating: impl Fn(u64) -> bool) -> Redundancy {
+        let mut bounds: Vec<u64> = self
+            .runs
+            .values()
+            .chain(self.stale.values())
+            .flatten()
+            .flat_map(|r| [r.first_row, r.first_row + r.rows])
+            .collect();
+        bounds.sort_unstable();
+        bounds.dedup();
+        let tolerance = match self.resiliency {
+            Resiliency::Parity if self.groups > 1 => 2,
+            Resiliency::Parity => self.parity_units,
+            _ => self.copies.saturating_sub(1),
+        };
+        let mut out = Redundancy {
+            left: Some(tolerance),
+            missing: false,
+            stale: false,
+        };
+        for row in bounds {
+            let mut lost_columns = 0;
+            let mut least_copies = u64::MAX;
+            let mut allocated = false;
+            for column in 0..self.columns {
+                let in_row = |runs: Option<&Vec<Run>>| -> Vec<u64> {
+                    runs.into_iter()
+                        .flatten()
+                        .filter(|r| r.first_row <= row && row < r.first_row + r.rows)
+                        .map(|r| r.disk_id)
+                        .collect()
+                };
+                let outdated = in_row(self.outdated.get(&column));
+                let copies: Vec<u64> = self
+                    .copies_of(column)
+                    .iter()
+                    .filter_map(|&copy| self.physical(column, copy, row).map(|(disk, _)| disk))
+                    .chain(outdated.iter().copied().filter(|&d| evacuating(d)))
+                    .collect();
+                if copies.is_empty() && !self.has_stale_copy(column, row) {
+                    continue;
+                }
+                allocated = true;
+                out.stale |= outdated.iter().any(|&d| !evacuating(d));
+                let readable = copies.iter().filter(|&&d| present(d)).count() as u64;
+                out.missing |= readable < copies.len() as u64;
+                if readable == 0 {
+                    lost_columns += 1;
+                }
+                least_copies = least_copies.min(readable);
+            }
+            if !allocated {
+                continue;
+            }
+            let left = match self.resiliency {
+                Resiliency::Parity => tolerance.checked_sub(lost_columns),
+                _ => least_copies.checked_sub(1),
+            };
+            out.left = out.left.min(left);
+        }
+        out
     }
 
     /// Bytes of the owner space the extents cover, up to the end of the

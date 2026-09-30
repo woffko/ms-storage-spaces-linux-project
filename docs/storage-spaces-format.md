@@ -305,6 +305,48 @@ space, `c9opts2`). Its databases in the metadata space stay. Before
 deleting a parity space Windows closes it, writing a checkpoint into its
 journal and one into its cache, inside the slabs the update frees.
 
+## Health
+
+What `Get-StoragePool`, `Get-VirtualDisk` and `Get-PhysicalDisk` show
+(`HealthStatus` / `OperationalStatus`) follows from the database and the
+disks at hand; `spaces pool health` predicts it (`storage_spaces::health`)
+with these rules, from Microsoft's documentation of the states:
+
+* A disk at hand is Healthy / OK, a missing one Warning / Lost
+  Communication. Usage (Retired, Hot Spare, ...) is a separate property:
+  retired, hot spare, manual-select and journal disks were Healthy / OK
+  (**verified**: every fixture whose manifest records `Get-PhysicalDisk`).
+* The pool is Healthy / OK with every disk. With disks missing it is
+  Warning / Degraded while more than half of the pool database copies are
+  at hand (one of three disks lost: Warning / Degraded), otherwise
+  Unhealthy / Read-only, and every space is detached (two of four lost:
+  Read-only, both spaces Detached) (**verified** on those two states, the
+  first versions of disk add and retire cut by a crash, `mgmt-crash.json`).
+  Stale pool database copies do not count: pools with them attached as
+  Healthy.
+* A space counts its own extents and those of its hidden spaces (tiers,
+  write-back cache, dirty region log, parity journal). With every copy
+  current and at hand it is Healthy / OK; so it is while a present disk is
+  being retired: Windows marks that disk's copies out of date (stale marker
+  2) and rebuilds them elsewhere, and showed the space Healthy / OK during
+  the rebuild (**verified**: `repairint`). Copies on missing disks make the
+  space Incomplete, other out-of-date copies Degraded; it is Warning while
+  it still survives a disk failure, Unhealthy with No Redundancy when it
+  survives none (a two-way mirror that lost a copy: Unhealthy / No
+  Redundancy, `tornt2`), and Unhealthy / Detached when data is lost.
+  Windows showed Degraded where it had written the pool database with the
+  disk away (`tornt2`: No Redundancy Degraded; the disk add state: Degraded
+  Incomplete); from the metadata alone a copy on a missing disk is
+  Incomplete.
+* Not in the metadata, so never predicted: a repair in service, a space set
+  to manual attach and detached (`spstates`: Unknown / Detached), a pool
+  or space made read-only by an administrator.
+
+Windows could not be asked about more states with disks absent: a pool of
+four disks with simple, mirror and parity spaces made Windows 11 24H2
+bugcheck (0x50 in spaceport.sys) when it arrived without one disk, whether
+Linux or Windows had created it (`windows-absent-disk-bugcheck.json`).
+
 ## Records
 
 Every record body below is complete: `storage_spaces::records` decodes

@@ -529,14 +529,16 @@ rows of thin spaces not allocated yet (M7).
   read back writes at both ends of every new space) and `manage` (every
   planner on patched fixture pools; every action writes only inside the
   members' pool partitions or their partition tables).
-* M11.4 (health report in Windows terms) needs Windows' states for pools
-  with disks absent. The first experiment (tools/health-states.sh, a
-  Linux-created pool of four disks with simple, mirror and parity spaces)
+* M11.4: `spaces pool health` shows the pool, its disks and spaces in
+  Windows' terms (rules in docs/storage-spaces-format.md, "Health"),
+  checked against every Windows state on record. Asking Windows about more
+  states with disks absent failed: the experiment (tools/health-states.sh,
+  a Linux-created pool of four disks with simple, mirror and parity spaces)
   bugchecked Windows (0x50 in spaceport.sys) when the pool arrived without
   one disk; the same layout created by Windows (scenario c11ctl) crashed
   it the same way, at the same address (evidence
-  `windows-absent-disk-bugcheck.json`). Stopped after the second crash of
-  the VM, as the goal requires.
+  `windows-absent-disk-bugcheck.json`). VM experiments with disks absent
+  stopped after the second crash, as the goal requires.
 
 ## Test infrastructure (continuous, feeds every stage)
 

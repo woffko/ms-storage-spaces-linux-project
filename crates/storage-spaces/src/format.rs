@@ -236,6 +236,8 @@ pub struct DiskRecord {
     pub name: String,
     pub usage: DiskUsage,
     pub media: MediaType,
+    /// Whether the disk carries a copy of the pool database.
+    pub database_copy: bool,
 }
 
 /// Media type of a disk (`MediaType` of `Get-PhysicalDisk`).
@@ -438,8 +440,8 @@ fn decode_disk(c: &mut Cursor) -> Result<DiskRecord> {
     let name = c.string()?;
     let _description = c.string()?;
     c.u8()?;
-    // 2, or 0 on a retired disk.
-    c.u8()?;
+    // 2, or 0 on a disk without a copy of the pool database.
+    let database_copy = c.u8()? == 2;
     let usage = DiskUsage::from_byte(c.u8()?);
     // Manufacturer, model and two more strings (empty on virtual disks).
     for _ in 0..4 {
@@ -454,6 +456,7 @@ fn decode_disk(c: &mut Cursor) -> Result<DiskRecord> {
         name,
         usage,
         media,
+        database_copy,
     })
 }
 

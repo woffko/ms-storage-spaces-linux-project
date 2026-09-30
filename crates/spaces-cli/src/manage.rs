@@ -51,6 +51,13 @@ pub enum PoolCommand {
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
+    /// The health Windows would show for the pool with the disks given
+    /// (HealthStatus / OperationalStatus of the pool, its disks and spaces;
+    /// read only). Disks of the pool that are not given count as missing.
+    Health {
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+    },
     /// Read every copy of the mirror spaces and every stripe of the single
     /// parity spaces and report what disagrees (read only); `--repair`
     /// makes it agree, keeping the first mirror copy and the parity data.
@@ -355,6 +362,29 @@ pub fn pool(command: PoolCommand) -> Result<()> {
         PoolCommand::Remove { yes, devices } => on_pool(&devices, yes, ops::plan_remove_pool),
         PoolCommand::Repair { yes, devices } => on_pool(&devices, yes, ops::plan_repair),
         PoolCommand::Optimize { yes, devices } => on_pool(&devices, yes, ops::plan_rebalance),
+        PoolCommand::Health { devices } => {
+            let files = devices
+                .iter()
+                .map(|p| File::open(p).with_context(|| p.display().to_string()))
+                .collect::<Result<Vec<_>>>()?;
+            let pool = Pool::open(files)?;
+            let h = storage_spaces::health::health(&pool)?;
+            println!(
+                "pool \"{}\": {} ({} of {} database copies at hand)",
+                pool.name, h.pool, h.database_copies.0, h.database_copies.1
+            );
+            for d in &h.disks {
+                let disk = &pool.disks[&d.id];
+                println!("  disk {} {}: {} (usage {:?})", d.id, disk.guid, d.state, disk.usage);
+            }
+            for s in &h.spaces {
+                let left = s
+                    .failures_left
+                    .map_or("data lost".to_owned(), |n| format!("survives {n} more disk failure(s)"));
+                println!("  space \"{}\": {} ({left})", s.name, s.state);
+            }
+            Ok(())
+        }
         PoolCommand::Scrub { repair, yes, devices } => {
             if repair {
                 return on_pool(&devices, yes, |p| {
