@@ -112,6 +112,56 @@ Rules:
 Done when M6-M8 exit criteria are met and only the approval for v0.2.0 remains.
 ```
 
-Stage 3 (M9-M11) and the ReFS track get their goals once Stage 2 shows
-what the metadata engine can do; the ReFS track does not depend on it and
-can start earlier.
+## Goal C: Stage 3, pool management (after Goal B)
+
+```text
+Do Stage 3 of docs/plan.md (M9-M11, pool management) in /home/w0w/Linux_Storage_Spaces on top of the Stage 2 metadata engine (Windows 11 pools only; pool version 28 by default, 29 on request). Work through this TODO in order; record the evidence for each item in docs/plan.md and mark M9-M11 "exit criteria met" only when everything in them is done.
+
+1. What Windows writes for management operations (as M5 did for writes)
+   Method: VM experiments on small VHDX pools with snapshots before and after each operation (and in between where order matters), metadata diffs with spaces diff, scenarios in tools/scenarios.sh.
+   - New-StoragePool on blank disks (1-8 disks, 512/512e/4Kn): GPT and partition, SPACEDB header, database layout, pool and disk records, metadata space, which values are random (GUIDs) and which follow from the input.
+   - Add-PhysicalDisk, Set-PhysicalDisk (-Usage Retired, -MediaType), Remove-PhysicalDisk with evacuation, a replaced disk, Set-StoragePool (-NewFriendlyName, -IsReadOnly), Remove-StoragePool.
+   - New-VirtualDisk for every resiliency and provisioning, with and without write-back cache, and tiers: space records, hidden children (cache, DRT, journal), their initial headers and slots, the first slabs. Resize-VirtualDisk, Remove-VirtualDisk, Set-VirtualDisk -NewFriendlyName.
+   - Repair-VirtualDisk onto another disk, Optimize-StoragePool (rebalance): which slabs move, the order of copy, metadata switch and free, how progress survives an interruption.
+   - For every item write the specification into docs/storage-spaces-format.md with predictor tests (from a pool state and an operation the library predicts the metadata Windows writes). Where Windows' choices do not follow from the metadata (disks, GUIDs, object ids), record the rules they obey and treat the choice as an input.
+
+2. Management infrastructure
+   - Commands `spaces pool ...`, `spaces disk ...`, `spaces space ...`. Every operation first prints what it will change (--dry-run shows the metadata diff) and needs an explicit confirmation for anything destructive.
+   - `pool create` takes only disks named explicitly and refuses disks that are not blank (partition table, file system signature, pool membership) unless told to wipe them.
+   - Operations only on clean, healthy pools that are not attached (or attached read-only) anywhere; refuse everything else with the reason.
+   - Crash safety: each operation is a sequence of database updates that are each consistent; data moves copy first, switch the metadata, then free. Replay tests after every metadata write and at points inside data moves.
+
+3. M9: pool and disk operations (plan items M9.1-M9.3).
+4. M10: space operations (M10.1-M10.3); new spaces must pass the Stage 2 write checks (fio, NTFS) on Linux.
+5. M11: maintenance (M11.1-M11.4): repair of stale or missing copies onto other disks, rebalance, scrub with a report and optional repair, a health report in Windows' terms.
+
+6. Exit checks
+   - Pools created and changed only on Linux: Windows 11 imports them without warnings; Get-StoragePool, Get-PhysicalDisk, Get-VirtualDisk and Get-PhysicalExtent show the expected properties; data written on Linux reads back on Windows; Windows' own Repair-VirtualDisk and Optimize-StoragePool succeed on them.
+   - The reverse: copies of Windows-created corpus pools changed on Linux (disks added and removed, spaces created, extended, deleted, repaired) pass the same checks.
+   - Crash replays of every operation: Windows and Linux open the pool in the old or the new state, never a broken one.
+   - Fuzz targets for every new encoder and operation, security review of the management paths, 24 h of fuzzing without findings.
+
+7. v1.0.0
+   - Document the management commands (user guide, man page, README, CHANGELOG), version 1.0.0, packages.
+   - Prepare the GitHub publication decided on 2026-09-29 (after Stage 3): the local commits, the release notes, the static x86_64 musl build; no crates.io. Stop and ask before pushing, tagging or releasing, including whether 0.1.0 and 0.2.0 get tags of their own.
+
+Rules:
+- Follow AGENTS.md and docs/plan.md.
+- All writes go to sparse image files or copies of corpus pools (on the Linux VM under /srv/spaces/work, locally under testdata/work, on the Windows VM under C:\sstest). Keep the fetched originals read-only. Never write to real disks, the test_ubuntu pool or the pre-existing Windows "Storage pool".
+- Keep docs/storage-spaces-format.md current and back every new format claim with a test.
+- Windows VM (tools/vm.sh):
+  - generators pace their writes;
+  - never run heavy I/O on the Windows and Linux VMs at the same time;
+  - if the VM crashes twice, stop and ask.
+- Kernel-level tests run on the Linux VM (tools/linux-vm.sh). Detach only what you attached; delete work copies after use (/srv/spaces has 128 GB).
+- Keep long runs light on the host: fuzzing and stress runs at nice 19 with one worker per fuzz target (about 8 of 64 cores, a few GB of memory); a run cut short by a host crash resumes from its corpus for the remaining time on unchanged code.
+- cargo fmt, clippy and all tests must be green.
+- Commit after each completed step with English messages.
+- Do not push, publish or tag without asking.
+- Stop and ask when a step needs a destructive action, a VM or hardware reconfiguration, or a decision the plan does not cover.
+
+Done when M9-M11 exit criteria are met and only the approval for publishing v1.0.0 remains.
+```
+
+The ReFS track (Track B of the plan) gets its own goal; it does not depend
+on Stage 3.
