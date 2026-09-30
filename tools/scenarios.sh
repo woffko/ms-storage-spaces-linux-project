@@ -108,6 +108,8 @@ c9opts | - | blank:5; newpool; snap:q0; newspacex:c9m3:res=Mirror,copies=3,size=
 # Mirror and simple spaces take no write-back cache on these pools (c9opts
 # stopped there); the remaining options, then deletions and a space after them.
 c9opts2 | - | blank:5; newpool; newspacex:c9s1:res=Simple,cols=1,il=64,au=256,size=512; snap:r1; newspacex:c9pt:res=Parity,prov=Thin,size=4096; snap:r2; newspacex:c9p5:res=Parity,size=2048; snap:r3; removespace:c9pt; snap:r4; removespace:c9s1; snap:r5; newspacex:c9after:res=Simple,size=1024; snap:r6; dismount
+# What a new space clears of old data on its slabs (c9opts2: its first page).
+c9zero | - | blank:2; newpool; newspacex:c9fill:res=Simple,size=2048,prov=Fixed; write:c9fill:0:2097152:x; removespace:c9fill; snap:z0; newspacex:c9z:res=Simple,size=2048,prov=Fixed; snap:z1; dismount
 LIST
 exit $status
 }

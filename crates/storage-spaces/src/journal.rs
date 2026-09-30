@@ -60,9 +60,10 @@ pub struct ParityJournal {
 
 /// The header of a new parity journal (a 256 MiB child space): the cache
 /// header's layout with 1024 slots of 4 KiB, two checkpoint areas of
-/// 125 MiB at 6 MiB, then the owner's size, its stripe width (data columns
-/// x interleave) and 1.
-pub fn new_journal_header(owner: Guid, owner_size: u64, stripe: u32) -> Vec<u8> {
+/// 125 MiB at 6 MiB, then the size of the owner's extent runs (allocation
+/// unit x data columns), its stripe width (data columns x interleave) and
+/// the number of runs.
+pub fn new_journal_header(owner: Guid, run_size: u64, stripe: u32, runs: u32) -> Vec<u8> {
     crate::cache::CacheHeader {
         owner_guid: owner,
         sequence: 1,
@@ -72,9 +73,9 @@ pub fn new_journal_header(owner: Guid, owner_size: u64, stripe: u32) -> Vec<u8> 
         checkpoint_offset: 0x60_0000,
         checkpoint_size: 125 << 20,
         checkpoint_count: 2,
-        data_offset: owner_size,
+        data_offset: run_size,
         chunk_size: stripe,
-        chunk_count: 1,
+        chunk_count: runs,
     }
     .encode(SPVDT_SIGNATURE)
 }

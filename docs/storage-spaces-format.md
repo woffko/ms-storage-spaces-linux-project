@@ -178,9 +178,11 @@ page, and nothing else is written):
   internal, parent the space), the extents of its child (flag 4, one slab
   per row and copy) and the child (type 6, range 0 to its size); then the
   space's extents. A thin space gets its first row at creation.
-* Every type 3 space (the space and each container) has a `number`: the
-  count of type 3 spaces the pool had before it, containers included, so
-  also the slot of its database in the metadata space. Numbers go to the
+* Every type 3 space (the space and each container) has a `number`, the
+  slot of its database in the metadata space: the smallest number no type
+  3 space of the pool has (so the count of them as long as none was
+  deleted; after deletions Windows reused number 0 and overwrote that
+  slot's old database, `c9opts2`). Numbers go to the
   space first, then the cache container, then the journal container,
   although the journal's records come first in the update.
 * A database per type 3 space in the metadata space, 4 MiB apart by number:
@@ -199,19 +201,34 @@ page, and nothing else is written):
   fails: `c9new`, `c9opts`). The dirty region log starts
   as an empty header (generation 0) at 0 and at its size less 8 KiB; the
   parity journal as its header alone (owner the space, 1024 slots of 4 KiB
-  from 8 KiB, two checkpoint areas of 125 MiB at 6 MiB, then the space's
-  size, its stripe width and 1); the cache as its header and slot 0 (type
+  from 8 KiB, two checkpoint areas of 125 MiB at 6 MiB, then the size and
+  number of the space's extent runs and its stripe width); the cache as its header and slot 0 (type
   1, sequence 1, one entry (8, 1)). The cache header: 1024 slots of 4 KiB
   from 8 KiB; two checkpoint areas after them, each 0x200 bytes plus
   16 + chunk_size / 4096 bytes per chunk rounded up to 4 KiB; chunks of
   the space's stripe width from the next chunk boundary to the end
   (**verified** for the caches of `c9new`, `paritythin_26100`,
   `parity3_26100` and `wc64` by the test `new_caches_have_windows_geometry`).
+* The extents of a fixed space take, on each disk, the first run of free
+  physical slabs as long as the extent (four slabs with 1 GiB units:
+  `c9opts2` skipped a run of three).
 * Object ids do not follow from the metadata: the first space of a pool
   got 11 in `c9new` (disks 1-3, metadata space 4) and 15 in `c9eight`, and
   the ids of later spaces grow in steps (44, 73/74, 76, 109/110, 115/116).
   Windows reads any unique ids (they are inputs of the model).
 
+
+## Deleting a space
+
+`Remove-VirtualDisk` is one pool database update that frees the records of
+the space, of its hidden containers and children and of all their extents
+(**verified** byte for byte on every copy by the test
+`deleted_spaces_are_predicted_byte_for_byte`: a thin parity and a simple
+space, `c9opts2`). Its databases in the metadata space stay. Before
+deleting a parity space Windows closes it, writing a checkpoint into its
+journal and one into its cache, inside the slabs the update frees.
+
+## Records
 
 Every record body below is complete: `storage_spaces::records` decodes
 each field and re-encodes every pool, disk and space record of every
@@ -748,8 +765,11 @@ Parity spaces have a hidden role 0x0a child holding "SPVDT\0\0\0", with the
 same header and slot geometry as SPCACHE (CRC-32 fields, owner GUID,
 `slot_offset`, `slot_size`, `slot_count`), then at 0x40 the checkpoint
 area offset (0x600000), at 0x48 the size of each area (125 MiB) and at
-0x4c their number (2), at 0x50 the owner's size and at 0x58 its stripe
-size (data columns x interleave), then u32 1. The log wraps behind
+0x4c their number (2), at 0x50 the size of the owner's extent runs
+(allocation unit x data columns), at 0x58 its stripe size (data columns x
+interleave) and at 0x5c the number of runs (a fixed space of 2 GiB with
+1 GiB units on two data columns: 2 GiB, 1; a thin space of 4 GiB: 512 MiB,
+8; scenarios `c9new`, `c9opts2`). The log wraps behind
 checkpoints exactly like the cache's (**verified**: `parity4` and `lrc12`
 hold journal checkpoints of sequences 1025 and 2050, continuing at slot 0,
 with one entry per run; pools whose journal never wrapped have none), and

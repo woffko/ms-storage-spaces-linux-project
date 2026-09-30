@@ -433,7 +433,12 @@ impl NewSpace {
                     out.push((i, 0, page.clone()));
                     out.push((i, h.size - 0x2000, page));
                 }
-                Hidden::Journal => out.push((i, 0, crate::journal::new_journal_header(self.guid, self.size, stripe))),
+                Hidden::Journal => {
+                    let run = self.allocation_unit * (self.columns - self.redundancy);
+                    let header =
+                        crate::journal::new_journal_header(self.guid, run, stripe, self.size.div_ceil(run) as u32);
+                    out.push((i, 0, header));
+                }
                 Hidden::Cache => {
                     let header = crate::cache::CacheHeader::new(self.guid, h.size, stripe);
                     let slot = crate::cache::CacheWriter::new(header.clone(), 0).init_slot();
@@ -522,4 +527,54 @@ impl NewSpace {
         }
         Ok(out)
     }
+}
+
+/// The ids of the records of space `id` and everything that belongs to it:
+/// its hidden containers and their children, and every extent of them.
+pub fn space_family_records(db: &Database, id: u64) -> Result<Vec<u32>> {
+    use crate::format::{Record, assemble_records};
+    let records = assemble_records(db.bytes(), 0x40)?;
+    let decoded: Vec<(u32, Record)> = records
+        .iter()
+        .filter_map(|r| Record::decode(r).ok().map(|d| (r.id, d)))
+        .collect();
+    let mut family = vec![id];
+    // Containers (parent: the space), then their children.
+    for _ in 0..2 {
+        for (_, r) in &decoded {
+            if let Record::Space(s) = r
+                && s.parent.is_some_and(|p| family.contains(&p))
+                && !family.contains(&s.id)
+            {
+                family.push(s.id);
+            }
+        }
+    }
+    let ids: Vec<u32> = decoded
+        .iter()
+        .filter(|(_, r)| match r {
+            Record::Space(s) => family.contains(&s.id),
+            Record::Extent(e) => family.contains(&e.space_id),
+            _ => false,
+        })
+        .map(|(rid, _)| *rid)
+        .collect();
+    if !decoded.iter().any(|(_, r)| matches!(r, Record::Space(s) if s.id == id)) {
+        return Err(format_err!("no space with id {id}"));
+    }
+    Ok(ids)
+}
+
+/// The number a new type 3 space gets: the smallest no space of `db` has
+/// (Windows reuses the numbers, and so the metadata space slots, of deleted
+/// spaces: `c9opts2`).
+pub fn next_space_number(db: &Database) -> Result<u64> {
+    use crate::format::assemble_records;
+    let used: std::collections::BTreeSet<u64> = assemble_records(db.bytes(), 0x40)?
+        .iter()
+        .filter(|r| r.kind == 3)
+        .filter_map(|r| SpaceBody::decode(false, &r.body).ok())
+        .map(|s| s.number)
+        .collect();
+    Ok((0..).find(|n| !used.contains(n)).unwrap())
 }

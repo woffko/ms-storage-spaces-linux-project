@@ -290,6 +290,8 @@ fn new_spaces_are_predicted_byte_for_byte() {
         ("c9opts", "q0", "q1"),
         ("c9opts", "q1", "q2"),
         ("c9opts", "q2", "q3"),
+        ("c9opts2", "r1", "r2"),
+        ("c9opts2", "r2", "r3"),
         ("c9l4k", "p0", "p1"),
         ("c94kn", "p0", "p1"),
     ] {
@@ -318,4 +320,46 @@ fn new_spaces_are_predicted_byte_for_byte() {
             assert_pages_equal(&format!("{} disk {i} ({})", dir.display(), space.name), disk, &writes);
         }
     }
+}
+
+/// Remove-VirtualDisk: one database update freeing the records of the space,
+/// its hidden containers and children and all their extents (a thin parity
+/// space, then a simple space: c9opts2); the pool database is predicted byte
+/// for byte on every copy. (Windows also closes a parity space's journal and
+/// cache, writing a checkpoint into each, inside slabs the update frees.)
+/// The next space takes the smallest free number.
+#[test]
+fn deleted_spaces_are_predicted_byte_for_byte() {
+    use storage_spaces::create::{next_space_number, space_family_records};
+    use storage_spaces::database::Database;
+    for (before, after, name) in [("r3", "r4", "c9pt"), ("r4", "r5", "c9s1")] {
+        let (_, old) = state("c9opts2", before);
+        let (dir, new) = state("c9opts2", after);
+        let old_pool = storage_spaces::Pool::open(old.iter().collect::<Vec<_>>()).unwrap();
+        let new_pool = storage_spaces::Pool::open(new.iter().collect::<Vec<_>>()).unwrap();
+        let m = &old_pool.members[0];
+        let db = Database::read_formatted(&old[m.device], m.partition.offset + 0x1000).unwrap();
+        let id = old_pool.find_space(name).unwrap().id();
+        let (mut predicted, _) = db.updated(&[], &space_family_records(&db, id).unwrap()).unwrap();
+        predicted.commit(db.sequence() + 1, new_pool.database.timestamp);
+        for m in &new_pool.members {
+            let windows = Database::read_formatted(&new[m.device], m.partition.offset + 0x1000).unwrap();
+            assert!(
+                windows.bytes() == predicted.bytes(),
+                "{} device {}",
+                dir.display(),
+                m.device
+            );
+        }
+    }
+    let (_, old) = state("c9opts2", "r5");
+    let pool = storage_spaces::Pool::open(old.iter().collect::<Vec<_>>()).unwrap();
+    let m = &pool.members[0];
+    let db = Database::read_formatted(&old[m.device], m.partition.offset + 0x1000).unwrap();
+    assert_eq!(next_space_number(&db).unwrap(), 0);
+    let (_, old) = state("c9opts2", "r2");
+    let pool = storage_spaces::Pool::open(old.iter().collect::<Vec<_>>()).unwrap();
+    let m = &pool.members[0];
+    let db = Database::read_formatted(&old[m.device], m.partition.offset + 0x1000).unwrap();
+    assert_eq!(next_space_number(&db).unwrap(), 4);
 }
