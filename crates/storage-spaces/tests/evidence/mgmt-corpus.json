@@ -1,0 +1,126 @@
+{
+ "note": "tools/mgmt-corpus.sh on copies of two pools Windows created: a disk added, a one-column mirror created and filled with the pattern, the pool's own space grown by 2 GiB, the first disk retired (its data moved) and removed; the remaining disks round tripped with -Optimize",
+ "pools": {
+  "mc_parity3": {
+   "pool_health": [
+    "Healthy",
+    "OK"
+   ],
+   "attached": [
+    [
+     "lnew",
+     "Healthy",
+     "OK"
+    ],
+    [
+     "parity3_26100",
+     "Healthy",
+     "OK"
+    ]
+   ],
+   "repaired": [
+    [
+     "lnew",
+     "Healthy",
+     "OK"
+    ],
+    [
+     "parity3_26100",
+     "Healthy",
+     "OK"
+    ]
+   ],
+   "optimized": [
+    [
+     "lnew",
+     "Healthy",
+     "OK"
+    ],
+    [
+     "parity3_26100",
+     "Healthy",
+     "OK"
+    ]
+   ],
+   "optimize_job": [
+    [
+     "ss-parity3_26100-Optimize",
+     "Completed"
+    ]
+   ],
+   "checks_after_optimize": [
+    [
+     "parity3_26100",
+     "pattern",
+     true
+    ],
+    [
+     "lnew",
+     "pattern",
+     true
+    ]
+   ]
+  },
+  "mc_mirror2": {
+   "pool_health": [
+    "Healthy",
+    "OK"
+   ],
+   "attached": [
+    [
+     "lnew",
+     "Healthy",
+     "OK"
+    ],
+    [
+     "mirror2_26100",
+     "Healthy",
+     "OK"
+    ]
+   ],
+   "repaired": [
+    [
+     "lnew",
+     "Healthy",
+     "OK"
+    ],
+    [
+     "mirror2_26100",
+     "Healthy",
+     "OK"
+    ]
+   ],
+   "optimized": [
+    [
+     "lnew",
+     "Healthy",
+     "OK"
+    ],
+    [
+     "mirror2_26100",
+     "Healthy",
+     "OK"
+    ]
+   ],
+   "optimize_job": [
+    [
+     "ss-mirror2_26100-Optimize",
+     "Completed"
+    ]
+   ],
+   "checks_after_optimize": [
+    [
+     "mirror2_26100",
+     "pattern",
+     true
+    ],
+    [
+     "lnew",
+     "pattern",
+     true
+    ]
+   ]
+  }
+ },
+ "windows_build": "10.0.26100.0"
+}

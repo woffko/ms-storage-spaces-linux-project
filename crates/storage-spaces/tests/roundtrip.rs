@@ -432,3 +432,31 @@ fn windows_takes_a_pool_managed_on_linux() {
     );
     assert_eq!(e["checks_after_optimize"].as_array().unwrap().len(), 4);
 }
+
+/// Pools Windows created (a parity and a mirror pool) changed on Linux
+/// (tools/mgmt-corpus.sh: a disk added, a space created, the pool's space
+/// grown, a disk retired and removed): Windows 11 attached both as healthy
+/// with nothing to repair, optimized them, and read the original pattern and
+/// the new space's back.
+#[test]
+fn windows_takes_its_pools_changed_on_linux() {
+    let e = evidence("mgmt-corpus.json");
+    let pools = e["pools"].as_object().unwrap();
+    assert_eq!(pools.len(), 2);
+    for (name, p) in pools {
+        assert_eq!(p["pool_health"], serde_json::json!(["Healthy", "OK"]), "{name}");
+        for key in ["attached", "repaired", "optimized"] {
+            for s in p[key].as_array().unwrap() {
+                assert_eq!(
+                    (s[1].as_str(), s[2].as_str()),
+                    (Some("Healthy"), Some("OK")),
+                    "{name} {key} {s}"
+                );
+            }
+        }
+        assert_eq!(p["optimize_job"][0][1], "Completed", "{name}");
+        let checks = p["checks_after_optimize"].as_array().unwrap();
+        assert_eq!(checks.len(), 2);
+        assert!(checks.iter().all(|c| c[2] == true), "{name}");
+    }
+}
