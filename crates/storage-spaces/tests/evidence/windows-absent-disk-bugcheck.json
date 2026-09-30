@@ -1,0 +1,71 @@
+{
+ "note": "Windows 11 24H2 bugchecked when a pool of four disks (a one-column and a four-column simple space, a one- and a two-column two-way mirror and a parity space with its cache) arrived with one disk absent: first with the pool created on Linux (tools/health-states.sh, state no0: base disk 0 absent), then with the same layout created by Windows itself (scenario c11ctl, disk3.vhdx absent, the disk holding the one-column simple space). The same pool with every disk attached was healthy. Faulting address and stack read from the triage minidumps (module list and the crashing thread's stack).",
+ "windows_build": "10.0.26100.0",
+ "crashes": [
+  {
+   "pool": "created on Linux (tools/health-states.sh no0)",
+   "bugcheck": "0x50",
+   "parameters": [
+    "0xfffffffffffffff0",
+    "0x2",
+    "spaceport.sys+0xf509",
+    "0x2"
+   ],
+   "spaceport_frames": [
+    "0x177e0",
+    "0xf509",
+    "0xfca9",
+    "0xf391"
+   ]
+  },
+  {
+   "pool": "created by Windows (scenario c11ctl, disk3 absent)",
+   "bugcheck": "0x50",
+   "parameters": [
+    "0xfffffffffffffff0",
+    "0x2",
+    "spaceport.sys+0xf509",
+    "0x2"
+   ],
+   "spaceport_frames": [
+    "0x177e0",
+    "0xf509",
+    "0xfca9",
+    "0xf391"
+   ]
+  }
+ ],
+ "all_disks": {
+  "pool": [
+   "Healthy",
+   "OK"
+  ],
+  "spaces": [
+   [
+    "hmirror2",
+    "Healthy",
+    "OK"
+   ],
+   [
+    "hwide",
+    "Healthy",
+    "OK"
+   ],
+   [
+    "hmirror",
+    "Healthy",
+    "OK"
+   ],
+   [
+    "hsimple",
+    "Healthy",
+    "OK"
+   ],
+   [
+    "hparity",
+    "Healthy",
+    "OK"
+   ]
+  ]
+ }
+}

@@ -268,9 +268,8 @@ enum Command {
         #[arg(long)]
         destage: bool,
     },
-    /// Verify the test pattern written by tools/vm/New-TestPool.ps1.
-    #[command(hide = true)]
-    /// Pool management: create, rename and remove pools.
+    /// Pool management: create, rename, repair, optimize, scrub and remove
+    /// pools.
     Pool {
         #[command(subcommand)]
         command: manage::PoolCommand,
@@ -285,6 +284,8 @@ enum Command {
         #[command(subcommand)]
         command: manage::DiskCommand,
     },
+    /// Verify the test pattern written by tools/vm/New-TestPool.ps1.
+    #[command(hide = true)]
     CheckPattern {
         #[arg(required = true)]
         devices: Vec<PathBuf>,

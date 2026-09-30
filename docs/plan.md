@@ -523,6 +523,20 @@ rows of thin spaces not allocated yet (M7).
     after its first database update, before the new disk had its copy of
     the metadata space, left that disk lost on Windows; the copy is now
     written first.
+* Fuzz targets for the management code: `records` (the complete record
+  models and the disk header encode back to what they decoded), `create`
+  (pools and spaces from fuzzed parameters open clean, pass the checks and
+  read back writes at both ends of every new space) and `manage` (every
+  planner on patched fixture pools; every action writes only inside the
+  members' pool partitions or their partition tables).
+* M11.4 (health report in Windows terms) needs Windows' states for pools
+  with disks absent. The first experiment (tools/health-states.sh, a
+  Linux-created pool of four disks with simple, mirror and parity spaces)
+  bugchecked Windows (0x50 in spaceport.sys) when the pool arrived without
+  one disk; the same layout created by Windows (scenario c11ctl) crashed
+  it the same way, at the same address (evidence
+  `windows-absent-disk-bugcheck.json`). Stopped after the second crash of
+  the VM, as the goal requires.
 
 ## Test infrastructure (continuous, feeds every stage)
 

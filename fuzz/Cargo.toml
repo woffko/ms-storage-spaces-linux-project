@@ -75,3 +75,24 @@ path = "fuzz_targets/pool_write.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "records"
+path = "fuzz_targets/records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "create"
+path = "fuzz_targets/create.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manage"
+path = "fuzz_targets/manage.rs"
+test = false
+doc = false
+bench = false

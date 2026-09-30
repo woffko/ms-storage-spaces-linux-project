@@ -508,3 +508,23 @@ fn windows_takes_pools_cut_during_management() {
         );
     }
 }
+
+/// Windows 11 24H2 bugchecked (0x50 in spaceport.sys) when a pool of four
+/// disks with simple, mirror and parity spaces arrived with one disk absent,
+/// the same way for the pool created on Linux (tools/health-states.sh) and
+/// for the same layout created by Windows (scenario c11ctl): the crash does
+/// not come from what Linux wrote. With every disk the pool was healthy.
+#[test]
+fn windows_bugchecks_on_an_absent_disk_whoever_created_the_pool() {
+    let e = evidence("windows-absent-disk-bugcheck.json");
+    let crashes = e["crashes"].as_array().unwrap();
+    assert_eq!(crashes.len(), 2);
+    for c in crashes {
+        assert_eq!(c["bugcheck"], "0x50");
+        assert_eq!(c["parameters"], crashes[0]["parameters"]);
+        assert_eq!(c["spaceport_frames"], crashes[0]["spaceport_frames"]);
+    }
+    assert_eq!(crashes[0]["parameters"][2], "spaceport.sys+0xf509");
+    assert!(crashes.iter().any(|c| c["pool"].as_str().unwrap().contains("Windows")));
+    assert_eq!(e["all_disks"]["pool"], serde_json::json!(["Healthy", "OK"]));
+}

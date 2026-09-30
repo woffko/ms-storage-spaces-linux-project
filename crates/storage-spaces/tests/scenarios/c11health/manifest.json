@@ -1,0 +1,11 @@
+{
+ "name": "health",
+ "pattern": false,
+ "pool": {
+  "name": "ss-health"
+ },
+ "space": {
+  "name": "hsimple"
+ },
+ "extra_spaces": []
+}
