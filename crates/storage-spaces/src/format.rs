@@ -33,10 +33,18 @@ pub const DATA_AREA_OFFSET: u64 = 2 * SLAB_SIZE;
 #[derive(Debug, Clone)]
 pub struct DiskHeader {
     pub version: u16,
+    /// At 0x10: 1, 2 on some disks that joined or changed later (see
+    /// docs/storage-spaces-format.md).
+    pub generation: u64,
     /// FILETIME of the moment the disk was added to the pool.
     pub format_time: u64,
     pub pool_guid: Guid,
     pub disk_guid: Guid,
+    /// At 0x41: whether the disk carries a copy of the pool database.
+    pub database_copy: bool,
+    /// Bytes 0x42..0x200, kept as read: zero on every disk but one of the
+    /// Insider build (a GUID at 0x52, meaning unknown); empty when zero.
+    pub rest: Vec<u8>,
 }
 
 impl DiskHeader {
@@ -57,10 +65,35 @@ impl DiskHeader {
         }
         Ok(DiskHeader {
             version,
+            generation: be_u64(&b[0x10..]),
             format_time: be_u64(&b[0x18..]),
             pool_guid: Guid::from_slice(&b[0x20..0x30]).unwrap(),
             disk_guid: Guid::from_slice(&b[0x30..0x40]).unwrap(),
+            database_copy: b[0x41] == 1,
+            rest: if b[0x42..HEADER_CRC_SPAN].iter().any(|&x| x != 0) {
+                b[0x42..HEADER_CRC_SPAN].to_vec()
+            } else {
+                Vec::new()
+            },
         })
+    }
+
+    /// The 0x200 bytes of the header (the rest of its 4 KiB page is zero).
+    pub fn encode(&self) -> [u8; HEADER_CRC_SPAN] {
+        let mut b = [0u8; HEADER_CRC_SPAN];
+        b[..8].copy_from_slice(SPACEDB_SIGNATURE);
+        b[8..10].copy_from_slice(&self.version.to_be_bytes());
+        b[10..12].copy_from_slice(&0x0200u16.to_be_bytes());
+        b[0x10..0x18].copy_from_slice(&self.generation.to_be_bytes());
+        b[0x18..0x20].copy_from_slice(&self.format_time.to_be_bytes());
+        b[0x20..0x30].copy_from_slice(&self.pool_guid.0);
+        b[0x30..0x40].copy_from_slice(&self.disk_guid.0);
+        b[0x41] = self.database_copy as u8;
+        let n = self.rest.len().min(HEADER_CRC_SPAN - 0x42);
+        b[0x42..0x42 + n].copy_from_slice(&self.rest[..n]);
+        let crc = crc32_excluding(&b, 0x0c);
+        b[0x0c..0x10].copy_from_slice(&crc.to_be_bytes());
+        b
     }
 }
 

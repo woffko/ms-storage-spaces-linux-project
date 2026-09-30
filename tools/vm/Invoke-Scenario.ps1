@@ -3,8 +3,25 @@
 Runs a scripted scenario on an attached test pool and takes snapshots of its
 member disks between the steps (for the experiments of M5 in docs/plan.md).
 
-The pool is made by New-TestPool.ps1 -Finish Keep, so it stays attached.
+The pool is made by New-TestPool.ps1 -Finish Keep, so it stays attached, or
+by the steps blank and newpool (the directory is created then).
 -Steps lists operations separated by ';', arguments separated by ':':
+  blank:COUNT[:SIZEMB[:4kn]]  create COUNT more VHDX files (default 8 GiB,
+                             4kn: 4 KiB logical sectors) and attach them
+                             without putting them in a pool
+  newpool[:SECTOR]           New-StoragePool (ss-<Name>) of every attached
+                             image; SECTOR sets LogicalSectorSizeDefault;
+                             writes manifest.json (pool and disks)
+  newspacex:NAME:K=V,...     New-VirtualDisk with res (Simple, Mirror,
+                             Parity), size (MB), prov (Thin, Fixed), cols,
+                             copies, red, il (KB), au (MB), wc (write cache
+                             MB)
+  renamepool:NEW             rename the pool (later steps use the new name)
+  media:I:TYPE               Set-PhysicalDisk -MediaType (HDD, SSD) on I
+  usage:I:USAGE              Set-PhysicalDisk -Usage on member I
+  optimize                   Optimize-StoragePool, then wait for its jobs
+  waitjobs                   wait until no storage job runs
+  removepool                 Remove-StoragePool (its spaces removed first)
   snap:LABEL[:MB]            snapshot every attached member disk to
                              C:\sstest\<Name>\snap-LABEL\disk<i>.snap, plus
                              state.json (health, extents, disks); with MB only
@@ -143,11 +160,63 @@ public static class SsScenario {
         }
         return new long[] { dataPages, patternPages };
     }
+    // Sets the logical sector size item of a VHDX's metadata region (no
+    // checksum covers it) to 4096; the file must not be attached.
+    public static void SetLogicalSector4K(string path) {
+        Guid metadataRegion = new Guid("8B7CA206-4790-4B9A-B8FE-575F050F886E");
+        Guid logicalSector = new Guid("8141BF1D-A96F-4709-BA47-F233A8FAAB5F");
+        using (var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite)) {
+            var r = new BinaryReader(fs);
+            fs.Position = 0x30000;
+            if (new string(r.ReadChars(4)) != "regi") throw new Exception("no VHDX region table");
+            r.ReadUInt32();
+            uint regions = r.ReadUInt32();
+            r.ReadUInt32();
+            long metadata = -1;
+            for (uint i = 0; i < regions; i++) {
+                var id = new Guid(r.ReadBytes(16));
+                long offset = r.ReadInt64();
+                r.ReadUInt32(); r.ReadUInt32();
+                if (id == metadataRegion) metadata = offset;
+            }
+            if (metadata < 0) throw new Exception("no VHDX metadata region");
+            fs.Position = metadata;
+            if (new string(r.ReadChars(8)) != "metadata") throw new Exception("no VHDX metadata table");
+            r.ReadUInt16();
+            ushort entries = r.ReadUInt16();
+            fs.Position = metadata + 32;
+            for (int i = 0; i < entries; i++) {
+                var id = new Guid(r.ReadBytes(16));
+                uint offset = r.ReadUInt32();
+                r.ReadUInt32(); r.ReadUInt32(); r.ReadUInt32();
+                if (id == logicalSector) {
+                    fs.Position = metadata + offset;
+                    fs.Write(BitConverter.GetBytes(4096u), 0, 4);
+                    return;
+                }
+            }
+            throw new Exception("no logical sector size item");
+        }
+    }
 }
 '@
 
 $dir = Join-Path $Root $Name
 $poolName = "ss-$Name"
+if (-not (Test-Path $dir)) {
+    if (-not $Steps.StartsWith('blank:')) { throw "no test pool $dir" }
+    New-Item -ItemType Directory -Path $dir | Out-Null
+}
+function Get-MemberDisk([int] $i) {
+    $number = (Get-DiskImage -ImagePath (Get-Image $i)).Number
+    Get-PhysicalDisk | Where-Object DeviceId -eq "$number"
+}
+function Wait-Jobs {
+    do {
+        Start-Sleep -Seconds 5
+        $running = @(Get-StorageJob | Where-Object { $_.JobState -eq 'Running' -or $_.JobState -eq 'New' })
+    } while ($running.Count -gt 0)
+}
 function Get-Image([int] $i) { Join-Path $dir ("disk{0}.vhdx" -f $i) }
 function Get-Images { @(Get-ChildItem $dir -Filter 'disk*.vhdx' | Sort-Object { [int]($_.BaseName -replace '\D', '') } | ForEach-Object FullName) }
 function Get-SpaceDevice([string] $space) {
@@ -207,7 +276,16 @@ foreach ($step in ($Steps.Split(';') | Where-Object { $_ })) {
                 $img = Get-DiskImage -ImagePath $images[$i]
                 if (-not $img.Attached) { continue }
                 $limit = if ($a.Count -gt 2) { [Math]::Min($img.Size, [int64]$a[2] * 1MB) } else { $img.Size }
-                $pages = [SsScenario]::Snapshot("\\.\PhysicalDrive$($img.Number)", $img.Size, $limit, (Join-Path $out "disk$i.snap"))
+                # Right after New-StoragePool a member can be away for a moment.
+                for ($try = 1; ; $try++) {
+                    try {
+                        $pages = [SsScenario]::Snapshot("\\.\PhysicalDrive$((Get-DiskImage -ImagePath $images[$i]).Number)", $img.Size, $limit, (Join-Path $out "disk$i.snap"))
+                        break
+                    } catch {
+                        if ($try -ge 10) { throw }
+                        Start-Sleep -Seconds 3
+                    }
+                }
                 "  disk$i`: $($pages[0]) data pages, $($pages[1]) pattern pages"
             }
             Get-State | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 (Join-Path $out 'state.json')
@@ -246,10 +324,7 @@ foreach ($step in ($Steps.Split(';') | Where-Object { $_ })) {
             $pd = Get-PhysicalDisk | Where-Object DeviceId -eq "$number"
             Add-PhysicalDisk -StoragePoolFriendlyName $poolName -PhysicalDisks $pd
         }
-        'retire' {
-            $number = (Get-DiskImage -ImagePath (Get-Image $a[1])).Number
-            Get-PhysicalDisk | Where-Object DeviceId -eq "$number" | Set-PhysicalDisk -Usage Retired
-        }
+        'retire' { Get-MemberDisk $a[1] | Set-PhysicalDisk -Usage Retired }
         'removedisk' {
             $number = (Get-DiskImage -ImagePath (Get-Image $a[1])).Number
             $pd = Get-PhysicalDisk | Where-Object DeviceId -eq "$number"
@@ -263,6 +338,81 @@ foreach ($step in ($Steps.Split(';') | Where-Object { $_ })) {
             New-VirtualDisk @p | Out-Null
         }
         'removespace' { Remove-VirtualDisk -FriendlyName $a[1] -Confirm:$false }
+        'blank' {
+            $first = (Get-Images).Count
+            $sizeMB = if ($a.Count -gt 2) { [int]$a[2] } else { 8192 }
+            for ($i = $first; $i -lt $first + [int]$a[1]; $i++) {
+                $f = Get-Image $i
+                $scriptPath = Join-Path $dir 'diskpart.txt'
+                [IO.File]::WriteAllText($scriptPath, "create vdisk file=`"$f`" maximum=$sizeMB type=expandable`r`n")
+                $out = diskpart /s $scriptPath
+                if ($LASTEXITCODE -ne 0) { throw "diskpart failed: $out" }
+                if ($a.Count -gt 3 -and $a[3] -eq '4kn') { [SsScenario]::SetLogicalSector4K($f) }
+                [IO.File]::WriteAllText($scriptPath, "select vdisk file=`"$f`"`r`nattach vdisk`r`n")
+                $out = diskpart /s $scriptPath
+                if ($LASTEXITCODE -ne 0) { throw "diskpart failed: $out" }
+                Remove-Item $scriptPath
+            }
+            Start-Sleep -Seconds 2
+        }
+        'newpool' {
+            $physical = @(for ($i = 0; $i -lt (Get-Images).Count; $i++) { Get-MemberDisk $i })
+            $subsystem = Get-StorageSubSystem | Where-Object FriendlyName -like 'Windows Storage*' | Select-Object -First 1
+            $pp = @{ FriendlyName = $poolName; StorageSubSystemUniqueId = $subsystem.UniqueId; PhysicalDisks = $physical }
+            if ($a.Count -gt 1) { $pp.LogicalSectorSizeDefault = [int]$a[1] }
+            New-StoragePool @pp | Out-Null
+            $pool = Get-StoragePool -FriendlyName $poolName
+            [ordered]@{
+                name = $Name
+                windows_build = [Environment]::OSVersion.Version.ToString()
+                pattern = $false
+                pool = [ordered]@{
+                    name = $poolName
+                    guid = if ($pool.ObjectId -match 'SP:\{([0-9a-fA-F-]+)\}') { $Matches[1].ToLowerInvariant() } else { $null }
+                    version = "$($pool.Version)"; version_number = [int]$pool.CimInstanceProperties['Version'].Value
+                    size = $pool.Size; allocated = $pool.AllocatedSize
+                    logical_sector = $pool.LogicalSectorSize; physical_sector = $pool.PhysicalSectorSize
+                }
+                disks = @(for ($i = 0; $i -lt (Get-Images).Count; $i++) {
+                    $pd = Get-MemberDisk $i
+                    [ordered]@{
+                        image = Split-Path (Get-Image $i) -Leaf; unique_id = $pd.UniqueId; size = $pd.Size
+                        spaces_guid = if ($pd.ObjectId -match 'PD:\{([0-9a-fA-F-]+)\}') { $Matches[1].ToLowerInvariant() } else { $null }
+                    }
+                })
+            } | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 (Join-Path $dir 'manifest.json')
+        }
+        'newspacex' {
+            $p = @{ StoragePoolFriendlyName = $poolName; FriendlyName = $a[1] }
+            foreach ($kv in $a[2].Split(',')) {
+                $k, $v = $kv.Split('=')
+                switch ($k) {
+                    'res' { $p.ResiliencySettingName = $v }
+                    'size' { $p.Size = [int64]$v * 1MB }
+                    'prov' { $p.ProvisioningType = $v }
+                    'cols' { $p.NumberOfColumns = [int]$v }
+                    'copies' { $p.NumberOfDataCopies = [int]$v }
+                    'red' { $p.PhysicalDiskRedundancy = [int]$v }
+                    'il' { $p.Interleave = [int64]$v * 1KB }
+                    'au' { $p.AllocationUnitSize = [int64]$v * 1MB }
+                    'wc' { $p.WriteCacheSize = [int64]$v * 1MB }
+                    default { throw "unknown space parameter $k" }
+                }
+            }
+            New-VirtualDisk @p | Out-Null
+        }
+        'renamepool' {
+            Set-StoragePool -FriendlyName $poolName -NewFriendlyName $a[1]
+            $poolName = $a[1]
+        }
+        'media' { Get-MemberDisk $a[1] | Set-PhysicalDisk -MediaType $a[2] }
+        'usage' { Get-MemberDisk $a[1] | Set-PhysicalDisk -Usage $a[2] }
+        'optimize' { Optimize-StoragePool -FriendlyName $poolName; Wait-Jobs }
+        'waitjobs' { Wait-Jobs }
+        'removepool' {
+            Set-StoragePool -FriendlyName $poolName -IsReadOnly $false
+            Remove-StoragePool -FriendlyName $poolName -Confirm:$false
+        }
         'format' {
             $d = Get-VirtualDisk -FriendlyName $a[1] | Get-Disk
             if ($d.IsOffline) { $d | Set-Disk -IsOffline $false }

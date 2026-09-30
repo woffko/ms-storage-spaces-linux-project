@@ -34,9 +34,20 @@ Slabs are 256 MiB.
 | 0x08 | 2 | layout version, 3 on Windows 10/11 |
 | 0x0a | 2 | 0x0200 |
 | 0x0c | 4 | CRC-32 (zlib, stored BE) of bytes 0..0x200 with this field zeroed (**verified**) |
+| 0x10 | 8 | 1; 2 on disks whose header Windows rewrote (a retired disk, a replacement, a removed disk) |
 | 0x18 | 8 | FILETIME when the disk joined the pool |
 | 0x20 | 16 | pool GUID |
 | 0x30 | 16 | physical disk GUID (as in the `PD:{...}` part of the disk ObjectId) |
+| 0x41 | 1 | 1 if the disk carries a copy of the pool database, else 0 |
+
+The rest of the 4 KiB page is zero (one disk of the Insider build carries
+a GUID at 0x52). Pools of up to five disks keep a copy of the pool
+database on every disk, larger pools on five of them (not the first five;
+which ones does not follow from the metadata), and byte 0x41 and the disk
+record say which (**verified** by the test
+`disk_headers_are_reproduced_and_mark_database_copies`, which also
+re-encodes every header of the fixtures byte for byte). A retired disk
+keeps its old copy with 0x41 cleared.
 
 GUIDs in the database are stored in plain big-endian byte order.
 
@@ -124,12 +135,29 @@ again with a sequence above every copy seen (5 after a broken 4).
 
 ## Records
 
+Every record body below is complete: `storage_spaces::records` decodes
+each field and re-encodes every pool, disk and space record of every
+fixture byte for byte (**verified** by the test
+`every_record_windows_wrote_is_reproduced_byte_for_byte`, about 1500
+records of 169 pool states in the corpus). Integers ("vint": a length
+byte, then that many big-endian bytes) are always as short as possible.
+
 ### Type 1: pool
-`vint, vint, guid[16], name, description, vint, u16 version,
-u8 log2(logical sector size), u8 log2(physical sector size), ...`
+`vint 0, vint sequence, guid[16], name, description, vint 0, u16 version,
+u8 log2(logical sector size), u8 log2(physical sector size), settings,
+u8 n + n bytes security descriptor, resiliency defaults`
 (**verified**: versions 28 and 29, sectors 512/4096 and 4096/4096). Strings are `u16 BE`
 length in UTF-16 code units (including the terminating NUL) followed by
-UTF-16BE text.
+UTF-16BE text; an empty string is a length of 0.
+
+`settings` is the same in every pool (37 bytes in record version 15,
+Windows 11 24H2; 38 in version 16, Insider): pool-wide defaults, starting
+with the thin provisioning alert threshold (0x46 = 70 %). The resiliency
+defaults close the record: simple (no redundancy, one copy), mirror (one
+failure, two copies), parity (one failure), each with automatic columns
+(0xffffffff) and 256 KiB interleave. The security descriptor is empty on
+a new pool; renaming the pool adds the one space records get
+(`SPACE_SECURITY_DESCRIPTOR`, scenario `c9smoke`).
 
 Spaces expose the pool's logical sector size (**verified** against
 `Get-VirtualDisk`); space records carry no sector size of their own. Whether a
@@ -140,8 +168,10 @@ space keeps its GPT at byte 0x1000.
 ### Type 2: physical disk
 ```
 vint id, vint sequence, guid[16], name, description,
-u8, u8 (2; 0 on a retired disk), u8 usage,
-manufacturer, model, string, string, u8 (0x0f), u8 media, ...
+u8 0, u8 (2 if the disk carries a copy of the pool database, else 0),
+u8 usage, manufacturer, model, string, string, u8 0x0f, u8 media,
+32 zero bytes, vint disk size, vint data area size (the partition less the
+512 MiB before physical slab 0), vint 0xffffffffffffffff
 ```
 `sequence` is the database sequence at which the record was last written
 (disks whose media type was set one after the other carry consecutive
@@ -160,11 +190,11 @@ database without a device at hand is missing.
 ### Types 3 (space) and 6 (child space)
 ```
 vint id, vint sequence, guid[16], name, description,
-u8, u8, u8 role,
+u8 0, u8 internal (1 on the metadata space and hidden containers), u8 role,
 type 3: vint size, vint number (0xffffffff on the metadata space)
 u8 provisioning    1 thin, 2 fixed
 vint allocation unit (bytes; all ones on tier templates)
-u8                 (2 on tiered spaces and hidden containers, else 0)
+u8                 (1-2 on tiered spaces, tiers and some containers, else 0)
 prefix             01 00 01 00 00 (record version 17, type 6 version 5)
                    01 01 00 00    (record version 16: Windows 11 24H2)
 u8 resiliency      1 simple, 2 mirror, 3 parity
@@ -173,9 +203,11 @@ vint copies
 vint groups
 vint columns       (0xffffffff on tier templates: chosen by Windows)
 u8 log2(interleave)
-type 3: vint x4, u8 n + n bytes (security descriptor, usually n = 0),
-        vint (=1), vint parent, ...
-type 6: vint, vint parent, ...
+type 3: vint write-back cache size (0 without), vint 0 x3,
+        u8 n + n bytes (security descriptor, usually n = 0),
+        vint (1; 0 on the metadata space), vint parent, u32 0
+type 6: vint 0, vint parent, then u32 1, u64 start, u64 length (its range
+        in the parent's address space) or, on tier templates, u32 0
 ```
 (**verified**: every corpus pool; `ressimple`, extended with
 `Resize-VirtualDisk`, carries a 120-byte self-relative security descriptor

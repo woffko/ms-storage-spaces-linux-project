@@ -28,6 +28,7 @@ pub mod journal;
 pub mod layout;
 mod pool;
 mod reader;
+pub mod records;
 pub mod segments;
 #[doc(hidden)]
 pub mod testpattern;

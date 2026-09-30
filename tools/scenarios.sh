@@ -36,8 +36,11 @@ while IFS='|' read -r name pool steps; do
   [[ -z $name || $name == \#* ]] && continue
   [[ $wanted != *" $name "* ]] && continue
   echo "=== $name"
-  # shellcheck disable=SC2086
-  run_bg "gen-$name" tools/vm/New-TestPool.ps1 -Name "$name" $pool -Finish Keep || { status=1; continue; }
+  # A pool field of "-": the steps make the pool themselves (blank, newpool).
+  if [[ ${pool// /} != - ]]; then
+    # shellcheck disable=SC2086
+    run_bg "gen-$name" tools/vm/New-TestPool.ps1 -Name "$name" $pool -Finish Keep || { status=1; continue; }
+  fi
   run_bg "scn-$name" tools/vm/Invoke-Scenario.ps1 -Name "$name" -Steps "${steps// /}" || { status=1; continue; }
   labels=$(grep -o 'snap:[A-Za-z0-9_-]*' <<<"$steps" | cut -d: -f2)
   # shellcheck disable=SC2086
@@ -83,6 +86,23 @@ m7grow | -DiskCount 3 -Resiliency Simple -Columns 1 -Provisioning Thin -SizeMB 1
 # M7: TRIM on a thin space: NTFS, a file of 768 MiB (whole slabs),
 # deleted, then the free space retrimmed; are slabs given back?
 m7trim | -DiskCount 2 -Resiliency Simple -Columns 1 -Provisioning Thin -SizeMB 4096 -AllocationUnitMB 256 -NoPattern | format:m7trim; snap:s0:64; file:m7trim:big:768; snap:s1:64; delfile:m7trim:big; retrim:m7trim; sleep:30; snap:s2:64; dismount
+# Stage 3: management operations (docs/plan.md M9-M11).
+c9smoke | - | blank:2; snap:b0:64; newpool; snap:p0:64; newspacex:c9x:res=Simple,size=512; snap:p1:64; renamepool:ss-c9smokex; media:0:SSD; usage:1:ManualSelect; snap:p2:64; removespace:c9x; removepool; snap:p3:64; dismount
+# Creation: the pool, then one space of each kind (full snapshots).
+c9new | - | blank:3; newpool; snap:p0; newspacex:cs:res=Simple,size=1024,prov=Fixed; snap:p1; newspacex:cm:res=Mirror,size=1024,prov=Fixed; snap:p2; newspacex:cp:res=Parity,size=2048,prov=Fixed; snap:p3; newspacex:ct:res=Simple,size=4096,prov=Thin; snap:p4; newspacex:cmt:res=Mirror,size=4096,prov=Thin; snap:p5; newspacex:cw:res=Simple,size=1024,prov=Fixed,wc=64; snap:p6; dismount
+# Pools of other sizes and sector sizes.
+c9one | - | blank:1; newpool; snap:p0; newspacex:c9ones:res=Simple,size=1024; snap:p1; dismount
+c9four | - | blank:4; newpool; snap:p0; dismount
+c9eight | - | blank:8; newpool; snap:p0; newspacex:c9eightm:res=Mirror,size=1024; snap:p1; dismount
+c9l4k | - | blank:2; newpool:4096; snap:p0; newspacex:c9l4ks:res=Simple,size=1024; snap:p1; dismount
+c94kn | - | blank:2:8192:4kn; newpool; snap:p0; newspacex:c94kns:res=Simple,size=1024; snap:p1; dismount
+# Pool and disk settings.
+c9ops | - | blank:3; newpool; newspacex:c9opsm:res=Mirror,size=1024; snap:o0; renamepool:ss-c9opsx; snap:o1; media:0:SSD; snap:o2; media:1:HDD; usage:2:ManualSelect; snap:o3; usage:2:HotSpare; snap:o4; usage:2:AutoSelect; snap:o5; readonly:true; snap:o6; readonly:false; removespace:c9opsm; snap:o7; removepool; snap:o8; dismount
+# Disks added, rebalanced, retired, evacuated and removed, with data.
+c9disk | - | blank:3; newpool; newspacex:c9diskm:res=Mirror,size=2048,prov=Fixed; write:c9diskm:0:262144:a; snap:d0; newdisk:3; snap:d1; optimize; snap:d2; retire:0; snap:d3; repair:c9diskm; waitjobs; snap:d4; removedisk:0; waitjobs; snap:d5; dismount
+c9drain | - | blank:4; newpool; newspacex:c9drainm:res=Mirror,size=2048,prov=Fixed; write:c9drainm:0:262144:a; snap:r0; removedisk:0; waitjobs; snap:r1; dismount
+# Resizing and renaming spaces of each resiliency.
+c9resize | - | blank:3; newpool; newspacex:c9rs:res=Simple,size=1024; newspacex:c9rp:res=Parity,size=2048; newspacex:c9rm:res=Mirror,size=1024; snap:z0; resize:c9rp:4096; snap:z1; resize:c9rm:2048; snap:z2; rename:c9rs:c9rs2; snap:z3; dismount
 LIST
 exit $status
 }
