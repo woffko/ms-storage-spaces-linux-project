@@ -1,7 +1,8 @@
 # Project plan
 
-Status as of 2026-09-28. The plan is split into three stages with checkable
-exit criteria. ReFS is a separate track (last section) that shares the test
+Status as of 2026-09-30: Stages 1 and 2 have met their exit criteria
+(v0.2.0-ready; nothing is released before Stage 3 is complete). The plan is
+split into three stages with checkable exit criteria. ReFS is a separate track (last section) that shares the test
 infrastructure but not the milestones.
 
 ## Goal
@@ -46,7 +47,7 @@ Guiding rules for all stages:
 * VM tooling to create pools on VHDX and a corpus of 8 pools; tests compare
   with `Get-PhysicalExtent` and a verification pattern.
 
-## Progress log (Stage 1)
+## Progress log (Stages 1 and 2)
 
 Evidence is recorded here as milestones advance; commands refer to the tools
 in this repository.
@@ -445,13 +446,20 @@ rows of thin spaces not allocated yet (M7).
 * Security review of the write paths: `docs/security.md` (threat model,
   findings: checkpoint sizes capped, NBD sockets owner-only, the range
   panic above).
-* 24 h of fuzzing, all eight targets with four workers each. The first
-  hour found two failures (a parity journal checkpoint offset overflow,
-  and a read-back check in the `database` harness itself), both fixed with
-  tests; the run restarted on the fixed code at 2026-09-29 14:49
-  (commit b2e16f1). Results pending.
+* 24 h of fuzzing without findings (2026-09-29/30). The first hour of a
+  first run found two failures (a parity journal checkpoint offset
+  overflow, and a read-back check in the `database` harness itself), both
+  fixed with tests. The clean run on the fixed code (commit b2e16f1; the
+  later commits change no fuzzed code) went in two parts: 5 h 24 min with
+  four workers per target until the machine crashed (nothing logged
+  before it), then the remaining 18 h 36 min with one worker per target,
+  continuing from the corpus. Every target exited cleanly, without
+  crashes, timeouts or out-of-memory runs. Inputs run: `database`,
+  `record_decode` and `dirty_regions` 2.3 billion each, `partitions` 1.3
+  billion, `cache_index` 13 million, `pool_open` 8 million,
+  `parity_journal` 4.2 million, `pool_write` 1.8 million.
 
-### M8 (2026-09-29, v0.2.0-ready once the 24 h fuzzing is clean)
+### M8 (exit criteria met, 2026-09-30: v0.2.0-ready)
 
 * `spaces attach --rw` is documented in the user guide (Writing: what
   each space type does, what is refused and why, guarantees and risks,
@@ -465,6 +473,8 @@ rows of thin spaces not allocated yet (M7).
 * Version 0.2.0 in `Cargo.toml` and the Arch package; the Debian package
   builds. Nothing is pushed, tagged or released before Stage 3 is complete
   (decision 2026-09-29).
+* With the 24 h fuzzing clean, the state is v0.2.0-ready: Stage 2 (M6-M8)
+  is complete.
 
 ## Test infrastructure (continuous, feeds every stage)
 
