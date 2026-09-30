@@ -397,7 +397,7 @@ pub struct ExtentRecord {
 impl ExtentRecord {
     /// Flag of a copy that Windows is still rebuilding.
     pub const FLAG_REGENERATING: u8 = 0x01;
-    const CURRENT: u64 = 0xffff_ffff;
+    pub const CURRENT: u64 = 0xffff_ffff;
 
     /// Whether the copy holds current data.
     pub fn is_current(&self) -> bool {

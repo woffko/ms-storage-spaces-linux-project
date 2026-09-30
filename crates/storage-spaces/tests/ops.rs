@@ -275,3 +275,102 @@ fn disks_are_added_retired_and_removed() {
     // The removed disk is no member any more.
     assert!(Pool::open(vec![&base[0]]).is_err());
 }
+
+/// A disk lost: the repair rebuilds its copies of a mirror and a parity
+/// space on the other disks (the parity column as the XOR of the others),
+/// the data readable at every point a crash could stop it; afterwards the
+/// missing disk is removed and the pool is clean again.
+#[test]
+fn a_lost_disk_is_repaired_away_and_removed() {
+    use storage_spaces::ops::{plan_remove_disk, plan_repair};
+    let mut new_guid = guids();
+    let (images, disks) = blank(5);
+    let base: Vec<Overlay<&SparseImage>> = images.iter().map(Overlay::new).collect();
+    let (plan, _) = plan_create_pool(&disks, "repair", None, &mut new_guid).unwrap();
+    plan.apply::<&Overlay<&SparseImage>, _>(&[], &base.iter().collect::<Vec<_>>())
+        .unwrap();
+    let spaces = [("m", 2u8), ("p", 3)];
+    for (name, tag) in spaces {
+        let pool = Pool::open(base.iter().collect::<Vec<_>>()).unwrap();
+        let mut s = spec(name, tag, 1024, false);
+        s.columns = Some(if tag == 2 { 1 } else { 3 });
+        let (plan, _) = plan_create_space(&pool, &s, &mut new_guid).unwrap();
+        plan.apply::<_, &Overlay<&SparseImage>>(&base.iter().collect::<Vec<_>>(), &[])
+            .unwrap();
+        drop(pool);
+        let pool = Pool::open(base.iter().collect::<Vec<_>>()).unwrap();
+        let w = pool.open_space_rw(pool.find_space(name).unwrap().id()).unwrap();
+        w.write_all_at(&data(tag, 8 << 20), 1 << 20).unwrap();
+        w.flush().unwrap();
+    }
+    // The disk holding the most of the spaces is lost.
+    let pool = Pool::open(base.iter().collect::<Vec<_>>()).unwrap();
+    let busiest = (0..5)
+        .max_by_key(|&d| {
+            let id = pool.disks.values().find(|x| x.member == Some(d)).unwrap().id;
+            pool.user_spaces()
+                .flat_map(|s| s.extents.iter())
+                .filter(|e| e.disk_id == id)
+                .count()
+        })
+        .unwrap();
+    let lost = pool.disks.values().find(|x| x.member == Some(busiest)).unwrap().id;
+    drop(pool);
+    let left: Vec<&Overlay<&SparseImage>> = base
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != busiest)
+        .map(|(_, d)| d)
+        .collect();
+    let pool = Pool::open(left.clone()).unwrap();
+    assert!(pool.warnings.iter().any(|w| w.ends_with("is missing")));
+    check_data(&pool, &spaces);
+    let plan = plan_repair(&pool).unwrap();
+    assert!(plan.steps.iter().any(|s| {
+        s.actions
+            .iter()
+            .any(|a| matches!(a, storage_spaces::plan::Action::Xor { .. }))
+    }));
+    drop(pool);
+    // Every crash point of the repair.
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let scratch: Vec<Overlay<&Overlay<&SparseImage>>> = left.iter().map(|d| Overlay::new(*d)).collect();
+    let recorders: Vec<Recorder<&Overlay<&Overlay<&SparseImage>>>> = scratch
+        .iter()
+        .enumerate()
+        .map(|(i, d)| Recorder::new(d, i, log.clone()))
+        .collect();
+    plan.apply::<_, &Recorder<&Overlay<&Overlay<&SparseImage>>>>(&recorders.iter().collect::<Vec<_>>(), &[])
+        .unwrap();
+    let events = log.lock().unwrap().clone();
+    for end in (0..=events.len()).filter(|&e| e == 0 || matches!(events[e - 1], DeviceEvent::Flush { .. })) {
+        let replay: Vec<Overlay<&Overlay<&SparseImage>>> = left.iter().map(|d| Overlay::new(*d)).collect();
+        for e in &events[..end] {
+            if let DeviceEvent::Write { device, offset, data } = e {
+                replay[*device].write_all_at(data, *offset).unwrap();
+            }
+        }
+        let pool = Pool::open(replay.iter().collect::<Vec<_>>()).unwrap();
+        check_data(&pool, &spaces);
+    }
+    plan.apply::<_, &Overlay<&SparseImage>>(&left, &[]).unwrap();
+    let pool = Pool::open(left.clone()).unwrap();
+    for space in pool.user_spaces() {
+        assert_eq!(
+            pool.open_space(space.id()).unwrap().condition(),
+            storage_spaces::Condition::Healthy,
+            "{}",
+            space.name()
+        );
+    }
+    check_data(&pool, &spaces);
+    // Nothing left to repair; the missing disk goes.
+    assert!(plan_repair(&pool).unwrap().steps.is_empty());
+    let plan = plan_remove_disk(&pool, lost).unwrap();
+    drop(pool);
+    plan.apply::<_, &Overlay<&SparseImage>>(&left, &[]).unwrap();
+    let pool = Pool::open(left).unwrap();
+    assert!(pool.warnings.is_empty(), "{:?}", pool.warnings);
+    check_pool(&pool).unwrap();
+    check_data(&pool, &spaces);
+}

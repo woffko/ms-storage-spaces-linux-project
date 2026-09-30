@@ -42,6 +42,14 @@ pub enum Action {
         to_offset: u64,
         len: u64,
     },
+    /// Writes the XOR of `len` bytes at each of `from` (a lost column of a
+    /// single parity row rebuilt from the others), read when applied.
+    Xor {
+        from: Vec<(Target, u64)>,
+        to: Target,
+        to_offset: u64,
+        len: u64,
+    },
 }
 
 /// Actions made durable together.
@@ -75,7 +83,7 @@ impl Plan {
             .flat_map(|s| &s.actions)
             .map(|a| match a {
                 Action::Write { bytes, .. } => bytes.len() as u64,
-                Action::Copy { len, .. } => *len,
+                Action::Copy { len, .. } | Action::Xor { len, .. } => *len,
             })
             .sum()
     }
@@ -83,6 +91,12 @@ impl Plan {
     /// Carries the plan out on the pool's devices (`members`) and the new
     /// disks (`new`), flushing every device a step touched before the next.
     pub fn apply<M: WriteAt, N: WriteAt>(&self, members: &[M], new: &[N]) -> Result<()> {
+        self.apply_steps(members, new, self.steps.len())
+    }
+
+    /// Carries out the first `steps` steps only, as a crash after them
+    /// would leave the pool (for crash tests).
+    pub fn apply_steps<M: WriteAt, N: WriteAt>(&self, members: &[M], new: &[N], steps: usize) -> Result<()> {
         let device = |t: Target| -> Result<&dyn WriteAt> {
             match t {
                 Target::Member(i) => members.get(i).map(|d| d as &dyn WriteAt),
@@ -90,7 +104,7 @@ impl Plan {
             }
             .ok_or_else(|| crate::Error::Pool(format!("the plan writes to {t}, which is not at hand")))
         };
-        for step in &self.steps {
+        for step in self.steps.iter().take(steps) {
             let mut touched = BTreeSet::new();
             for action in &step.actions {
                 match action {
@@ -111,6 +125,29 @@ impl Plan {
                             let n = buf.len().min((*len - done) as usize);
                             device(*from)?.read_exact_at(&mut buf[..n], from_offset + done)?;
                             device(*to)?.write_all_at(&buf[..n], to_offset + done)?;
+                            done += n as u64;
+                        }
+                        touched.insert(*to);
+                    }
+                    Action::Xor {
+                        from,
+                        to,
+                        to_offset,
+                        len,
+                    } => {
+                        let chunk = (*len).min(4 << 20) as usize;
+                        let (mut acc, mut buf) = (vec![0u8; chunk], vec![0u8; chunk]);
+                        let mut done = 0;
+                        while done < *len {
+                            let n = chunk.min((*len - done) as usize);
+                            acc[..n].fill(0);
+                            for (source, offset) in from {
+                                device(*source)?.read_exact_at(&mut buf[..n], offset + done)?;
+                                for (a, b) in acc[..n].iter_mut().zip(&buf[..n]) {
+                                    *a ^= b;
+                                }
+                            }
+                            device(*to)?.write_all_at(&acc[..n], to_offset + done)?;
                             done += n as u64;
                         }
                         touched.insert(*to);
@@ -136,14 +173,16 @@ impl fmt::Display for Plan {
                 .iter()
                 .map(|a| match a {
                     Action::Write { bytes, .. } => bytes.len() as u64,
-                    Action::Copy { len, .. } => *len,
+                    Action::Copy { len, .. } | Action::Xor { len, .. } => *len,
                 })
                 .sum();
             let targets: BTreeSet<String> = step
                 .actions
                 .iter()
                 .map(|a| match a {
-                    Action::Write { target, .. } | Action::Copy { to: target, .. } => target.to_string(),
+                    Action::Write { target, .. } | Action::Copy { to: target, .. } | Action::Xor { to: target, .. } => {
+                        target.to_string()
+                    }
                 })
                 .collect();
             writeln!(

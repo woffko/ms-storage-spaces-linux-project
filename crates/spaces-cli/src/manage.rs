@@ -42,6 +42,15 @@ pub enum PoolCommand {
         #[arg(required = true)]
         devices: Vec<PathBuf>,
     },
+    /// Rebuild every copy on a missing disk or out of date (mirror copies
+    /// from another copy, parity columns from the others) on other disks;
+    /// a missing disk can be removed afterwards (spaces disk remove).
+    Repair {
+        #[arg(long)]
+        yes: bool,
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+    },
     /// Remove a pool without spaces: the pool partition leaves every
     /// member's partition table.
     Remove {
@@ -270,7 +279,9 @@ fn is_blank(file: &File) -> Result<bool> {
     Ok(buf.iter().all(|&b| b == 0))
 }
 
-/// Prints the plan; carries it out only with `yes`.
+/// Prints the plan; carries it out only with `yes`. With the environment
+/// variable SPACES_STOP_AFTER_STEP=N (crash tests) only the first N steps
+/// are carried out, as a crash after them would leave the disks.
 fn run<M: storage_spaces::io::WriteAt, N: storage_spaces::io::WriteAt>(
     plan: &Plan,
     yes: bool,
@@ -281,6 +292,17 @@ fn run<M: storage_spaces::io::WriteAt, N: storage_spaces::io::WriteAt>(
     if !yes {
         println!("nothing written (add --yes to carry the plan out)");
         return Ok(false);
+    }
+    if let Some(n) = std::env::var("SPACES_STOP_AFTER_STEP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        plan.apply_steps(members, new, n)?;
+        println!(
+            "stopped after step {n} of {} (SPACES_STOP_AFTER_STEP)",
+            plan.steps.len()
+        );
+        std::process::exit(99);
     }
     plan.apply(members, new)?;
     println!("done");
@@ -312,6 +334,7 @@ pub fn pool(command: PoolCommand) -> Result<()> {
     match command {
         PoolCommand::Rename { name, yes, devices } => on_pool(&devices, yes, |p| ops::plan_rename_pool(p, &name)),
         PoolCommand::Remove { yes, devices } => on_pool(&devices, yes, ops::plan_remove_pool),
+        PoolCommand::Repair { yes, devices } => on_pool(&devices, yes, ops::plan_repair),
         PoolCommand::Create {
             name,
             logical_sector,

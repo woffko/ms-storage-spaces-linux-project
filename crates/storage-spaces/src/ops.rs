@@ -712,21 +712,26 @@ pub fn plan_add_disk<D: ReadAt>(pool: &Pool<D>, disk: &BlankDisk, guids: Guids) 
 /// [`plan_retire_disk`]): two database updates, then its partition table
 /// without the pool partition.
 pub fn plan_remove_disk<D: ReadAt>(pool: &Pool<D>, disk_id: u64) -> Result<Plan> {
-    let db = check_pool(pool)?;
     let disk = pool
         .disks
         .get(&disk_id)
         .ok_or_else(|| Error::Pool(format!("no disk with id {disk_id}")))?;
-    let member = disk
-        .member
-        .map(|m| &pool.members[m])
-        .ok_or_else(|| Error::Pool(format!("disk {disk_id} is not at hand")))?;
-    if disk.usage != crate::format::DiskUsage::Retired || member.header.database_copy {
+    let member = disk.member.map(|m| &pool.members[m]);
+    // A missing disk (repaired away from): only the others are written.
+    let db = if member.is_some() {
+        check_pool(pool)?
+    } else {
+        check_pool_missing_disks(pool)?
+    };
+    if let Some(m) = member
+        && (disk.usage != crate::format::DiskUsage::Retired || m.header.database_copy)
+    {
         return Err(Error::Pool(format!(
             "disk {disk_id} must be retired first (spaces disk retire)"
         )));
     }
-    let (first, second) = crate::manage::remove_disk_updates(&db, disk_id, filetime_now())?;
+    let now = filetime_now();
+    let (first, second) = crate::manage::remove_disk_updates(&db, disk_id, now)?;
     let mut plan = Plan {
         summary: vec![format!(
             "remove disk {disk_id} ({}) from pool \"{}\"",
@@ -734,6 +739,14 @@ pub fn plan_remove_disk<D: ReadAt>(pool: &Pool<D>, disk_id: u64) -> Result<Plan>
         )],
         steps: Vec::new(),
     };
+    // A missing disk leaves the lists in the metadata space now (a retired
+    // one left them when it was retired).
+    if member.is_none() {
+        plan.step(
+            "databases in the metadata space without the disk",
+            space_databases_without(pool, &db, disk_id, now)?,
+        );
+    }
     let copies: Vec<&crate::Member> = pool.members.iter().filter(|m| m.header.database_copy).collect();
     for (what, db) in [("first", &first), ("second", &second)] {
         for m in &copies {
@@ -747,6 +760,9 @@ pub fn plan_remove_disk<D: ReadAt>(pool: &Pool<D>, disk_id: u64) -> Result<Plan>
             );
         }
     }
+    let Some(member) = member else {
+        return Ok(plan);
+    };
     let table = crate::gpt::remove_partitions(&pool.devices[member.device], crate::gpt::STORAGE_SPACES_PARTITION_TYPE)?
         .ok_or_else(|| Error::Pool(format!("disk {disk_id} has no GPT")))?;
     plan.step(
@@ -774,7 +790,6 @@ pub fn plan_remove_disk<D: ReadAt>(pool: &Pool<D>, disk_id: u64) -> Result<Plan>
 /// and the disk a last copy of the database and a header without the copy.
 /// Pools of at most five disks (every disk carries the database).
 pub fn plan_retire_disk<D: ReadAt>(pool: &Pool<D>, disk_id: u64) -> Result<Plan> {
-    use crate::create::SPACE_DATABASE_STRIDE;
     use crate::format::{DATA_AREA_OFFSET, DiskHeader, Record, SpaceRole};
     let mut db = check_pool(pool)?;
     if pool.members.len() > DATABASE_COPIES {
@@ -921,7 +936,292 @@ pub fn plan_retire_disk<D: ReadAt>(pool: &Pool<D>, disk_id: u64) -> Result<Plan>
         );
     }
     // The databases of the metadata space: without the disk.
-    let meta = &pool.spaces[&metadata_id];
+    let space_dbs = space_databases_without(pool, &db, disk_id, now)?;
+    plan.step("databases in the metadata space without the disk", space_dbs);
+    // Its copy of the pool database, last.
+    let sequence = db.sequence() + 1;
+    let (old, mut record) = assemble_records(db.bytes(), 0x40)?
+        .into_iter()
+        .filter(|r| r.kind == 2)
+        .find_map(|r| {
+            DiskBody::decode(&r.body)
+                .ok()
+                .filter(|d| d.id == disk_id)
+                .map(|d| (r, d))
+        })
+        .ok_or_else(|| Error::Pool(format!("no disk record {disk_id}")))?;
+    record.sequence = sequence;
+    record.database_copy = false;
+    let body = record.encode();
+    let (mut next, _) = db.updated(&[(old.kind, old.version, &body)], &[old.id])?;
+    next.commit(sequence, now);
+    write_db(&mut plan, "disk without its database copy", &next, false);
+    let header = DiskHeader {
+        generation: member.header.generation + 1,
+        database_copy: false,
+        ..member.header.clone()
+    };
+    let mut page = header.encode().to_vec();
+    page.resize(POOL_DB_OFFSET as usize, 0);
+    page.extend_from_slice(next.bytes());
+    plan.step(
+        format!("device {}: last database and header without the copy", member.device),
+        vec![Action::Write {
+            target: Target::Member(member.device),
+            offset: member.partition.offset,
+            bytes: page,
+        }],
+    );
+    let _ = DATA_AREA_OFFSET;
+    Ok(plan)
+}
+
+/// Like [`check_pool`], but a pool may miss disks (the only warnings
+/// allowed), and its spaces may be degraded (not failed).
+fn check_pool_missing_disks<D: ReadAt>(pool: &Pool<D>) -> Result<Database> {
+    let other: Vec<&String> = pool.warnings.iter().filter(|w| !w.ends_with(" is missing")).collect();
+    if !other.is_empty() {
+        return Err(Error::Pool(format!(
+            "the pool is not in a state repair handles ({})",
+            other.iter().map(|w| w.as_str()).collect::<Vec<_>>().join("; ")
+        )));
+    }
+    let db = pool.database_model()?;
+    for r in assemble_records(db.bytes(), 0x40)? {
+        let understood = match r.kind {
+            1 => PoolBody::decode(r.version, &r.body).map(|_| ()),
+            2 => DiskBody::decode(&r.body).map(|_| ()),
+            3 | 6 => SpaceBody::decode(r.kind == 6, &r.body).map(|_| ()),
+            4 => Record::decode(&r).map(|_| ()),
+            k => Err(crate::error::format_err!("record type {k}")),
+        };
+        understood.map_err(|e| Error::Pool(format!("record {} is not understood: {e}", r.id)))?;
+    }
+    for space in pool.user_spaces() {
+        if pool.open_space(space.id())?.condition() == crate::Condition::Failed {
+            return Err(Error::Pool(format!(
+                "space \"{}\" has lost data; it cannot be repaired",
+                space.name()
+            )));
+        }
+    }
+    Ok(db)
+}
+
+/// `spaces pool repair`: rebuilds every copy that is on a missing disk or
+/// out of date on another disk (as `Repair-VirtualDisk` regenerates them):
+/// copies half regenerated (a crash, or Windows' own) are dropped first;
+/// then each copy is rebuilt as a regenerating copy on a disk that holds
+/// nothing else of its row, from a current copy of the same column (mirror)
+/// or as the XOR of the row's other columns (single parity), and recorded
+/// in place of the old one. Missing disks can be removed afterwards
+/// (`spaces disk remove`).
+pub fn plan_repair<D: ReadAt>(pool: &Pool<D>) -> Result<Plan> {
+    use crate::format::{Resiliency, SpaceRole};
+    let mut db = check_pool_missing_disks(pool)?;
+    let now = filetime_now();
+    let mut plan = Plan {
+        summary: vec![format!("repair pool \"{}\"", pool.name)],
+        steps: Vec::new(),
+    };
+    let copies: Vec<crate::Member> = pool
+        .members
+        .iter()
+        .filter(|m| m.header.database_copy)
+        .cloned()
+        .collect();
+    let write_db = |plan: &mut Plan, what: &str, db: &Database| {
+        for m in &copies {
+            plan.step(
+                format!("{what} on device {}", m.device),
+                vec![Action::Write {
+                    target: Target::Member(m.device),
+                    offset: m.partition.offset + POOL_DB_OFFSET,
+                    bytes: db.bytes().to_vec(),
+                }],
+            );
+        }
+    };
+    let extents = |db: &Database| -> Result<Vec<(u32, ExtentRecord)>> {
+        Ok(assemble_records(db.bytes(), 0x40)?
+            .iter()
+            .filter_map(|r| match Record::decode(r) {
+                Ok(Record::Extent(e)) => Some((r.id, e)),
+                _ => None,
+            })
+            .collect())
+    };
+    let present = |disk: u64| pool.disks.get(&disk).is_some_and(|d| d.member.is_some());
+    let metadata = pool
+        .spaces
+        .values()
+        .find(|s| s.info.role == SpaceRole::Metadata)
+        .map(|s| s.id());
+    // Half regenerated copies go.
+    let partial: Vec<u32> = extents(&db)?
+        .iter()
+        .filter(|(_, e)| e.flags & ExtentRecord::FLAG_REGENERATING != 0)
+        .map(|(id, _)| *id)
+        .collect();
+    if !partial.is_empty() {
+        let (mut next, _) = db.updated(&[], &partial)?;
+        next.commit(db.sequence() + 1, now);
+        db = next;
+        write_db(
+            &mut plan,
+            &format!("{} half regenerated copies dropped", partial.len()),
+            &db,
+        );
+    }
+    let broken: Vec<(u32, ExtentRecord)> = extents(&db)?
+        .into_iter()
+        .filter(|(_, e)| Some(e.space_id) != metadata && (!present(e.disk_id) || !e.is_current()))
+        .collect();
+    let mut slabs = Slabs::of(&db)?;
+    for (old_id, e) in broken {
+        let all = extents(&db)?;
+        let row: Vec<&ExtentRecord> = all
+            .iter()
+            .map(|(_, x)| x)
+            .filter(|x| x.space_id == e.space_id && x.virtual_slab == e.virtual_slab)
+            .collect();
+        let policy = pool
+            .spaces
+            .get(&e.space_id)
+            .and_then(|s| s.info.policy)
+            .ok_or_else(|| Error::Pool(format!("space {} has no placement policy", e.space_id)))?;
+        let good = |x: &&&ExtentRecord| x.is_current() && present(x.disk_id);
+        let location = |x: &ExtentRecord| -> Result<(Target, u64)> {
+            let (device, at) = pool
+                .slab_location(x.disk_id, x.physical_slab)?
+                .ok_or_else(|| Error::Pool(format!("disk {} is not at hand", x.disk_id)))?;
+            Ok((Target::Member(device), at))
+        };
+        // Where the data comes from.
+        let source: Vec<(Target, u64)> = match policy.resiliency {
+            Resiliency::Mirror => match row.iter().find(|x| good(x) && x.column == e.column && x.copy != e.copy) {
+                Some(x) => vec![location(x)?],
+                None => {
+                    return Err(Error::Pool(format!(
+                        "no current copy of space {} slab {}",
+                        e.space_id, e.virtual_slab
+                    )));
+                }
+            },
+            Resiliency::Parity if policy.redundancy == 1 => {
+                let others: Vec<&&ExtentRecord> = row.iter().filter(|x| good(x) && x.column != e.column).collect();
+                if others.len() as u64 != policy.columns - 1 || others.iter().any(|x| x.slab_count != e.slab_count) {
+                    return Err(Error::Pool(format!(
+                        "space {} slab {} lacks columns to rebuild from",
+                        e.space_id, e.virtual_slab
+                    )));
+                }
+                others.iter().map(|x| location(x)).collect::<Result<_>>()?
+            }
+            _ => {
+                return Err(Error::Pool(format!(
+                    "space {} ({:?}) cannot rebuild a lost copy",
+                    e.space_id, policy.resiliency
+                )));
+            }
+        };
+        let exclude: Vec<u64> = row.iter().map(|x| x.disk_id).collect();
+        let (target, slab) = slabs.allocate(e.slab_count, &exclude).ok_or_else(|| {
+            Error::Pool(format!(
+                "no disk has {} free slabs in a row for space {} slab {} (its row is on disks {:?}); add a disk",
+                e.slab_count, e.space_id, e.virtual_slab, exclude
+            ))
+        })?;
+        let next_copy = row
+            .iter()
+            .filter(|x| x.column == e.column)
+            .map(|x| x.copy)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let regenerating = ExtentRecord {
+            copy: next_copy,
+            flags: e.flags | ExtentRecord::FLAG_REGENERATING,
+            stale_marker: ExtentRecord::CURRENT,
+            disk_id: target,
+            physical_slab: slab,
+            ..e
+        };
+        let sequence = db.sequence() + 1;
+        let body = regenerating.encode(sequence);
+        let (mut next, ids) = db.updated(&[(4, 6, &body)], &[])?;
+        next.commit(sequence, now);
+        db = next;
+        write_db(
+            &mut plan,
+            &format!("new copy of space {} slab {}", e.space_id, e.virtual_slab),
+            &db,
+        );
+        let (to, to_offset) = location(&ExtentRecord {
+            disk_id: target,
+            physical_slab: slab,
+            ..e
+        })?;
+        let len = e.slab_count * SLAB_SIZE;
+        let action = match source.len() {
+            1 => Action::Copy {
+                from: source[0].0,
+                from_offset: source[0].1,
+                to,
+                to_offset,
+                len,
+            },
+            _ => Action::Xor {
+                from: source,
+                to,
+                to_offset,
+                len,
+            },
+        };
+        plan.step(
+            format!("rebuild space {} slab {} on disk {target}", e.space_id, e.virtual_slab),
+            vec![action],
+        );
+        let sequence = db.sequence() + 1;
+        let body = ExtentRecord {
+            copy: e.copy,
+            flags: e.flags & !ExtentRecord::FLAG_REGENERATING,
+            stale_marker: ExtentRecord::CURRENT,
+            disk_id: target,
+            physical_slab: slab,
+            ..e
+        }
+        .encode(sequence);
+        let (mut next, _) = db.updated(&[(4, 6, &body)], &[old_id, ids[0]])?;
+        next.commit(sequence, now);
+        db = next;
+        write_db(
+            &mut plan,
+            &format!("space {} slab {} repaired", e.space_id, e.virtual_slab),
+            &db,
+        );
+    }
+    if plan.steps.is_empty() {
+        plan.summary.push("nothing to repair".into());
+    }
+    Ok(plan)
+}
+
+/// Rewrites the databases in the metadata space without disk `disk_id` in
+/// their disk lists (its entry replaced by the last, as Windows does), on
+/// every copy of the metadata space but the disk's own.
+fn space_databases_without<D: ReadAt>(pool: &Pool<D>, db: &Database, disk_id: u64, now: u64) -> Result<Vec<Action>> {
+    use crate::create::SPACE_DATABASE_STRIDE;
+    use crate::format::SpaceRole;
+    let disk = pool
+        .disks
+        .get(&disk_id)
+        .ok_or_else(|| Error::Pool(format!("no disk with id {disk_id}")))?;
+    let meta = pool
+        .spaces
+        .values()
+        .find(|s| s.info.role == SpaceRole::Metadata)
+        .ok_or_else(|| Error::Pool("no metadata space".into()))?;
     let holders: Vec<&ExtentRecord> = meta.extents.iter().filter(|x| x.disk_id != disk_id).collect();
     let mut space_dbs = Vec::new();
     for number in assemble_records(db.bytes(), 0x40)?
@@ -969,41 +1269,5 @@ pub fn plan_retire_disk<D: ReadAt>(pool: &Pool<D>, disk_id: u64) -> Result<Plan>
             }
         }
     }
-    plan.step("databases in the metadata space without the disk", space_dbs);
-    // Its copy of the pool database, last.
-    let sequence = db.sequence() + 1;
-    let (old, mut record) = assemble_records(db.bytes(), 0x40)?
-        .into_iter()
-        .filter(|r| r.kind == 2)
-        .find_map(|r| {
-            DiskBody::decode(&r.body)
-                .ok()
-                .filter(|d| d.id == disk_id)
-                .map(|d| (r, d))
-        })
-        .ok_or_else(|| Error::Pool(format!("no disk record {disk_id}")))?;
-    record.sequence = sequence;
-    record.database_copy = false;
-    let body = record.encode();
-    let (mut next, _) = db.updated(&[(old.kind, old.version, &body)], &[old.id])?;
-    next.commit(sequence, now);
-    write_db(&mut plan, "disk without its database copy", &next, false);
-    let header = DiskHeader {
-        generation: member.header.generation + 1,
-        database_copy: false,
-        ..member.header.clone()
-    };
-    let mut page = header.encode().to_vec();
-    page.resize(POOL_DB_OFFSET as usize, 0);
-    page.extend_from_slice(next.bytes());
-    plan.step(
-        format!("device {}: last database and header without the copy", member.device),
-        vec![Action::Write {
-            target: Target::Member(member.device),
-            offset: member.partition.offset,
-            bytes: page,
-        }],
-    );
-    let _ = DATA_AREA_OFFSET;
-    Ok(plan)
+    Ok(space_dbs)
 }
