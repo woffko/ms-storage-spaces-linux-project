@@ -665,3 +665,46 @@ fn version_29_pools_are_edited_but_get_no_new_spaces() {
     assert_eq!(space.info.record_version, 17);
     check_pool(&pool).unwrap();
 }
+
+/// A pool whose records claim more of a disk than it has (found by the fuzz
+/// target `manage`: the free slabs were counted by subtracting, which
+/// overflowed, and could have placed a new extent over data). Planning on
+/// it fails instead.
+#[test]
+fn extents_beyond_their_disk_stop_the_planners() {
+    use storage_spaces::database::Database;
+    use storage_spaces::format::assemble_records;
+    use storage_spaces::records::DiskBody;
+    let mut new_guid = guids();
+    let (images, disks) = blank(2);
+    let base: Vec<Overlay<&SparseImage>> = images.iter().map(Overlay::new).collect();
+    let members = || base.iter().collect::<Vec<_>>();
+    let (plan, _) = plan_create_pool(&disks, "beyond", None, &mut new_guid).unwrap();
+    plan.apply::<&Overlay<&SparseImage>, _>(&[], &members()).unwrap();
+    let pool = Pool::open(members()).unwrap();
+    let (plan, _) = plan_create_space(&pool, &spec("s", 1, 4096, false), &mut new_guid).unwrap();
+    drop(pool);
+    plan.apply::<_, &Overlay<&SparseImage>>(&members(), &[]).unwrap();
+    // Disk 1 now says it holds two slabs; its extents reach further.
+    let pool = Pool::open(members()).unwrap();
+    let at = pool.members[0].partition.offset + 0x1000;
+    drop(pool);
+    let db = Database::read_formatted(&base[0], at).unwrap();
+    let record = assemble_records(db.bytes(), 0x40)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.kind == 2 && DiskBody::decode(&r.body).unwrap().id == 1)
+        .unwrap();
+    let mut disk = DiskBody::decode(&record.body).unwrap();
+    disk.data_size = 2 << 28;
+    disk.sequence = db.sequence() + 1;
+    let body = disk.encode();
+    let (mut patched, _) = db.updated(&[(2, record.version, &body)], &[record.id]).unwrap();
+    patched.commit(db.sequence() + 1, 1);
+    for d in &base {
+        d.write_all_at(patched.bytes(), at).unwrap();
+    }
+    let pool = Pool::open(members()).unwrap();
+    let err = plan_create_space(&pool, &spec("t", 1, 1024, false), &mut new_guid).unwrap_err();
+    assert!(err.to_string().contains("reach beyond"), "{err}");
+}

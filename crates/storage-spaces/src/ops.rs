@@ -96,8 +96,19 @@ impl Slabs {
                 ranges.push((start, count));
             }
         }
-        for (_, ranges) in disks.values_mut() {
+        // New extents go between these: extents beyond their disk or on
+        // each other's slabs would place them over data.
+        for (disk, (total, ranges)) in disks.iter_mut() {
             ranges.sort_unstable();
+            let mut end = 0;
+            for &(start, count) in ranges.iter() {
+                let last = start.checked_add(count).filter(|&e| e <= *total && start >= end);
+                end = last.ok_or_else(|| {
+                    Error::Pool(format!(
+                        "disk {disk}: extents overlap or reach beyond its {total} slabs (slab {start}, {count} slabs)"
+                    ))
+                })?;
+            }
         }
         Ok(Slabs { disks })
     }
@@ -106,6 +117,8 @@ impl Slabs {
         self.disks.len()
     }
 
+    /// Free slabs of `disk` (its ranges lie inside it without overlapping,
+    /// see `of`).
     fn free(&self, disk: u64) -> u64 {
         let (total, ranges) = &self.disks[&disk];
         total - ranges.iter().map(|r| r.1).sum::<u64>()
@@ -114,14 +127,14 @@ impl Slabs {
     /// The first run of `n` free slabs of `disk` (Windows' rule).
     fn first_run(&self, disk: u64, n: u64) -> Option<u64> {
         let (total, ranges) = &self.disks[&disk];
-        let mut at = 0;
+        let mut at = 0u64;
         for &(start, count) in ranges {
-            if start >= at + n {
+            if start >= at.checked_add(n)? {
                 break;
             }
             at = at.max(start + count);
         }
-        (at + n <= *total).then_some(at)
+        at.checked_add(n).filter(|e| e <= total).map(|_| at)
     }
 
     /// `n` slabs on the disk with the most free slabs (the lowest id on a
