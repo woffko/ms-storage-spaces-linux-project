@@ -522,6 +522,9 @@ rows of thin spaces not allocated yet (M7).
   * corpus pools `parity3_26100` and `mirror2_26100` changed on Linux (disk
     added, space created and grown, first disk retired and removed):
     healthy, Optimize completes, patterns read back;
+  * a failed disk replaced and a damaged mirror copy scrubbed on Linux
+    (`mgmt-replace.json`): healthy, Repair and Optimize complete, patterns
+    read back;
   * pools cut after a step of creating a space and of adding a disk:
     healthy after Repair, patterns read back. Cutting a disk addition
     after its first database update, before the new disk had its copy of
@@ -553,8 +556,7 @@ rows of thin spaces not allocated yet (M7).
   `windows-absent-disk-bugcheck.json`). VM experiments with disks absent
   stopped after the second crash, as the goal requires.
 * Still open (2026-09-30): M10.3 (creating tiers and mirror-accelerated
-  parity: needs experiments on the Windows VM); Windows round trips of the
-  NTFS spaces created on Linux, of a replaced disk and of a scrubbed pool;
+  parity: needs experiments on the Windows VM);
   the 24 h fuzz of all eleven targets (running since 2026-09-30 23:28 on
   e5abb35); version 1.0.0 and the publication.
 

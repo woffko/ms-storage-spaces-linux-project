@@ -560,3 +560,25 @@ fn linux_created_spaces_pass_the_write_checks() {
         assert!(w["mismatching"].as_array().unwrap().is_empty(), "{name}");
     }
 }
+
+/// A failed disk replaced on Linux (a disk added to the pool missing one,
+/// the pool repaired onto it, the missing disk removed), then a damaged
+/// mirror copy found and repaired by scrubbing (tools/mgmt-replace.sh):
+/// Windows 11 attached the pool as healthy with all three disks, repaired
+/// and optimized it, and read both spaces' patterns back.
+#[test]
+fn windows_takes_a_pool_with_a_replaced_disk() {
+    let e = evidence("mgmt-replace.json");
+    for key in ["attached", "repaired", "optimized"] {
+        let s = &e[key];
+        assert_eq!(s["pool"], serde_json::json!(["Healthy", "OK"]), "{key}");
+        assert_eq!(s["spaces"].as_array().unwrap().len(), 2);
+        assert!(s["spaces"].as_array().unwrap().iter().all(|x| x[1] == "Healthy" && x[2] == "OK"), "{key}");
+        assert_eq!(s["disks"].as_array().unwrap().len(), 3);
+        assert!(s["disks"].as_array().unwrap().iter().all(|d| d == &serde_json::json!(["Healthy", "OK"])), "{key}");
+    }
+    assert_eq!(e["optimize_job"][0][1], "Completed");
+    let checks = e["checks_after_optimize"].as_array().unwrap();
+    assert_eq!(checks.len(), 2);
+    assert!(checks.iter().all(|c| c[2] == true));
+}

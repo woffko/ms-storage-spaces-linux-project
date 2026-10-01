@@ -1,0 +1,118 @@
+{
+ "note": "tools/mgmt-replace.sh: a pool of three images with a two-way mirror and a parity space filled with the pattern; one disk left out (failed), a blank disk added to the other two, the pool repaired onto it and the missing disk removed; then 1 MiB of the mirror's second copy overwritten, found by spaces pool scrub and made to agree by --repair. Taken by Windows 11 (tools/put-roundtrip.sh -Optimize)",
+ "windows_build": "10.0.26100.0",
+ "attached": {
+  "pool": [
+   "Healthy",
+   "OK"
+  ],
+  "spaces": [
+   [
+    "rparity",
+    "Healthy",
+    "OK"
+   ],
+   [
+    "rmirror",
+    "Healthy",
+    "OK"
+   ]
+  ],
+  "disks": [
+   [
+    "Healthy",
+    "OK"
+   ],
+   [
+    "Healthy",
+    "OK"
+   ],
+   [
+    "Healthy",
+    "OK"
+   ]
+  ]
+ },
+ "repaired": {
+  "pool": [
+   "Healthy",
+   "OK"
+  ],
+  "spaces": [
+   [
+    "rparity",
+    "Healthy",
+    "OK"
+   ],
+   [
+    "rmirror",
+    "Healthy",
+    "OK"
+   ]
+  ],
+  "disks": [
+   [
+    "Healthy",
+    "OK"
+   ],
+   [
+    "Healthy",
+    "OK"
+   ],
+   [
+    "Healthy",
+    "OK"
+   ]
+  ]
+ },
+ "optimized": {
+  "pool": [
+   "Healthy",
+   "OK"
+  ],
+  "spaces": [
+   [
+    "rparity",
+    "Healthy",
+    "OK"
+   ],
+   [
+    "rmirror",
+    "Healthy",
+    "OK"
+   ]
+  ],
+  "disks": [
+   [
+    "Healthy",
+    "OK"
+   ],
+   [
+    "Healthy",
+    "OK"
+   ],
+   [
+    "Healthy",
+    "OK"
+   ]
+  ]
+ },
+ "optimize_job": [
+  [
+   "ss-replace-Optimize",
+   "Completed"
+  ]
+ ],
+ "checks_after_optimize": [
+  [
+   "rmirror",
+   "pattern",
+   true
+  ],
+  [
+   "rparity",
+   "pattern",
+   true
+  ]
+ ]
+}
