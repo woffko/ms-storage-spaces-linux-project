@@ -90,12 +90,14 @@ pub struct Health {
 /// * The pool is Healthy / OK with every disk; with disks missing, Warning /
 ///   Degraded while more than half of the pool database copies are at
 ///   hand, otherwise Unhealthy / Read-only (the pool lost its quorum).
-/// * A space is Healthy / OK with every copy current and at hand, its hidden
-///   spaces (tiers, cache, dirty region log, parity journal) included.
-///   Copies on missing disks make it Incomplete, out-of-date copies
-///   Degraded: Warning while it still survives a disk failure, Unhealthy
-///   with No Redundancy when it survives none, and Unhealthy / Detached
-///   when data is lost or the pool lost its quorum.
+/// * A space is Healthy / OK with every disk of the pool at hand and every
+///   copy current, its hidden spaces (tiers, cache, dirty region log, parity
+///   journal) included. With a disk of the pool missing or out-of-date
+///   copies it is Warning / Degraded, also Incomplete with copies of its own
+///   on missing disks; Unhealthy / No Redundancy Degraded when data is lost;
+///   Unhealthy / Detached when the pool lost its quorum. These are the
+///   states once the pool has started and its spaces are connected (a pool
+///   arriving without a disk first shows them detached).
 pub fn health<D: ReadAt>(pool: &Pool<D>) -> Result<Health> {
     let disks: Vec<DiskHealth> = pool
         .disks
@@ -156,29 +158,23 @@ pub fn health<D: ReadAt>(pool: &Pool<D>) -> Result<Health> {
                 words.push("Detached");
                 HealthStatus::Unhealthy
             }
+            // Data lost: the space stays attached, failing what it lost.
             None => {
-                words.push("Detached");
+                words.extend(["No Redundancy", "Degraded"]);
                 HealthStatus::Unhealthy
             }
-            _ if !r.missing && !r.stale => {
+            _ if !missing && !r.stale => {
                 words.push("OK");
                 HealthStatus::Healthy
             }
-            Some(left) => {
-                if left == 0 {
-                    words.push("No Redundancy");
-                }
-                if r.stale {
-                    words.push("Degraded");
-                }
+            // A disk of the pool missing degrades every space; those with
+            // copies on it are also incomplete.
+            _ => {
+                words.push("Degraded");
                 if r.missing {
                     words.push("Incomplete");
                 }
-                if left == 0 {
-                    HealthStatus::Unhealthy
-                } else {
-                    HealthStatus::Warning
-                }
+                HealthStatus::Warning
             }
         };
         spaces.push(SpaceHealth {

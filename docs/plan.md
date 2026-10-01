@@ -547,7 +547,10 @@ rows of thin spaces not allocated yet (M7).
   members' pool partitions or their partition tables).
 * M11.4: `spaces pool health` shows the pool, its disks and spaces in
   Windows' terms (rules in docs/storage-spaces-format.md, "Health"),
-  checked against every Windows state on record. Asking Windows about more
+  checked against every Windows state on record and against Windows' view
+  of a four-disk pool, created on Linux and by Windows, losing each disk
+  and two of them while in use (`health-drop.json`: 12 cases, every state
+  predicted; the two pools behaved alike). Asking Windows about more
   states with disks absent failed: the experiment (tools/health-states.sh,
   a Linux-created pool of four disks with simple, mirror and parity spaces)
   bugchecked Windows (0x50 in spaceport.sys) when the pool arrived without

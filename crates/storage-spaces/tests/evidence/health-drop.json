@@ -1,0 +1,706 @@
+{
+ "note": "tools/health-drop.sh: the pool of tools/health-states.sh (four disks; hsimple one-column simple, hwide four-column simple, hmirror one-column and hmirror2 two-column two-way mirror, hparity single parity) created on Linux (fixtures c11health) and by Windows (scenario c11ctl, fixtures c11ctl/h0), attached whole on Windows 11 (all Healthy), then the image disks listed in 'dropped' detached while in use (Test-RoundTrip.ps1 -DropDisk -NoRepair); 'windows' is Get-StoragePool/Get-VirtualDisk/Get-PhysicalDisk 20 s later",
+ "windows_build": "10.0.26100.0",
+ "cases": [
+  {
+   "pool": "linux",
+   "dropped": [
+    0
+   ],
+   "windows": {
+    "pool": [
+     "Warning",
+     "Degraded"
+    ],
+    "spaces": {
+     "hmirror2": [
+      "Warning",
+      "Degraded Incomplete"
+     ],
+     "hwide": [
+      "Unhealthy",
+      "No Redundancy Degraded"
+     ],
+     "hmirror": [
+      "Warning",
+      "Degraded"
+     ],
+     "hsimple": [
+      "Unhealthy",
+      "No Redundancy Degraded"
+     ],
+     "hparity": [
+      "Warning",
+      "Degraded Incomplete"
+     ]
+    },
+    "lost_disks": 1,
+    "disks": 4
+   },
+   "before": {
+    "hmirror2": [
+     "Healthy",
+     "OK"
+    ],
+    "hwide": [
+     "Healthy",
+     "OK"
+    ],
+    "hmirror": [
+     "Healthy",
+     "OK"
+    ],
+    "hsimple": [
+     "Healthy",
+     "OK"
+    ],
+    "hparity": [
+     "Healthy",
+     "OK"
+    ]
+   }
+  },
+  {
+   "pool": "windows",
+   "dropped": [
+    0
+   ],
+   "windows": {
+    "pool": [
+     "Warning",
+     "Degraded"
+    ],
+    "spaces": {
+     "hmirror": [
+      "Warning",
+      "Degraded Incomplete"
+     ],
+     "hwide": [
+      "Unhealthy",
+      "No Redundancy Degraded"
+     ],
+     "hmirror2": [
+      "Warning",
+      "Degraded Incomplete"
+     ],
+     "hsimple": [
+      "Warning",
+      "Degraded"
+     ],
+     "hparity": [
+      "Warning",
+      "Degraded Incomplete"
+     ]
+    },
+    "lost_disks": 1,
+    "disks": 4
+   },
+   "before": {
+    "hmirror": [
+     "Healthy",
+     "OK"
+    ],
+    "hwide": [
+     "Healthy",
+     "OK"
+    ],
+    "hmirror2": [
+     "Healthy",
+     "OK"
+    ],
+    "hsimple": [
+     "Healthy",
+     "OK"
+    ],
+    "hparity": [
+     "Healthy",
+     "OK"
+    ]
+   }
+  },
+  {
+   "pool": "linux",
+   "dropped": [
+    1
+   ],
+   "windows": {
+    "pool": [
+     "Warning",
+     "Degraded"
+    ],
+    "spaces": {
+     "hmirror2": [
+      "Warning",
+      "Degraded Incomplete"
+     ],
+     "hwide": [
+      "Unhealthy",
+      "No Redundancy Degraded"
+     ],
+     "hmirror": [
+      "Warning",
+      "Degraded Incomplete"
+     ],
+     "hsimple": [
+      "Warning",
+      "Degraded"
+     ],
+     "hparity": [
+      "Warning",
+      "Degraded Incomplete"
+     ]
+    },
+    "lost_disks": 1,
+    "disks": 4
+   },
+   "before": {
+    "hmirror2": [
+     "Healthy",
+     "OK"
+    ],
+    "hwide": [
+     "Healthy",
+     "OK"
+    ],
+    "hmirror": [
+     "Healthy",
+     "OK"
+    ],
+    "hsimple": [
+     "Healthy",
+     "OK"
+    ],
+    "hparity": [
+     "Healthy",
+     "OK"
+    ]
+   }
+  },
+  {
+   "pool": "windows",
+   "dropped": [
+    1
+   ],
+   "windows": {
+    "pool": [
+     "Warning",
+     "Degraded"
+    ],
+    "spaces": {
+     "hmirror": [
+      "Warning",
+      "Degraded Incomplete"
+     ],
+     "hwide": [
+      "Unhealthy",
+      "No Redundancy Degraded"
+     ],
+     "hmirror2": [
+      "Warning",
+      "Degraded Incomplete"
+     ],
+     "hsimple": [
+      "Warning",
+      "Degraded"
+     ],
+     "hparity": [
+      "Warning",
+      "Degraded Incomplete"
+     ]
+    },
+    "lost_disks": 1,
+    "disks": 4
+   },
+   "before": {
+    "hmirror": [
+     "Healthy",
+     "OK"
+    ],
+    "hwide": [
+     "Healthy",
+     "OK"
+    ],
+    "hmirror2": [
+     "Healthy",
+     "OK"
+    ],
+    "hsimple": [
+     "Healthy",
+     "OK"
+    ],
+    "hparity": [
+     "Healthy",
+     "OK"
+    ]
+   }
+  },
+  {
+   "pool": "linux",
+   "dropped": [
+    2
+   ],
+   "windows": {
+    "pool": [
+     "Warning",
+     "Degraded"
+    ],
+    "spaces": {
+     "hmirror2": [
+      "Warning",
+      "Degraded Incomplete"
+     ],
+     "hwide": [
+      "Unhealthy",
+      "No Redundancy Degraded"
+     ],
+     "hmirror": [
+      "Warning",
+      "Degraded Incomplete"
+     ],
+     "hsimple": [
+      "Warning",
+      "Degraded"
+     ],
+     "hparity": [
+      "Warning",
+      "Degraded Incomplete"
+     ]
+    },
+    "lost_disks": 1,
+    "disks": 4
+   },
+   "before": {
+    "hmirror2": [
+     "Healthy",
+     "OK"
+    ],
+    "hwide": [
+     "Healthy",
+     "OK"
+    ],
+    "hmirror": [
+     "Healthy",
+     "OK"
+    ],
+    "hsimple": [
+     "Healthy",
+     "OK"
+    ],
+    "hparity": [
+     "Healthy",
+     "OK"
+    ]
+   }
+  },
+  {
+   "pool": "windows",
+   "dropped": [
+    2
+   ],
+   "windows": {
+    "pool": [
+     "Warning",
+     "Degraded"
+    ],
+    "spaces": {
+     "hmirror": [
+      "Warning",
+      "Degraded Incomplete"
+     ],
+     "hwide": [
+      "Unhealthy",
+      "No Redundancy Degraded"
+     ],
+     "hmirror2": [
+      "Warning",
+      "Degraded Incomplete"
+     ],
+     "hsimple": [
+      "Warning",
+      "Degraded"
+     ],
+     "hparity": [
+      "Warning",
+      "Degraded Incomplete"
+     ]
+    },
+    "lost_disks": 1,
+    "disks": 4
+   },
+   "before": {
+    "hmirror": [
+     "Healthy",
+     "OK"
+    ],
+    "hwide": [
+     "Healthy",
+     "OK"
+    ],
+    "hmirror2": [
+     "Healthy",
+     "OK"
+    ],
+    "hsimple": [
+     "Healthy",
+     "OK"
+    ],
+    "hparity": [
+     "Healthy",
+     "OK"
+    ]
+   }
+  },
+  {
+   "pool": "linux",
+   "dropped": [
+    3
+   ],
+   "windows": {
+    "pool": [
+     "Warning",
+     "Degraded"
+    ],
+    "spaces": {
+     "hmirror2": [
+      "Warning",
+      "Degraded Incomplete"
+     ],
+     "hwide": [
+      "Unhealthy",
+      "No Redundancy Degraded"
+     ],
+     "hmirror": [
+      "Warning",
+      "Degraded Incomplete"
+     ],
+     "hsimple": [
+      "Warning",
+      "Degraded"
+     ],
+     "hparity": [
+      "Warning",
+      "Degraded Incomplete"
+     ]
+    },
+    "lost_disks": 1,
+    "disks": 4
+   },
+   "before": {
+    "hmirror2": [
+     "Healthy",
+     "OK"
+    ],
+    "hwide": [
+     "Healthy",
+     "OK"
+    ],
+    "hmirror": [
+     "Healthy",
+     "OK"
+    ],
+    "hsimple": [
+     "Healthy",
+     "OK"
+    ],
+    "hparity": [
+     "Healthy",
+     "OK"
+    ]
+   }
+  },
+  {
+   "pool": "windows",
+   "dropped": [
+    3
+   ],
+   "windows": {
+    "pool": [
+     "Warning",
+     "Degraded"
+    ],
+    "spaces": {
+     "hmirror": [
+      "Warning",
+      "Degraded"
+     ],
+     "hwide": [
+      "Unhealthy",
+      "No Redundancy Degraded"
+     ],
+     "hmirror2": [
+      "Warning",
+      "Degraded Incomplete"
+     ],
+     "hsimple": [
+      "Unhealthy",
+      "No Redundancy Degraded"
+     ],
+     "hparity": [
+      "Warning",
+      "Degraded Incomplete"
+     ]
+    },
+    "lost_disks": 1,
+    "disks": 4
+   },
+   "before": {
+    "hmirror": [
+     "Healthy",
+     "OK"
+    ],
+    "hwide": [
+     "Healthy",
+     "OK"
+    ],
+    "hmirror2": [
+     "Healthy",
+     "OK"
+    ],
+    "hsimple": [
+     "Healthy",
+     "OK"
+    ],
+    "hparity": [
+     "Healthy",
+     "OK"
+    ]
+   }
+  },
+  {
+   "pool": "linux",
+   "dropped": [
+    0,
+    1
+   ],
+   "windows": {
+    "pool": [
+     "Unhealthy",
+     "Read-only"
+    ],
+    "spaces": {
+     "hmirror2": [
+      "Unhealthy",
+      "Detached"
+     ],
+     "hwide": [
+      "Unhealthy",
+      "Detached"
+     ],
+     "hmirror": [
+      "Unhealthy",
+      "Detached"
+     ],
+     "hsimple": [
+      "Unhealthy",
+      "Detached"
+     ],
+     "hparity": [
+      "Unhealthy",
+      "Detached"
+     ]
+    },
+    "lost_disks": 2,
+    "disks": 4
+   },
+   "before": {
+    "hmirror2": [
+     "Healthy",
+     "OK"
+    ],
+    "hwide": [
+     "Healthy",
+     "OK"
+    ],
+    "hmirror": [
+     "Healthy",
+     "OK"
+    ],
+    "hsimple": [
+     "Healthy",
+     "OK"
+    ],
+    "hparity": [
+     "Healthy",
+     "OK"
+    ]
+   }
+  },
+  {
+   "pool": "windows",
+   "dropped": [
+    0,
+    1
+   ],
+   "windows": {
+    "pool": [
+     "Unhealthy",
+     "Read-only"
+    ],
+    "spaces": {
+     "hmirror": [
+      "Unhealthy",
+      "Detached"
+     ],
+     "hwide": [
+      "Unhealthy",
+      "Detached"
+     ],
+     "hmirror2": [
+      "Unhealthy",
+      "Detached"
+     ],
+     "hsimple": [
+      "Unhealthy",
+      "Detached"
+     ],
+     "hparity": [
+      "Unhealthy",
+      "Detached"
+     ]
+    },
+    "lost_disks": 2,
+    "disks": 4
+   },
+   "before": {
+    "hmirror": [
+     "Healthy",
+     "OK"
+    ],
+    "hwide": [
+     "Healthy",
+     "OK"
+    ],
+    "hmirror2": [
+     "Healthy",
+     "OK"
+    ],
+    "hsimple": [
+     "Healthy",
+     "OK"
+    ],
+    "hparity": [
+     "Healthy",
+     "OK"
+    ]
+   }
+  },
+  {
+   "pool": "linux",
+   "dropped": [
+    2,
+    3
+   ],
+   "windows": {
+    "pool": [
+     "Unhealthy",
+     "Read-only"
+    ],
+    "spaces": {
+     "hmirror2": [
+      "Unhealthy",
+      "Detached"
+     ],
+     "hwide": [
+      "Unhealthy",
+      "Detached"
+     ],
+     "hmirror": [
+      "Unhealthy",
+      "Detached"
+     ],
+     "hsimple": [
+      "Unhealthy",
+      "Detached"
+     ],
+     "hparity": [
+      "Unhealthy",
+      "Detached"
+     ]
+    },
+    "lost_disks": 2,
+    "disks": 4
+   },
+   "before": {
+    "hmirror2": [
+     "Healthy",
+     "OK"
+    ],
+    "hwide": [
+     "Healthy",
+     "OK"
+    ],
+    "hmirror": [
+     "Healthy",
+     "OK"
+    ],
+    "hsimple": [
+     "Healthy",
+     "OK"
+    ],
+    "hparity": [
+     "Healthy",
+     "OK"
+    ]
+   }
+  },
+  {
+   "pool": "windows",
+   "dropped": [
+    2,
+    3
+   ],
+   "windows": {
+    "pool": [
+     "Unhealthy",
+     "Read-only"
+    ],
+    "spaces": {
+     "hmirror": [
+      "Unhealthy",
+      "Detached"
+     ],
+     "hwide": [
+      "Unhealthy",
+      "Detached"
+     ],
+     "hmirror2": [
+      "Unhealthy",
+      "Detached"
+     ],
+     "hsimple": [
+      "Unhealthy",
+      "Detached"
+     ],
+     "hparity": [
+      "Unhealthy",
+      "Detached"
+     ]
+    },
+    "lost_disks": 2,
+    "disks": 4
+   },
+   "before": {
+    "hmirror": [
+     "Healthy",
+     "OK"
+    ],
+    "hwide": [
+     "Healthy",
+     "OK"
+    ],
+    "hmirror2": [
+     "Healthy",
+     "OK"
+    ],
+    "hsimple": [
+     "Healthy",
+     "OK"
+    ],
+    "hparity": [
+     "Healthy",
+     "OK"
+    ]
+   }
+  }
+ ]
+}

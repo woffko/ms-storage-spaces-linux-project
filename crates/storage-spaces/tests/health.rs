@@ -72,69 +72,88 @@ fn windows_pools_have_the_health_windows_showed() {
     assert!(checked.0 >= 7 && checked.1 >= 20, "{checked:?}");
 }
 
-/// The pool of tools/health-states.sh (four disks; a one-column and a
-/// four-column simple space, a one- and a two-column mirror, a parity
-/// space) with disks left out. Windows could not be asked: it bugchecked
-/// when this layout arrived without a disk (see roundtrip.rs); the rules
-/// are those of `health`, with the pool states Windows showed elsewhere.
+/// Windows' view of the pool of tools/health-states.sh (four disks; a
+/// one-column and a four-column simple space, a one- and a two-column
+/// mirror, a parity space), created once on Linux (`c11health`) and once by
+/// Windows (`c11ctl`), after disks were detached while it was in use: each
+/// disk in turn, then two of the four (health-drop.json). The prediction
+/// from the other disks matches it for the pool, the disks and every space.
 #[test]
-fn missing_disks_reduce_the_health_by_the_rules() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scenarios/c11health");
-    let all = disks(&dir);
-    let cases: [(&[usize], &str, [&str; 5]); 4] = [
-        (
-            &[0, 1, 2, 3],
-            "Healthy / OK",
-            [
-                "Healthy / OK",
-                "Healthy / OK",
-                "Healthy / OK",
-                "Healthy / OK",
-                "Healthy / OK",
-            ],
-        ),
-        // Disk 0 holds the one-column simple space, a column of the wide
-        // one, a copy of a column of the two-column mirror and a parity
-        // column.
-        (
-            &[1, 2, 3],
-            "Warning / Degraded",
-            [
-                "Unhealthy / Detached",
-                "Unhealthy / Detached",
-                "Healthy / OK",
-                "Unhealthy / No Redundancy Incomplete",
-                "Unhealthy / No Redundancy Incomplete",
-            ],
-        ),
-        // Two of four database copies: no quorum, every space detached.
-        (&[0, 1], "Unhealthy / Read-only", ["Unhealthy / Detached"; 5]),
-        (&[0], "Unhealthy / Read-only", ["Unhealthy / Detached"; 5]),
-    ];
-    for (present, pool_state, spaces) in cases {
-        let pool = Pool::open(present.iter().map(|&i| &all[i]).collect::<Vec<_>>()).unwrap();
+fn windows_shows_the_predicted_health_for_lost_disks() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let e: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("evidence/health-drop.json")).unwrap()).unwrap();
+    let cases = e["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 12);
+    for case in cases {
+        let dir = match case["pool"].as_str().unwrap() {
+            "linux" => root.join("scenarios/c11health"),
+            _ => root.join("scenarios/c11ctl/h0"),
+        };
+        let all = disks(&dir);
+        let dropped: Vec<usize> = case["dropped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_u64().unwrap() as usize)
+            .collect();
+        let pool = Pool::open(
+            (0..all.len())
+                .filter(|i| !dropped.contains(i))
+                .map(|i| &all[i])
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
         let h = health(&pool).unwrap();
-        assert_eq!(h.pool.to_string(), pool_state, "{present:?}");
-        assert_eq!(h.database_copies, (present.len(), 4));
+        let what = format!("{} without {dropped:?}", case["pool"]);
+        let w = &case["windows"];
+        assert_eq!(
+            h.pool.to_string(),
+            format!(
+                "{} / {}",
+                w["pool"][0].as_str().unwrap(),
+                w["pool"][1].as_str().unwrap()
+            ),
+            "{what}"
+        );
         let lost = h
             .disks
             .iter()
             .filter(|d| d.state.to_string() == "Warning / Lost Communication")
             .count();
-        assert_eq!(lost, 4 - present.len());
-        let names = ["hsimple", "hwide", "hmirror", "hmirror2", "hparity"];
-        for (name, want) in names.iter().zip(spaces) {
-            let s = h.spaces.iter().find(|s| s.name == *name).unwrap();
-            assert_eq!(s.state.to_string(), want, "{present:?} {name}");
+        assert_eq!(lost, w["lost_disks"].as_u64().unwrap() as usize, "{what}");
+        let spaces = w["spaces"].as_object().unwrap();
+        assert_eq!(spaces.len(), h.spaces.len());
+        for s in &h.spaces {
+            let ws = &spaces[&s.name];
+            assert_eq!(
+                s.state.to_string(),
+                format!("{} / {}", ws[0].as_str().unwrap(), ws[1].as_str().unwrap()),
+                "{what}: {}",
+                s.name
+            );
         }
     }
+}
+
+/// Without a quorum of database copies (one of four disks), every space is
+/// detached: the rule of `health`, as Windows showed it with two of four.
+#[test]
+fn a_pool_without_quorum_detaches_every_space() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scenarios/c11health");
+    let all = disks(&dir);
+    let pool = Pool::open(vec![&all[0]]).unwrap();
+    let h = health(&pool).unwrap();
+    assert_eq!(h.pool.to_string(), "Unhealthy / Read-only");
+    assert_eq!(h.database_copies, (1, 4));
+    assert!(h.spaces.iter().all(|s| s.state.to_string() == "Unhealthy / Detached"));
 }
 
 /// The pool states Windows showed with disks lost (mgmt-crash.json: the
 /// first versions of disk add and retire), which the rules follow: one of
 /// three disks lost left the pool Degraded, two of four made it Read-only
-/// and detached its spaces; and a two-way mirror that lost a copy had No
-/// Redundancy (tornt2.json).
+/// and detached its spaces; and a two-column simple space that lost a disk
+/// had No Redundancy (tornt2.json).
 #[test]
 fn the_rules_follow_what_windows_showed() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/evidence");

@@ -7,6 +7,7 @@
 # detached (tools/vm/Test-RoundTrip.ps1 -DropDisk N -NoRepair), then
 # Windows' view ("dropped") is printed next to `spaces pool health` of the
 # other three disks. The round trips land in testdata/work/health_drop_*.
+# N may list several disks (0,1).
 # Usage: tools/health-drop.sh DIR_LINUX DIR_WINDOWS [N...]
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -19,11 +20,11 @@ for n in "${drops[@]}"; do
   for kind in lnx win; do
     src=$linux
     [[ $kind == win ]] && src=$windows
-    name=health_drop_${kind}_$n
+    name=health_drop_${kind}_${n//,/}
     echo "=== $name"
     tools/put-roundtrip.sh "$src" "$name" -NoRepair -DropDisk "$n" 2>&1 | grep -vE "heartbeat|^scp attempt"
     others=()
-    for i in 0 1 2 3; do [[ $i == "$n" ]] || others+=("$src/disk$i.img"); done
+    for i in 0 1 2 3; do [[ ,$n, == *,$i,* ]] || others+=("$src/disk$i.img"); done
     echo "--- spaces pool health without disk$n"
     "$spaces" pool health "${others[@]}" 2>/dev/null
   done

@@ -325,7 +325,9 @@ journal and one into its cache, inside the slabs the update frees.
 What `Get-StoragePool`, `Get-VirtualDisk` and `Get-PhysicalDisk` show
 (`HealthStatus` / `OperationalStatus`) follows from the database and the
 disks at hand; `spaces pool health` predicts it (`storage_spaces::health`)
-with these rules, from Microsoft's documentation of the states:
+with these rules. They are the states once the pool has started and its
+spaces are connected: a pool arriving without a disk first shows its spaces
+Detached and the pool Read-only ("Starting").
 
 * A disk at hand is Healthy / OK, a missing one Warning / Lost
   Communication. Usage (Retired, Hot Spare, ...) is a separate property:
@@ -333,34 +335,44 @@ with these rules, from Microsoft's documentation of the states:
   (**verified**: every fixture whose manifest records `Get-PhysicalDisk`).
 * The pool is Healthy / OK with every disk. With disks missing it is
   Warning / Degraded while more than half of the pool database copies are
-  at hand (one of three disks lost: Warning / Degraded), otherwise
-  Unhealthy / Read-only, and every space is detached (two of four lost:
-  Read-only, both spaces Detached) (**verified** on those two states, the
-  first versions of disk add and retire cut by a crash, `mgmt-crash.json`).
-  Stale pool database copies do not count: pools with them attached as
-  Healthy.
+  at hand, otherwise Unhealthy / Read-only, and every space is Unhealthy /
+  Detached. Stale pool database copies do not count: pools with them
+  attached as Healthy.
 * A space counts its own extents and those of its hidden spaces (tiers,
-  write-back cache, dirty region log, parity journal). With every copy
-  current and at hand it is Healthy / OK; so it is while a present disk is
-  being retired: Windows marks that disk's copies out of date (stale marker
-  2) and rebuilds them elsewhere, and showed the space Healthy / OK during
-  the rebuild (**verified**: `repairint`). Copies on missing disks make the
-  space Incomplete, other out-of-date copies Degraded; it is Warning while
-  it still survives a disk failure, Unhealthy with No Redundancy when it
-  survives none (a two-way mirror that lost a copy: Unhealthy / No
-  Redundancy, `tornt2`), and Unhealthy / Detached when data is lost.
-  Windows showed Degraded where it had written the pool database with the
-  disk away (`tornt2`: No Redundancy Degraded; the disk add state: Degraded
-  Incomplete); from the metadata alone a copy on a missing disk is
-  Incomplete.
-* Not in the metadata, so never predicted: a repair in service, a space set
-  to manual attach and detached (`spstates`: Unknown / Detached), a pool
-  or space made read-only by an administrator.
+  write-back cache, dirty region log, parity journal). With every disk of
+  the pool at hand and every copy current it is Healthy / OK; so it is
+  while a present disk is being retired: Windows marks that disk's copies
+  out of date (stale marker 2) and rebuilds them elsewhere, and showed the
+  space Healthy / OK during the rebuild (**verified**: `repairint`).
+* With a disk of the pool missing, every space is Warning / Degraded, even
+  one with nothing on that disk; one with copies or columns on it whose
+  data is still complete is Warning / Degraded Incomplete (a two-way mirror
+  that lost a copy too: not No Redundancy); one that lost data is
+  Unhealthy / No Redundancy Degraded and stays attached. Out-of-date copies
+  alone make a space Warning / Degraded.
 
-Windows could not be asked about more states with disks absent: a pool of
-four disks with simple, mirror and parity spaces made Windows 11 24H2
-bugcheck (0x50 in spaceport.sys) when it arrived without one disk, whether
-Linux or Windows had created it (`windows-absent-disk-bugcheck.json`).
+**Verified** (`health-drop.json`, the test
+`windows_shows_the_predicted_health_for_lost_disks`): the pool of
+`tools/health-states.sh` (four disks; a one- and a four-column simple
+space, a one- and a two-column mirror, a parity space), created once on
+Linux and once by Windows (`c11ctl`), each disk detached in turn while the
+pool was in use and then two of the four: Windows showed the predicted
+state of the pool, of every disk and of every space, the same for both
+pools. Also consistent with the states on record: the first version of
+disk add cut by a crash (one of three disks lost: pool Warning / Degraded,
+spaces Degraded Incomplete), of retire (two of four lost: Read-only, spaces
+Detached; `mgmt-crash.json`), and `tornt2` (a two-column simple space that
+lost a disk: No Redundancy Degraded).
+
+Not in the metadata, so never predicted: a repair in service, a space set
+to manual attach and detached (`spstates`: Unknown / Detached), a pool or
+space made read-only by an administrator.
+
+A pool of four disks with simple, mirror and parity spaces made Windows 11
+24H2 bugcheck (0x50 in spaceport.sys) when it arrived without one disk,
+whether Linux or Windows had created it
+(`windows-absent-disk-bugcheck.json`); detached while in use, the same
+pools did not.
 
 ## Records
 

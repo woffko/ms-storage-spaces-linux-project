@@ -256,14 +256,17 @@ the disks given, and how many more disk failures every space survives:
 
 | Shown | Meaning |
 |---|---|
-| Healthy / OK | every copy current and at hand |
-| Warning / Incomplete | copies on missing disks; the space still survives a disk failure |
-| Warning / Degraded | out-of-date copies (a disk that missed writes); still survives a failure |
-| Unhealthy / No Redundancy | survives no further failure |
-| Unhealthy / Detached | data lost, or the pool lost its quorum |
+| Healthy / OK | every disk of the pool at hand, every copy current |
+| Warning / Degraded | a disk of the pool is missing (even with nothing of this space on it), or copies are out of date |
+| Warning / Degraded Incomplete | copies of this space are on missing disks; its data is still complete |
+| Unhealthy / No Redundancy Degraded | data of this space is lost; reads of it fail |
+| Unhealthy / Detached | the pool lost its quorum |
 | pool Warning / Degraded | disks missing, more than half of the database copies at hand |
 | pool Unhealthy / Read-only | half of the database copies or fewer at hand |
 | disk Warning / Lost Communication | the disk is missing |
+
+These are the states Windows showed for the same pools, created on Linux
+and by Windows, after disks were detached while in use.
 
 `spaces pool scrub DISKS...` reads every copy of every mirror space and
 every stripe of every single parity space and reports what disagrees
