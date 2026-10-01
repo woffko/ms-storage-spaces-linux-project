@@ -314,3 +314,53 @@ fn a_removed_disk_is_predicted_byte_for_byte() {
     // A disk that still holds data is refused.
     assert!(manage::remove_disk(&db, disk_id(&old, 1), 0).is_err());
 }
+
+/// Taking the pool partition out of a partition table writes where the
+/// table's own headers say; a crafted table must not direct those writes
+/// into the disk's data (found by the fuzz target `manage`: a backup header
+/// claimed near 2^64 overflowed, and any header or entry array placed in the
+/// middle of the disk would have been rewritten there). Windows' tables are
+/// rewritten; crafted ones are refused.
+#[test]
+fn crafted_partition_tables_are_not_rewritten() {
+    use storage_spaces::Guid;
+    use storage_spaces::gpt::{STORAGE_SPACES_PARTITION_TYPE, remove_partitions};
+    let table = PoolDiskTable {
+        disk_size: 8 << 30,
+        sector: 512,
+        disk_guid: Guid([1; 16]),
+        msr_guid: Guid([2; 16]),
+        pool_partition_guid: Guid([3; 16]),
+        pool_name: "crafted".into(),
+    };
+    let disk = || {
+        let mut d = SparseImage::new(8 << 30);
+        for (offset, bytes) in table.regions() {
+            d.insert(offset, &bytes);
+        }
+        d
+    };
+    let writes = remove_partitions(&disk(), STORAGE_SPACES_PARTITION_TYPE)
+        .unwrap()
+        .unwrap();
+    let last = (8u64 << 30) - 512;
+    assert!(
+        writes
+            .iter()
+            .all(|(at, b)| *at + b.len() as u64 <= 1 << 20 || *at >= last - (1 << 20))
+    );
+    // (field offset in the primary header at sector 1, value)
+    let middle = (4u64 << 30) / 512;
+    for (field, value) in [(32usize, u64::MAX), (32, middle), (24, middle), (72, middle), (72, 0)] {
+        let mut d = disk();
+        d.insert(512 + field as u64, &value.to_le_bytes());
+        assert!(
+            remove_partitions(&d, STORAGE_SPACES_PARTITION_TYPE).is_err(),
+            "field {field:#x} = {value:#x}"
+        );
+    }
+    // The backup header placed elsewhere than the last sector.
+    let mut d = disk();
+    d.insert(last + 24, &middle.to_le_bytes());
+    assert!(remove_partitions(&d, STORAGE_SPACES_PARTITION_TYPE).is_err());
+}

@@ -392,20 +392,39 @@ pub fn remove_partitions<D: ReadAt + ?Sized>(dev: &D, kind: &str) -> Result<Opti
     }) else {
         return Ok(None);
     };
+    let implausible = |what: &str| crate::error::format_err!("implausible GPT: {what}");
+    let le = |b: &[u8], at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
     let primary = read_vec(dev, sector, sector as usize)?;
-    let backup_lba = u64::from_le_bytes(primary[32..40].try_into().unwrap());
     let count = u32::from_le_bytes(primary[80..84].try_into().unwrap()) as usize;
     let entry_size = u32::from_le_bytes(primary[84..88].try_into().unwrap()) as usize;
     if !(128..=4096).contains(&entry_size) || count > 4096 {
-        return Err(crate::error::format_err!("implausible GPT"));
+        return Err(implausible("entries"));
+    }
+    // Every write goes where the headers say: they must sit at the disk's
+    // first and last sector, and the entries outside the partitions'
+    // area, or a crafted table would direct the writes into data.
+    let last = dev.size()? / sector - 1;
+    let backup_lba = le(&primary, 32);
+    if le(&primary, 24) != 1 || backup_lba != last {
+        return Err(implausible("headers not at the first and last sector"));
     }
     let backup = read_vec(dev, backup_lba * sector, sector as usize)?;
-    if &backup[..8] != b"EFI PART" {
+    if &backup[..8] != b"EFI PART" || le(&backup, 24) != last || le(&backup, 32) != 1 {
         return Err(crate::error::format_err!("the backup GPT header is missing"));
     }
+    let table_sectors = ((count * entry_size) as u64).div_ceil(sector);
+    let (first_usable, last_usable) = (le(&primary, 40), le(&primary, 48));
     let mut out = Vec::new();
     for mut header in [primary, backup] {
-        let lba = u64::from_le_bytes(header[72..80].try_into().unwrap());
+        let lba = le(&header, 72);
+        let inside = if le(&header, 24) == 1 {
+            lba >= 2 && lba.checked_add(table_sectors).is_some_and(|e| e <= first_usable)
+        } else {
+            lba > last_usable && lba.checked_add(table_sectors).is_some_and(|e| e <= last)
+        };
+        if !inside || first_usable > last_usable || last_usable >= last {
+            return Err(implausible("partition entries inside the partitions' area"));
+        }
         let mut entries = read_vec(dev, lba * sector, count * entry_size)?;
         for e in entries.chunks_exact_mut(entry_size) {
             if Guid::from_mixed_endian(e[..16].try_into().unwrap()) == kind {
