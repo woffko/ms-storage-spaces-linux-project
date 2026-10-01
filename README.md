@@ -41,7 +41,8 @@ against pools created by Windows.
 | Writing dual parity, tiers, degraded pools | refused |
 | Creating pools and simple, mirror and single parity spaces (fixed and thin); deleting, renaming, growing spaces | `spaces pool create`, `spaces space ...`; Windows takes the pools as healthy |
 | Adding, retiring, removing and replacing disks; repair, optimize, scrub; health in Windows' terms | `spaces disk ...`, `spaces pool ...` |
-| Creating storage tiers or dual parity spaces; ReFS | not yet |
+| Creating tiered spaces (SSD mirror over HDD simple or parity) | `spaces tier`, `spaces space create --tier` |
+| Creating dual parity spaces; writing tiered spaces; ReFS | not yet |
 
 ## Quick start
 
@@ -146,7 +147,7 @@ pools, degraded pools and pools after a crash, and
    afterwards (done: simple, mirror and single parity spaces, thin
    allocation and TRIM).
 3. **Pool management**: creating, extending and repairing pools and spaces
-   (done, except creating storage tiers and dual parity spaces).
+   (done, except creating dual parity spaces).
 
 ReFS support is planned as a separate track. Details in
 [docs/plan.md](docs/plan.md).

@@ -504,6 +504,11 @@ rows of thin spaces not allocated yet (M7).
   records are edited in their own layout).
 * M10.1-2 (space operations): create every kind of space Windows creates
   on a pool of that size, delete, rename, resize.
+* M10.3 (tiers): tier templates and tiered spaces (an SSD mirror over an HDD
+  simple or parity tier) predicted byte for byte (`c10tier`, `c10mapar`,
+  `c10tier4`) and planned by `spaces tier create` and `spaces space create
+  --tier`; Windows took both kinds created on Linux as healthy, repaired
+  and optimized them (`mgmt-tiers.json`).
 * M11.1-3 (maintenance): repair rebuilds copies on missing or out-of-date
   disks (mirror copies copied, single parity columns rebuilt by XOR);
   optimize spreads the extents over the disks; scrub compares mirror
@@ -558,10 +563,9 @@ rows of thin spaces not allocated yet (M7).
   it the same way, at the same address (evidence
   `windows-absent-disk-bugcheck.json`). VM experiments with disks absent
   stopped after the second crash, as the goal requires.
-* Still open (2026-09-30): M10.3 (creating tiers and mirror-accelerated
-  parity: needs experiments on the Windows VM);
-  the 24 h fuzz of all eleven targets (running since 2026-09-30 23:28 on
-  e5abb35); version 1.0.0 and the publication.
+* Still open (2026-10-01): the 24 h fuzz of the planner targets `create`
+  and `manage` on the final code (the nine parser targets ran from
+  2026-09-30 23:28 on e5abb35); version 1.0.0 and the publication.
 
 ## Test infrastructure (continuous, feeds every stage)
 

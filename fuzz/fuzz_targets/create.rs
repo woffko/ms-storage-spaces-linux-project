@@ -1,12 +1,16 @@
 //! Creating pools and spaces from fuzzed parameters: whatever the planners
 //! accept must, once applied to blank disks, open as a clean pool that the
 //! management checks accept, with every new space readable and writable
-//! at both ends (a thin space's end only while the pool has free slabs).
+//! at both ends (a thin space's end only while the pool has free slabs);
+//! sometimes a tiered space over disks of fuzzed media, which must read.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
 use storage_spaces::io::{Overlay, SparseImage};
-use storage_spaces::ops::{BlankDisk, SpaceSpec, check_pool, plan_create_pool, plan_create_space};
+use storage_spaces::ops::{
+    BlankDisk, SpaceSpec, check_pool, plan_create_pool, plan_create_space, plan_create_tier, plan_create_tiered_space,
+    plan_set_disk,
+};
 use storage_spaces::{Guid, Pool};
 
 fuzz_target!(|data: &[u8]| {
@@ -46,6 +50,43 @@ fuzz_target!(|data: &[u8]| {
     assert!(pool.warnings.is_empty(), "{:?}", pool.warnings);
     check_pool(&pool).unwrap();
     drop(pool);
+    // Sometimes a tiered space: media, two templates, the space.
+    if next() & 3 == 0 {
+        let apply = |plan: storage_spaces::plan::Plan| plan.apply::<_, &Overlay<SparseImage>>(&members, &[]).unwrap();
+        for d in 1..=n as u64 {
+            let pool = Pool::open(members.clone()).unwrap();
+            let plan = plan_set_disk(&pool, d, Some(1 + next() % 2), None).unwrap();
+            drop(pool);
+            apply(plan);
+        }
+        for (name, ssd) in [("fast", true), ("big", false)] {
+            let pool = Pool::open(members.clone()).unwrap();
+            let columns = (next() & 1 == 0).then(|| 1 + u64::from(next() % 8));
+            let resiliency = if ssd { 2 } else { 1 + 2 * (next() % 2) };
+            let plan = plan_create_tier(&pool, name, ssd, resiliency, columns, &mut guid).unwrap();
+            drop(pool);
+            apply(plan);
+        }
+        let tiers = [
+            ("fast".to_owned(), u64::from(next()) << 24 | 1),
+            ("big".to_owned(), u64::from(next()) << 26 | 1),
+        ];
+        let pool = Pool::open(members.clone()).unwrap();
+        if let Ok((plan, _)) = plan_create_tiered_space(&pool, "tiered", &tiers, &mut guid) {
+            drop(pool);
+            apply(plan);
+            let pool = Pool::open(members.clone()).unwrap();
+            assert!(pool.warnings.is_empty(), "{:?}", pool.warnings);
+            check_pool(&pool).unwrap();
+            let r = pool.open_space(pool.find_space("tiered").unwrap().id()).unwrap();
+            assert!(r.size() >= tiers[0].1 + tiers[1].1);
+            let mut back = [0u8; 4096];
+            for at in [0, r.size() - 4096] {
+                r.read_exact_at(&mut back, at).unwrap();
+            }
+        }
+        return;
+    }
     for i in 0..3 {
         let spec = SpaceSpec {
             name: format!("s{i}"),

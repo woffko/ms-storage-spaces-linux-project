@@ -13,9 +13,9 @@ use crate::records::{DiskBody, PoolBody, SpaceBody};
 /// Record kinds and the versions Windows 11 24H2 (pool version 28) writes.
 const POOL_RECORD: (u8, u8) = (1, 15);
 const DISK_RECORD: (u8, u8) = (2, 8);
-const SPACE_RECORD: (u8, u8) = (3, 16);
-const EXTENT_RECORD: (u8, u8) = (4, 6);
-const CHILD_RECORD: (u8, u8) = (6, 4);
+pub(crate) const SPACE_RECORD: (u8, u8) = (3, 16);
+pub(crate) const EXTENT_RECORD: (u8, u8) = (4, 6);
+pub(crate) const CHILD_RECORD: (u8, u8) = (6, 4);
 /// The record of a per-space database: the pool's disks.
 const DISK_LIST_RECORD: (u8, u8) = (7, 1);
 
@@ -291,10 +291,69 @@ pub struct NewSpace {
     /// The data extents (a thin space has its first row).
     pub extents: Vec<ExtentRecord>,
     /// Hidden spaces in the order Windows writes them: the dirty region
-    /// log or the parity journal, then the cache.
+    /// log, the parity journal, then the cache.
     pub hidden: Vec<NewHidden>,
+    /// The tiers of a tiered space, fastest first (the space then has no
+    /// extents of its own and takes the first tier's policy).
+    pub tiers: Vec<NewTier>,
     /// FILETIME of the space's database in the metadata space.
     pub created: u64,
+}
+
+/// A tier of a new space: a type 6 child of it, named
+/// `<space>-<template>`, covering `size` bytes of the space from `start`
+/// with its own policy and extents.
+#[derive(Debug, Clone)]
+pub struct NewTier {
+    pub id: u64,
+    pub guid: Guid,
+    pub name: String,
+    pub ssd: bool,
+    pub resiliency: u8,
+    pub redundancy: u64,
+    pub copies: u64,
+    pub columns: u64,
+    pub interleave_log2: u8,
+    pub allocation_unit: u64,
+    pub start: u64,
+    pub size: u64,
+    pub extents: Vec<ExtentRecord>,
+}
+
+impl NewTier {
+    fn body(&self, space: u64, sequence: u64) -> SpaceBody {
+        SpaceBody {
+            child: true,
+            layout: 0,
+            id: self.id,
+            sequence,
+            guid: self.guid,
+            name: self.name.clone(),
+            description: String::new(),
+            internal: 0,
+            role: 1,
+            size: 0,
+            number: 0,
+            provisioning: 2,
+            allocation_unit: self.allocation_unit,
+            tiering: if self.ssd { 2 } else { 1 },
+            resiliency: self.resiliency,
+            redundancy: self.redundancy,
+            copies: self.copies,
+            groups: 1,
+            columns: self.columns,
+            interleave_log2: self.interleave_log2,
+            write_cache: 0,
+            security_descriptor: Vec::new(),
+            linked: 0,
+            parent: space,
+            range: Some((1, self.start, self.size)),
+        }
+    }
+
+    fn data_columns(&self) -> u64 {
+        self.columns - self.redundancy * (self.resiliency == 3) as u64
+    }
 }
 
 /// Where the per-space databases lie in the metadata space: 4 MiB apart,
@@ -317,7 +376,7 @@ impl NewSpace {
             number: self.number,
             provisioning: self.provisioning,
             allocation_unit: self.allocation_unit,
-            tiering: 0,
+            tiering: if self.tiers.is_empty() { 0 } else { 2 },
             resiliency: self.resiliency,
             redundancy: self.redundancy,
             copies: self.copies,
@@ -389,7 +448,31 @@ impl NewSpace {
         for e in &self.extents {
             out.push((EXTENT_RECORD, e.encode(sequence)));
         }
+        // Tiers: every tier's extents, then the tiers' records.
+        for e in self.tiers.iter().flat_map(|t| &t.extents) {
+            out.push((EXTENT_RECORD, e.encode(sequence)));
+        }
+        for t in &self.tiers {
+            out.push((CHILD_RECORD, t.body(self.id, sequence).encode()?));
+        }
         Ok(out)
+    }
+
+    /// What the cache and the parity journal follow: the last (capacity)
+    /// tier of a tiered space, the space itself otherwise: (allocation
+    /// unit, data columns, data stripe in bytes).
+    fn capacity(&self) -> (u64, u64, u64) {
+        match self.tiers.last() {
+            Some(t) => (
+                t.allocation_unit,
+                t.data_columns(),
+                t.data_columns() << t.interleave_log2,
+            ),
+            None => {
+                let data = self.columns - self.redundancy * (self.resiliency == 3) as u64;
+                (self.allocation_unit, data, data << self.interleave_log2)
+            }
+        }
     }
 
     /// The databases the space family gets in the metadata space: (number,
@@ -420,7 +503,8 @@ impl NewSpace {
     /// empty header at both ends; the parity journal: its header; the
     /// cache: its header and slot 0.
     pub fn hidden_contents(&self) -> Vec<(usize, u64, Vec<u8>)> {
-        let stripe = ((self.columns - self.redundancy * (self.resiliency == 3) as u64) << self.interleave_log2) as u32;
+        let (unit, data_columns, stripe) = self.capacity();
+        let stripe = stripe as u32;
         let mut out = Vec::new();
         for (i, h) in self.hidden.iter().enumerate() {
             match h.kind {
@@ -434,7 +518,7 @@ impl NewSpace {
                     out.push((i, h.size - 0x2000, page));
                 }
                 Hidden::Journal => {
-                    let run = self.allocation_unit * (self.columns - self.redundancy);
+                    let run = unit * data_columns;
                     let header =
                         crate::journal::new_journal_header(self.guid, run, stripe, self.size.div_ceil(run) as u32);
                     out.push((i, 0, header));
@@ -522,9 +606,11 @@ impl NewSpace {
         // partition table must not show through): on every copy of column 0;
         // on a parity space the whole first stripe, parity included, so that
         // it stays consistent.
+        // (A tiered space starts in its first tier.)
         let first = self
             .extents
             .iter()
+            .chain(self.tiers.first().into_iter().flat_map(|t| &t.extents))
             .filter(|e| e.virtual_slab == 0 && (self.resiliency == 3 || e.column == 0));
         let clear = if self.resiliency == 3 {
             1u64 << self.interleave_log2
@@ -596,4 +682,59 @@ pub fn next_space_number(db: &Database) -> Result<u64> {
         .map(|s| s.number)
         .collect();
     Ok((0..).find(|n| !used.contains(n)).unwrap())
+}
+
+/// A storage tier template (`New-StorageTier`): a type 6 record without a
+/// parent, a range or extents, naming the media and the placement policy
+/// of the tiers made from it. Columns left to Windows (`None`) are stored
+/// as 0xffffffff, as are the groups of a parity template; the allocation
+/// unit is all ones.
+#[derive(Debug, Clone)]
+pub struct TierTemplate {
+    pub id: u64,
+    pub guid: Guid,
+    pub name: String,
+    /// SSD (`tiering` 2) or HDD (1).
+    pub ssd: bool,
+    /// 1 simple, 2 mirror, 3 parity.
+    pub resiliency: u8,
+    pub columns: Option<u64>,
+    pub interleave_log2: u8,
+}
+
+impl TierTemplate {
+    pub fn body(&self, sequence: u64) -> SpaceBody {
+        let (redundancy, copies, groups) = match self.resiliency {
+            2 => (1, 2, 1),
+            3 => (1, 1, 0xffff_ffff),
+            _ => (0, 1, 1),
+        };
+        SpaceBody {
+            child: true,
+            layout: 0,
+            id: self.id,
+            sequence,
+            guid: self.guid,
+            name: self.name.clone(),
+            description: String::new(),
+            internal: 0,
+            role: 1,
+            size: 0,
+            number: 0,
+            provisioning: 2,
+            allocation_unit: u64::MAX,
+            tiering: if self.ssd { 2 } else { 1 },
+            resiliency: self.resiliency,
+            redundancy,
+            copies,
+            groups,
+            columns: self.columns.unwrap_or(0xffff_ffff),
+            interleave_log2: self.interleave_log2,
+            write_cache: 0,
+            security_descriptor: Vec::new(),
+            linked: 0,
+            parent: 0,
+            range: None,
+        }
+    }
 }

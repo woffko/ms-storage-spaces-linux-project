@@ -279,6 +279,11 @@ enum Command {
         #[command(subcommand)]
         command: manage::SpaceCommand,
     },
+    /// Storage tier templates, for tiered spaces (space create --tier).
+    Tier {
+        #[command(subcommand)]
+        command: manage::TierCommand,
+    },
     /// Disk management: add, set, retire and remove disks.
     Disk {
         #[command(subcommand)]
@@ -465,6 +470,7 @@ fn main() -> Result<()> {
         Command::Pool { command } => manage::pool(command),
         Command::Space { command } => manage::space(command),
         Command::Disk { command } => manage::disk(command),
+        Command::Tier { command } => manage::tier(command),
         Command::CheckPattern {
             devices,
             space,

@@ -600,3 +600,37 @@ fn windows_takes_a_pool_with_a_replaced_disk() {
     assert_eq!(checks.len(), 2);
     assert!(checks.iter().all(|c| c[2] == true));
 }
+
+/// Tiered spaces created on Linux (tools/mgmt-tiers.sh: an SSD mirror over
+/// an HDD simple tier, and mirror-accelerated parity): Windows 11 attached
+/// both pools as healthy, repaired and optimized them, and listed the slabs
+/// the tiers, the cache and the logs take on each disk.
+#[test]
+fn windows_takes_tiered_spaces_created_on_linux() {
+    let e = evidence("mgmt-tiers.json");
+    let pools = e["pools"].as_object().unwrap();
+    assert_eq!(pools.len(), 2);
+    for (name, p) in pools {
+        for key in ["attached", "repaired", "optimized"] {
+            assert_eq!(p[key]["pool"], serde_json::json!(["Healthy", "OK"]), "{name} {key}");
+            assert_eq!(
+                p[key]["spaces"],
+                serde_json::json!([[name, "Healthy", "OK"]]),
+                "{name} {key}"
+            );
+        }
+        let jobs = p["jobs"].as_array().unwrap();
+        assert_eq!(jobs.len(), 2, "{name}");
+        assert!(jobs.iter().all(|j| j[1] == "Completed"), "{name}");
+    }
+    // SSD: the tier's copy (1 GiB), the cache (1 GiB), the dirty region log
+    // and (mirror-accelerated parity) the journal; HDD: the tier's columns.
+    assert_eq!(
+        pools["ltier"]["per_disk_gib"],
+        serde_json::json!([1.0, 1.0, 2.25, 2.25])
+    );
+    assert_eq!(
+        pools["lmapar"]["per_disk_gib"],
+        serde_json::json!([1.0, 1.0, 1.0, 2.5, 2.5])
+    );
+}

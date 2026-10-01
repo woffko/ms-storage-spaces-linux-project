@@ -501,6 +501,7 @@ pub fn plan_create_space<D: ReadAt>(pool: &Pool<D>, spec: &SpaceSpec, guids: Gui
         write_cache: cache.map_or(0, |c| c.0),
         extents,
         hidden,
+        tiers: Vec::new(),
         created: now,
     };
     let writes = new.plan(pool, &db, now, metadata_disks(pool).as_deref())?;
@@ -1570,4 +1571,359 @@ pub fn scrub<D: ReadAt>(pool: &Pool<D>) -> Result<Scrub> {
         out.plan.step(format!("make space \"{}\" agree", space.name()), repairs);
     }
     Ok(out)
+}
+
+/// The tier templates of a pool (`New-StorageTier`): their records.
+pub fn tier_templates(db: &Database) -> Result<Vec<SpaceBody>> {
+    Ok(assemble_records(db.bytes(), 0x40)?
+        .iter()
+        .filter(|r| r.kind == 6)
+        .filter_map(|r| SpaceBody::decode(true, &r.body).ok())
+        .filter(|s| s.parent == 0 && s.role == 1 && s.range.is_none())
+        .collect())
+}
+
+/// `spaces tier create`: a tier template (`New-StorageTier`) for SSD or
+/// HDD disks, with a resiliency (1 simple, 2 mirror, 3 parity) and, if
+/// given, a column count; one database update.
+pub fn plan_create_tier<D: ReadAt>(
+    pool: &Pool<D>,
+    name: &str,
+    ssd: bool,
+    resiliency: u8,
+    columns: Option<u64>,
+    guids: Guids,
+) -> Result<Plan> {
+    let db = check_pool(pool)?;
+    if pool.version != crate::create::POOL_VERSION {
+        return Err(Error::Pool(format!(
+            "tiers are known for pools of version {} only",
+            crate::create::POOL_VERSION
+        )));
+    }
+    if name.is_empty() || tier_templates(&db)?.iter().any(|t| t.name == name) {
+        return Err(Error::Pool(format!(
+            "a tier named \"{name}\" exists or the name is empty"
+        )));
+    }
+    if !(1..=3).contains(&resiliency) || columns.is_some_and(|c| !(1..=8).contains(&c)) {
+        return Err(Error::Pool("a tier: simple, mirror or parity, 1 to 8 columns".into()));
+    }
+    let template = crate::create::TierTemplate {
+        id: next_ids(&db)?,
+        guid: guids(),
+        name: name.to_owned(),
+        ssd,
+        resiliency,
+        columns,
+        interleave_log2: 18,
+    };
+    let new = crate::manage::create_tier(&db, &template, filetime_now())?;
+    Ok(database_plan(
+        pool,
+        format!(
+            "create tier \"{name}\": {}, {}{}",
+            if ssd { "SSD" } else { "HDD" },
+            ["simple", "mirror", "parity"][resiliency as usize - 1],
+            columns.map_or(String::new(), |c| format!(", {c} columns"))
+        ),
+        &new,
+    ))
+}
+
+/// `spaces space create --tier NAME=SIZE ...`: a tiered space as
+/// `New-VirtualDisk -StorageTiers` makes it (fixed provisioning only). Each
+/// tier follows its template on the disks of its media type (Auto-Select
+/// SSD or HDD disks): two-way mirror, simple or single parity, columns from
+/// the template or as for spaces (mirror: disks / copies; simple: disks;
+/// parity: 3), allocation units of one slab on HDD and of a row of the HDD
+/// tier on SSD, the sizes rounded up to whole rows; the SSD tier comes
+/// first in the space, then the HDD tier. On the SSD disks: a dirty region log if a tier
+/// mirrors, a parity journal if one has parity, and a 1 GiB write-back
+/// cache whose chunks are a stripe of the last tier.
+pub fn plan_create_tiered_space<D: ReadAt>(
+    pool: &Pool<D>,
+    name: &str,
+    tiers: &[(String, u64)],
+    guids: Guids,
+) -> Result<(Plan, NewSpace)> {
+    use crate::create::NewTier;
+    let db = check_pool(pool)?;
+    if pool.version != crate::create::POOL_VERSION {
+        return Err(Error::Pool(format!(
+            "tiers are known for pools of version {} only",
+            crate::create::POOL_VERSION
+        )));
+    }
+    if pool.find_space(name).is_some() || name.is_empty() {
+        return Err(Error::Pool(format!(
+            "a space named \"{name}\" exists or the name is empty"
+        )));
+    }
+    if tiers.len() != 2 {
+        return Err(Error::Pool(
+            "a tiered space has two tiers: an SSD tier, then an HDD tier".into(),
+        ));
+    }
+    let templates = tier_templates(&db)?;
+    // The Auto-Select disks of each media type.
+    let mut media: BTreeMap<u64, u8> = BTreeMap::new();
+    for r in assemble_records(db.bytes(), 0x40)?.iter().filter(|r| r.kind == 2) {
+        let d = DiskBody::decode(&r.body)?;
+        if d.usage == 1 {
+            media.insert(d.id, d.media);
+        }
+    }
+    let disks_of = |ssd: bool| -> Vec<u64> {
+        media
+            .iter()
+            .filter(|(_, m)| **m == if ssd { 2 } else { 1 })
+            .map(|(d, _)| *d)
+            .collect()
+    };
+    let mut slabs = Slabs::of(&db)?;
+    let exhausted = || Error::Pool("the pool has no room for the space".into());
+    let mut next_id = next_ids(&db)?;
+    let mut id = || {
+        next_id += 1;
+        next_id - 1
+    };
+    let space_id = id();
+    let mut taken: Vec<u64> = Vec::new();
+    let mut number = || -> Result<u64> {
+        let mut n = next_space_number(&db)?;
+        while taken.contains(&n) {
+            n += 1;
+        }
+        taken.push(n);
+        Ok(n)
+    };
+    let space_number = number()?;
+    let interleave_log2 = 18u8;
+    // The tiers' policies, sizes and ids.
+    struct Wanted {
+        template: SpaceBody,
+        disks: Vec<u64>,
+        columns: u64,
+        copies: u64,
+        unit: u64,
+        size: u64,
+    }
+    let mut wanted = Vec::new();
+    for (template_name, size) in tiers {
+        let t = templates
+            .iter()
+            .find(|t| &t.name == template_name)
+            .ok_or_else(|| Error::Pool(format!("no tier named \"{template_name}\" (spaces tier create)")))?;
+        let ssd = t.tiering == 2;
+        let disks = disks_of(ssd);
+        let n = disks.len() as u64;
+        let copies = if t.resiliency == 2 { 2 } else { 1 };
+        let columns = if t.columns != 0xffff_ffff {
+            t.columns
+        } else {
+            match t.resiliency {
+                2 => (n / 2).clamp(1, 8),
+                3 => 3,
+                _ => n.clamp(1, 8),
+            }
+        };
+        if columns * copies > n || (t.resiliency == 3 && columns < 3) {
+            return Err(Error::Pool(format!(
+                "tier \"{template_name}\": {columns} columns of {copies} copies need that many {} disks (there are {n})",
+                if ssd { "SSD" } else { "HDD" }
+            )));
+        }
+        if ssd != wanted.is_empty() {
+            return Err(Error::Pool(
+                "a tiered space has two tiers: an SSD tier, then an HDD tier".into(),
+            ));
+        }
+        if *size == 0 {
+            return Err(Error::Pool("a tier's size must not be 0".into()));
+        }
+        wanted.push(Wanted {
+            template: t.clone(),
+            disks,
+            columns,
+            copies,
+            unit: SLAB_SIZE,
+            size: *size,
+        });
+    }
+    // The HDD tier's units are slabs; the SSD tier's a row of the HDD tier
+    // (Windows: 512 MiB over two and over three-column parity, 1 GiB over
+    // four columns). Sizes go up to whole rows.
+    let data_columns = |w: &Wanted| w.columns - (w.template.resiliency == 3) as u64;
+    wanted[0].unit = SLAB_SIZE * data_columns(&wanted[1]);
+    for w in wanted.iter_mut() {
+        w.size = whole_rows(w.size, w.unit, data_columns(w))?;
+    }
+    let ssd_disks = disks_of(true);
+    if ssd_disks.len() < 2 {
+        return Err(Error::Pool(
+            "a tiered space keeps its cache and logs on two SSD disks at least".into(),
+        ));
+    }
+    let tier_ids: Vec<(u64, Guid)> = wanted.iter().map(|_| (id(), guids())).collect();
+    let now = filetime_now();
+    // Hidden spaces, numbered cache, journal, log and written log, journal,
+    // cache, all two-way mirrors on the SSD disks.
+    let mirrors = wanted.iter().any(|w| w.template.resiliency == 2);
+    let parity = wanted.iter().any(|w| w.template.resiliency == 3);
+    let cache_columns = (ssd_disks.len() as u64 / 2).clamp(1, 8);
+    let cache_ids = (id(), id(), number()?);
+    let journal_ids = parity
+        .then(|| (id(), id(), number()))
+        .map(|(a, b, n)| n.map(|n| (a, b, n)))
+        .transpose()?;
+    let log_ids = mirrors
+        .then(|| (id(), id(), number()))
+        .map(|(a, b, n)| n.map(|n| (a, b, n)))
+        .transpose()?;
+    let others = |only: &[u64]| -> Vec<u64> { media.keys().filter(|d| !only.contains(d)).copied().collect() };
+    let mut place_hidden = |kind: Hidden,
+                            (container_id, child_id, number): (u64, u64, u64),
+                            size: u64,
+                            columns: u64|
+     -> Result<NewHidden> {
+        let mut placed = Vec::new();
+        for row in 0..size / (SLAB_SIZE * columns) {
+            let mut used = others(&ssd_disks);
+            for column in 0..columns {
+                for copy in 0..2 {
+                    let (disk, slab) = slabs.allocate(1, &used).ok_or_else(exhausted)?;
+                    used.push(disk);
+                    placed.push((row, column, copy, disk, slab));
+                }
+            }
+        }
+        Ok(NewHidden {
+            kind,
+            container_id,
+            container_guid: guids(),
+            number,
+            child_id,
+            child_guid: guids(),
+            size,
+            redundancy: 1,
+            copies: 2,
+            columns,
+            interleave_log2,
+            slabs: placed,
+            created: now,
+        })
+    };
+    let mut hidden = Vec::new();
+    if let Some(ids) = log_ids {
+        hidden.push(place_hidden(Hidden::DirtyRegions, ids, SLAB_SIZE, 1)?);
+    }
+    if let Some(ids) = journal_ids {
+        hidden.push(place_hidden(Hidden::Journal, ids, SLAB_SIZE, 1)?);
+    }
+    let cache_size = whole_rows(1 << 30, SLAB_SIZE, cache_columns)?;
+    hidden.push(place_hidden(Hidden::Cache, cache_ids, cache_size, cache_columns)?);
+    // The tiers, one after the other in the space.
+    let mut start = 0;
+    let mut new_tiers = Vec::new();
+    for (w, (tier_id, tier_guid)) in wanted.iter().zip(tier_ids) {
+        let per_extent = w.unit / SLAB_SIZE;
+        let data_columns = w.columns - (w.template.resiliency == 3) as u64;
+        let mut extents = Vec::new();
+        for row in 0..w.size / (w.unit * data_columns) {
+            let mut used = others(&w.disks);
+            for column in 0..w.columns {
+                for copy in 0..w.copies {
+                    let (disk, slab) = slabs.allocate(per_extent, &used).ok_or_else(exhausted)?;
+                    used.push(disk);
+                    extents.push(ExtentRecord {
+                        flags: 4,
+                        stale_marker: 0xffff_ffff,
+                        space_id: tier_id,
+                        virtual_slab: start / SLAB_SIZE + row * per_extent * data_columns,
+                        column,
+                        copy,
+                        slab_count: per_extent,
+                        disk_id: disk,
+                        physical_slab: slab,
+                    });
+                }
+            }
+        }
+        new_tiers.push(NewTier {
+            id: tier_id,
+            guid: tier_guid,
+            name: format!("{name}-{}", w.template.name),
+            ssd: w.template.tiering == 2,
+            resiliency: w.template.resiliency,
+            redundancy: w.copies - 1 + (w.template.resiliency == 3) as u64,
+            copies: w.copies,
+            columns: w.columns,
+            interleave_log2,
+            allocation_unit: w.unit,
+            start,
+            size: w.size,
+            extents,
+        });
+        start += w.size;
+    }
+    let first = &new_tiers[0];
+    let new = NewSpace {
+        id: space_id,
+        guid: guids(),
+        name: name.to_owned(),
+        number: space_number,
+        size: start,
+        provisioning: 2,
+        allocation_unit: first.allocation_unit,
+        resiliency: first.resiliency,
+        redundancy: first.redundancy,
+        copies: first.copies,
+        columns: first.columns,
+        interleave_log2,
+        write_cache: cache_size,
+        extents: Vec::new(),
+        hidden,
+        tiers: new_tiers,
+        created: now,
+    };
+    let writes = new.plan(pool, &db, now, metadata_disks(pool).as_deref())?;
+    let (database, setup): (Vec<_>, Vec<_>) = writes.into_iter().partition(|(device, offset, _)| {
+        pool.members
+            .iter()
+            .any(|m| m.device == *device && *offset == m.partition.offset + POOL_DB_OFFSET)
+    });
+    let mut plan = Plan {
+        summary: vec![format!(
+            "create space \"{name}\" ({}): tiers {}, {} bytes",
+            new.guid,
+            new.tiers
+                .iter()
+                .map(|t| format!(
+                    "{} ({}, {}, {} columns, {} bytes)",
+                    t.name,
+                    if t.ssd { "SSD" } else { "HDD" },
+                    ["simple", "mirror", "parity"][t.resiliency as usize - 1],
+                    t.columns,
+                    t.size
+                ))
+                .collect::<Vec<_>>()
+                .join(", "),
+            new.size
+        )],
+        steps: Vec::new(),
+    };
+    plan.step(
+        "databases in the metadata space, hidden spaces, the first sector",
+        setup
+            .into_iter()
+            .map(|(device, offset, bytes)| Action::Write {
+                target: Target::Member(device),
+                offset,
+                bytes,
+            })
+            .collect(),
+    );
+    database_steps(&mut plan, database);
+    Ok((plan, new))
 }

@@ -121,6 +121,9 @@ c11ctl | - | blank:4; newpool; newspacex:hsimple:res=Simple,cols=1,size=1024; ne
 # parity (SSD mirror, HDD parity of three columns).
 c10tier | - | blank:4; newpool; media:0:SSD; media:1:SSD; media:2:HDD; media:3:HDD; snap:t0; newtier:c10ssd:SSD:Mirror; newtier:c10hdd:HDD:Simple:2; snap:t1; newspacetiered:c10t:c10ssd=1024,c10hdd=2048; snap:t2; dismount
 c10mapar | - | blank:5; newpool; media:0:SSD; media:1:SSD; media:2:HDD; media:3:HDD; media:4:HDD; snap:m0; newtier:c10mssd:SSD:Mirror; newtier:c10mhdd:HDD:Parity:3; snap:m1; newspacetiered:c10m:c10mssd=1024,c10mhdd=2048; snap:m2; dismount
+# Which stripe the cache chunk of a tiered space follows: an HDD simple tier
+# of four columns (1 MiB stripe) under an SSD mirror.
+c10tier4 | - | blank:6; newpool; media:0:SSD; media:1:SSD; media:2:HDD; media:3:HDD; media:4:HDD; media:5:HDD; newtier:c10ssd4:SSD:Mirror; newtier:c10hdd4:HDD:Simple:4; snap:u1; newspacetiered:c10t4:c10ssd4=1024,c10hdd4=4096; snap:u2; dismount
 LIST
 exit $status
 }

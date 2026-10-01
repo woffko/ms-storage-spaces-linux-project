@@ -38,6 +38,18 @@ pub fn rename_pool(db: &Database, name: &str, timestamp: u64) -> Result<Database
     replace(db, &old, &pool.encode()?, timestamp)
 }
 
+/// `New-StorageTier`: one update adding the template's record.
+pub fn create_tier(db: &Database, tier: &crate::create::TierTemplate, timestamp: u64) -> Result<Database> {
+    let sequence = db.sequence() + 1;
+    let body = tier.body(sequence).encode()?;
+    let (mut new, _) = db.updated(
+        &[(crate::create::CHILD_RECORD.0, crate::create::CHILD_RECORD.1, &body)],
+        &[],
+    )?;
+    new.commit(sequence, timestamp);
+    Ok(new)
+}
+
 /// `Set-PhysicalDisk -MediaType` (0 unspecified, 1 HDD, 2 SSD) and
 /// `-Usage` (as stored: 1 Auto-Select, 2 Manual-Select, 3 Hot Spare,
 /// 4 Journal, 5 Retired): the disk record rewritten.

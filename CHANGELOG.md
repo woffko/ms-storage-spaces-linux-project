@@ -33,8 +33,12 @@ created and changed on Linux as healthy, repairs and optimizes them.
 * Checked byte for byte against what Windows writes for every operation it
   exposes, by Windows round trips of pools created and changed on Linux,
   and by fio and NTFS write checks on spaces created on Linux.
-* Not supported: creating storage tiers, mirror-accelerated parity and
-  dual parity spaces; new spaces in pools of version 29 (Insider builds).
+* `spaces tier create` (tier templates, `New-StorageTier`) and `spaces space
+  create --tier`: tiered spaces of an SSD mirror over an HDD simple or
+  parity tier (mirror-accelerated parity), with their cache, dirty region
+  log and parity journal on the SSD disks.
+* Not supported: creating dual parity spaces; writing tiered spaces; new
+  spaces in pools of version 29 (Insider builds).
 
 ### Known issue in Windows
 

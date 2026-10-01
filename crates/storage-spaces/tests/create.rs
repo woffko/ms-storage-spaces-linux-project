@@ -166,7 +166,7 @@ fn new_space_of(
     after: &storage_spaces::Pool<&SparseImage>,
     after_disks: &[SparseImage],
 ) -> (storage_spaces::create::NewSpace, u64, Vec<u64>) {
-    use storage_spaces::create::{Hidden, NewHidden, NewSpace, SPACE_DATABASE_STRIDE};
+    use storage_spaces::create::{Hidden, NewHidden, NewSpace, NewTier, SPACE_DATABASE_STRIDE};
     let m = after
         .members
         .iter()
@@ -251,6 +251,28 @@ fn new_space_of(
         write_cache: user.write_cache,
         extents: extents_of(user.id),
         hidden,
+        tiers: bodies
+            .iter()
+            .filter(|b| b.child && b.parent == user.id && b.role == 1)
+            .map(|t| {
+                let (_, start, size) = t.range.unwrap();
+                NewTier {
+                    id: t.id,
+                    guid: t.guid,
+                    name: t.name.clone(),
+                    ssd: t.tiering == 2,
+                    resiliency: t.resiliency,
+                    redundancy: t.redundancy,
+                    copies: t.copies,
+                    columns: t.columns,
+                    interleave_log2: t.interleave_log2,
+                    allocation_unit: t.allocation_unit,
+                    start,
+                    size,
+                    extents: extents_of(t.id),
+                }
+            })
+            .collect(),
         created: created(user.number),
     };
     // The copies of the metadata space Windows wrote the new databases to.
@@ -274,9 +296,10 @@ fn new_space_of(
 /// dirty region log), a parity space (with its journal and 1 GiB cache), a
 /// thin simple and a thin mirror space (with their first row); a mirror of 4
 /// columns on 8 disks, simple spaces with 4 KiB logical sectors and on 4Kn
-/// disks: the records, the databases in the metadata space and the hidden
-/// spaces' first pages are predicted byte for byte, and nothing else is
-/// written.
+/// disks; tiered spaces (an SSD mirror over an HDD simple tier of two and of
+/// four columns, mirror-accelerated parity): the records, the databases in
+/// the metadata space and the hidden spaces' first pages are predicted byte
+/// for byte, and nothing else is written.
 #[test]
 fn new_spaces_are_predicted_byte_for_byte() {
     for (name, before, after) in [
@@ -295,6 +318,9 @@ fn new_spaces_are_predicted_byte_for_byte() {
         ("c9opts2", "r5", "r6"),
         ("c9l4k", "p0", "p1"),
         ("c94kn", "p0", "p1"),
+        ("c10tier", "t1", "t2"),
+        ("c10mapar", "m1", "m2"),
+        ("c10tier4", "u1", "u2"),
     ] {
         let (_, old) = state(name, before);
         let (dir, new) = state(name, after);

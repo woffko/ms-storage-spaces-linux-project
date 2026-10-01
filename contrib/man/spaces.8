@@ -66,6 +66,11 @@ spaces \- read, write and manage Microsoft Storage Spaces pools on Linux
 .RB [ \-\-yes ]
 .I device ...
 .br
+.B spaces tier create
+.RI [ options ]
+.RB [ \-\-yes ]
+.I device ...
+.br
 .B spaces disk
 .BR add | set | retire | remove
 .RI [ options ]
@@ -99,9 +104,10 @@ degraded pools, or rows of thin spaces with other allocation units than
 256 MiB that are not allocated yet). Management: creating pools (version
 28) and simple, mirror and single parity spaces, fixed and thin; deleting,
 renaming and growing spaces; adding, retiring, removing and replacing
-disks; repair, optimize, scrub and a health report in Windows' terms. Not
-supported: creating storage tiers or dual parity spaces, new spaces in
-pools of version 29, pools created by other Windows releases.
+disks; tier templates and tiered spaces (an SSD mirror over an HDD simple
+or parity tier); repair, optimize, scrub and a health report in Windows'
+terms. Not supported: creating dual parity spaces, writing tiered spaces,
+new spaces in pools of version 29, pools created by other Windows releases.
 .SH COMMANDS
 .TP
 .B scan
@@ -214,6 +220,14 @@ With
 .BI \-\-write\-cache " size"
 (parity); Windows' defaults otherwise. Sizes such as 10G are rounded up to
 whole rows.
+.TP
+.B space create \-\-name \fIname\fR \-\-tier \fItemplate\fB=\fIsize\fR \-\-tier \fItemplate\fB=\fIsize
+A tiered space: an SSD tier, then an HDD tier, each from a template, with
+its cache and logs on the SSD disks.
+.TP
+.B tier create \-\-name \fIname\fR \-\-media ssd|hdd \-\-resiliency simple|mirror|parity [\-\-columns \fIn\fR]
+A tier template (New-StorageTier); the disks' media come from
+.BR "disk set \-\-media" .
 .TP
 .B space delete\fR|\fBrename\fR|\fBresize \-\-space \fIname\fR
 Delete a space and its data, rename it

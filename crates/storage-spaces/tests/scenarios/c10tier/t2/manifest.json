@@ -1,0 +1,41 @@
+﻿{
+    "name":  "c10tier",
+    "windows_build":  "10.0.26100.0",
+    "pattern":  false,
+    "pool":  {
+                 "name":  "ss-c10tier",
+                 "guid":  "2c66bc03-7a3a-4332-a423-293d3afb4a5f",
+                 "version":  "Windows Server vNext",
+                 "version_number":  28,
+                 "size":  32140951552,
+                 "allocated":  1073741824,
+                 "logical_sector":  512,
+                 "physical_sector":  4096
+             },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "600224806CC87B5F875C72A63382FD71",
+                      "size":  8589934592,
+                      "spaces_guid":  "16492f3b-e383-3d60-bad9-6a093eba1e59"
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "60022480F94D4A425604C4D486285696",
+                      "size":  8589934592,
+                      "spaces_guid":  "0775ce83-5499-ce8d-118c-408c92936f98"
+                  },
+                  {
+                      "image":  "disk2.vhdx",
+                      "unique_id":  "60022480EC6200295CFA39ED245A9B14",
+                      "size":  8589934592,
+                      "spaces_guid":  "81b74e3d-6723-3ecc-1896-172deb199145"
+                  },
+                  {
+                      "image":  "disk3.vhdx",
+                      "unique_id":  "60022480E7A2B4515A453AC3E0E19999",
+                      "size":  8589934592,
+                      "spaces_guid":  "00272595-242b-7b35-99e6-30e9ac0d7c90"
+                  }
+              ]
+}

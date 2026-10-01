@@ -1,0 +1,121 @@
+{
+ "note": "tools/mgmt-tiers.sh: tiered spaces created on Linux (spaces disk set --media, spaces tier create, spaces space create --tier) on pools of sparse images, the first two SSD: an SSD mirror over an HDD two-column simple tier (ltier, four disks) and over an HDD three-column parity tier (lmapar, five disks); taken by Windows 11 (tools/put-roundtrip.sh -Optimize). per_disk_gib: what Get-PhysicalExtent lists on each disk after Optimize (tiers, cache, logs)",
+ "pools": {
+  "ltier": {
+   "attached": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "ltier",
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "repaired": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "ltier",
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "optimized": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "ltier",
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "jobs": [
+    [
+     "ltier-Repair",
+     "Completed"
+    ],
+    [
+     "ss-ltier-Optimize",
+     "Completed"
+    ]
+   ],
+   "per_disk_gib": [
+    1.0,
+    1.0,
+    2.25,
+    2.25
+   ]
+  },
+  "lmapar": {
+   "attached": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "lmapar",
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "repaired": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "lmapar",
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "optimized": {
+    "pool": [
+     "Healthy",
+     "OK"
+    ],
+    "spaces": [
+     [
+      "lmapar",
+      "Healthy",
+      "OK"
+     ]
+    ]
+   },
+   "jobs": [
+    [
+     "lmapar-Repair",
+     "Completed"
+    ],
+    [
+     "ss-lmapar-Optimize",
+     "Completed"
+    ]
+   ],
+   "per_disk_gib": [
+    1.0,
+    1.0,
+    1.0,
+    2.5,
+    2.5
+   ]
+  }
+ },
+ "windows_build": "10.0.26100.0"
+}

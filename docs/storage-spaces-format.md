@@ -238,6 +238,42 @@ page, and nothing else is written):
   Windows reads any unique ids (they are inputs of the model).
 
 
+### Storage tiers
+
+What `New-StorageTier` and `New-VirtualDisk -StorageTiers` write
+(**verified** byte for byte by the tests
+`tier_templates_are_predicted_byte_for_byte` and
+`new_spaces_are_predicted_byte_for_byte`, scenarios `c10tier`: two SSD and
+two HDD disks, an SSD mirror over an HDD two-column simple tier;
+`c10mapar`: three HDD disks and a three-column parity tier; `c10tier4`:
+four HDD disks and a four-column simple tier):
+
+* Each template is one database update with one type 6 record: parent 0,
+  role 1, no range (four zero bytes), allocation unit all ones, `tiering` 2
+  for SSD and 1 for HDD, the resiliency (a mirror: redundancy 1, 2 copies;
+  parity: redundancy 1, groups 0xffffffff), columns 0xffffffff unless
+  given, interleave 256 KiB.
+* The tiered space is one update like any space's, its user record taking
+  the SSD tier's policy and allocation unit, `tiering` 2, the sum of the
+  tiers' sizes and a write-back cache of 1 GiB. Its hidden spaces, all
+  two-way mirrors of one column on the SSD disks with `tiering` 2: a dirty
+  region log (a tier mirrors), a parity journal (a tier has parity) and
+  the cache, in that order in the update, numbered cache, journal, log.
+  Then the extents of every tier (flag 4; virtual slabs of the space, the
+  HDD tier's from the end of the SSD tier) and the tiers' records: type 6,
+  role 1, parent the space, named `<space>-<template>`, range (1, start,
+  size), the template's policy with the columns chosen (SSD mirror: one
+  per two SSD disks), allocation unit one slab on HDD and a row of the HDD
+  tier on SSD (512 MiB over two data columns, 1 GiB over four).
+* The cache's chunks are a data stripe of the HDD tier (512 KiB over two
+  data columns, 1 MiB over four); the parity journal's runs are an HDD row
+  (allocation unit times data columns), counted over the whole space
+  (3 GiB: 6 runs of 512 MiB).
+* `spaces` creates two-tier spaces of this shape (`spaces tier create`,
+  `spaces space create --tier`); Windows took both kinds as healthy,
+  repaired and optimized them (`mgmt-tiers.json`). They are read like
+  Windows' own; writing tiered spaces is not supported.
+
 ## Changing a pool
 
 Each of these is one pool database update and writes nothing else
@@ -502,7 +538,8 @@ length of the child within the parent's address space (`u64` BE each: SSD
 0/1 GiB, HDD 1 GiB/2 GiB; a cache child covers its own size from 0). Extent
 virtual slab numbers are those of the parent space; rows and parity rotation
 of a tier count from the tier's start. Tier templates created with
-`New-StorageTier` are separate type 6 records without extents.
+`New-StorageTier` are separate type 6 records without extents (see
+"Storage tiers" under creating a space).
 
 ### Type 4: extent
 ```

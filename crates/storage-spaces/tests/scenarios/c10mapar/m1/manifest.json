@@ -1,0 +1,47 @@
+﻿{
+    "name":  "c10mapar",
+    "windows_build":  "10.0.26100.0",
+    "pattern":  false,
+    "pool":  {
+                 "name":  "ss-c10mapar",
+                 "guid":  "6ebbd045-4df0-4671-b8f5-c39fd024369b",
+                 "version":  "Windows Server vNext",
+                 "version_number":  28,
+                 "size":  40176189440,
+                 "allocated":  1342177280,
+                 "logical_sector":  512,
+                 "physical_sector":  4096
+             },
+    "disks":  [
+                  {
+                      "image":  "disk0.vhdx",
+                      "unique_id":  "60022480363EDE38EAD3B73C326F2D13",
+                      "size":  8589934592,
+                      "spaces_guid":  "2e45f706-dafa-451c-ed91-a93867358a1d"
+                  },
+                  {
+                      "image":  "disk1.vhdx",
+                      "unique_id":  "60022480718B87C2D01FF948EAC82023",
+                      "size":  8589934592,
+                      "spaces_guid":  "b0d9a18c-2be1-ce5b-78cd-bbb8f413b6e9"
+                  },
+                  {
+                      "image":  "disk2.vhdx",
+                      "unique_id":  "60022480AFB7A2A93537D52D71E06CC4",
+                      "size":  8589934592,
+                      "spaces_guid":  "f68b4e00-a0c7-7be2-bb1d-cfefa49f6373"
+                  },
+                  {
+                      "image":  "disk3.vhdx",
+                      "unique_id":  "600224809FB4F3AA069E37BABF167AF4",
+                      "size":  8589934592,
+                      "spaces_guid":  "3f75b333-5c31-6e64-bab0-8e6070b05c47"
+                  },
+                  {
+                      "image":  "disk4.vhdx",
+                      "unique_id":  "60022480E331B2C020C4C187CC1A91D9",
+                      "size":  8589934592,
+                      "spaces_guid":  "0ac13e09-a715-f0e4-d139-272ae29d641f"
+                  }
+              ]
+}

@@ -103,6 +103,59 @@ pub enum PoolCommand {
 }
 
 #[derive(Subcommand)]
+pub enum TierCommand {
+    /// Create a tier template (New-StorageTier) for `space create --tier`.
+    Create {
+        /// The template's name.
+        #[arg(long)]
+        name: String,
+        /// ssd or hdd: the disks its tiers go on (spaces disk set --media).
+        #[arg(long)]
+        media: String,
+        /// simple, mirror (two-way) or parity (single parity).
+        #[arg(long)]
+        resiliency: String,
+        /// Columns (default: chosen when a space is created).
+        #[arg(long)]
+        columns: Option<u64>,
+        /// Write; without it the plan is only printed.
+        #[arg(long)]
+        yes: bool,
+        /// The pool's disks (block devices or image files).
+        #[arg(required = true)]
+        devices: Vec<PathBuf>,
+    },
+}
+
+pub fn tier(command: TierCommand) -> Result<()> {
+    match command {
+        TierCommand::Create {
+            name,
+            media,
+            resiliency,
+            columns,
+            yes,
+            devices,
+        } => {
+            let ssd = match media.as_str() {
+                "ssd" => true,
+                "hdd" => false,
+                other => bail!("media {other}: ssd or hdd"),
+            };
+            let resiliency = match resiliency.as_str() {
+                "simple" => 1,
+                "mirror" => 2,
+                "parity" => 3,
+                other => bail!("resiliency {other}: simple, mirror or parity"),
+            };
+            on_pool(&devices, yes, |p| {
+                ops::plan_create_tier(p, &name, ssd, resiliency, columns, &mut random_guids())
+            })
+        }
+    }
+}
+
+#[derive(Subcommand)]
 pub enum DiskCommand {
     /// Add a blank disk (`--new`) to the pool of the other devices.
     Add {
@@ -173,11 +226,20 @@ pub enum SpaceCommand {
         #[arg(long)]
         name: String,
         /// simple, mirror or parity (single parity).
-        #[arg(long)]
-        resiliency: String,
+        #[arg(long, required_unless_present = "tier")]
+        resiliency: Option<String>,
         /// Size, e.g. 10G (rounded up to whole rows).
-        #[arg(long, value_parser = parse_size)]
-        size: u64,
+        #[arg(long, value_parser = parse_size, required_unless_present = "tier")]
+        size: Option<u64>,
+        /// A tiered space instead: an SSD tier, then an HDD tier, each from
+        /// a template (`spaces tier create`) with its size, e.g.
+        /// `--tier fast=100G --tier big=2T`.
+        #[arg(
+            long,
+            value_name = "TEMPLATE=SIZE",
+            conflicts_with_all = ["resiliency", "size", "thin", "copies", "columns", "interleave", "write_cache"]
+        )]
+        tier: Vec<String>,
         /// Thin provisioning (rows allocated as they are written).
         #[arg(long)]
         thin: bool,
@@ -610,6 +672,7 @@ pub fn space(command: SpaceCommand) -> Result<()> {
             name,
             resiliency,
             size,
+            tier,
             thin,
             copies,
             columns,
@@ -618,24 +681,37 @@ pub fn space(command: SpaceCommand) -> Result<()> {
             yes,
             devices,
         } => {
-            let resiliency = match resiliency.as_str() {
-                "simple" => 1,
-                "mirror" => 2,
-                "parity" => 3,
-                other => bail!("resiliency {other}: simple, mirror or parity"),
-            };
             let pool = Pool::open(open_rw(&devices)?)?;
-            let spec = SpaceSpec {
-                name,
-                resiliency,
-                size,
-                thin,
-                copies,
-                columns,
-                interleave,
-                write_cache,
+            let (plan, new) = if tier.is_empty() {
+                let resiliency = match resiliency.as_deref() {
+                    Some("simple") => 1,
+                    Some("mirror") => 2,
+                    Some("parity") => 3,
+                    other => bail!("resiliency {other:?}: simple, mirror or parity"),
+                };
+                let spec = SpaceSpec {
+                    name,
+                    resiliency,
+                    size: size.unwrap_or(0),
+                    thin,
+                    copies,
+                    columns,
+                    interleave,
+                    write_cache,
+                };
+                ops::plan_create_space(&pool, &spec, &mut random_guids())?
+            } else {
+                let tiers = tier
+                    .iter()
+                    .map(|t| {
+                        let (template, size) = t
+                            .split_once('=')
+                            .ok_or_else(|| anyhow::anyhow!("--tier {t}: TEMPLATE=SIZE"))?;
+                        Ok((template.to_owned(), parse_size(size).map_err(anyhow::Error::msg)?))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                ops::plan_create_tiered_space(&pool, &name, &tiers, &mut random_guids())?
             };
-            let (plan, new) = ops::plan_create_space(&pool, &spec, &mut random_guids())?;
             // (Exclusive opens: the pool's handles go first.)
             drop(pool);
             let members = open_rw(&devices)?;

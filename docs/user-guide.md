@@ -30,7 +30,8 @@ disks are never written, unless a space is attached read-write
 | Writing: dual parity, tiers, degraded pools | not supported (refused) |
 | Creating pools (version 28) and simple, mirror and single parity spaces, fixed and thin; deleting, renaming, growing spaces | `spaces pool`, `spaces space` |
 | Adding, retiring, removing and replacing disks; repair, optimize, scrub, health | `spaces disk`, `spaces pool` |
-| Creating storage tiers, dual parity spaces; new spaces in version 29 pools | not supported |
+| Creating tiered spaces: an SSD mirror over an HDD simple or parity tier (mirror-accelerated parity) | `spaces tier`, `spaces space create --tier` |
+| Creating dual parity spaces; new spaces in version 29 pools | not supported |
 
 ## Installing
 
@@ -211,6 +212,27 @@ sudo spaces pool rename --name Data2 --yes DISKS...
 sudo spaces pool remove --yes DISKS...                               # a pool without spaces
 ```
 
+### Tiered spaces
+
+A tiered space puts its first part on SSD disks (a two-way mirror) and the
+rest on HDD disks (simple or single parity: mirror-accelerated parity), as
+`New-StorageTier` and `New-VirtualDisk -StorageTiers` make it. Mark the
+disks' media first, then create a template per tier and the space over
+them:
+
+```sh
+sudo spaces disk set --disk 1 --media ssd --yes DISKS...      # each SSD disk
+sudo spaces disk set --disk 3 --media hdd --yes DISKS...      # each HDD disk
+sudo spaces tier create --name fast --media ssd --resiliency mirror --yes DISKS...
+sudo spaces tier create --name big --media hdd --resiliency parity --columns 3 --yes DISKS...
+sudo spaces space create --name Files --tier fast=100G --tier big=2T --yes DISKS...
+```
+
+The space gets, on the SSD disks, a write-back cache of 1 GiB and the dirty
+region log and parity journal its tiers need. It needs at least two SSD
+disks; tier sizes are rounded up to whole rows. Linux reads tiered spaces
+but does not write them: format and fill them on Windows.
+
 ### Disks
 
 `spaces info DISKS...` lists the disks of a pool with their ids.
@@ -278,9 +300,9 @@ keeping the first mirror copy and recomputing parity from the data.
 
 ### Limits
 
-* Storage tiers, mirror-accelerated parity and dual parity spaces are not
-  created (existing ones are read, and their pools can be changed
-  otherwise).
+* Dual parity spaces are not created, nor tiered spaces of other shapes
+  than an SSD mirror over an HDD tier; existing ones are read, and their
+  pools can be changed otherwise.
 * Pools of version 29 (Insider builds) get no new spaces; their records
   differ there. Other changes keep each record's own layout.
 * Windows 11 24H2 crashed (a bugcheck in its Storage Spaces driver) when a
