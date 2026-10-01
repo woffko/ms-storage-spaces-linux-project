@@ -1056,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "spaces-cli"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1068,7 +1068,7 @@ dependencies = [
 
 [[package]]
 name = "storage-spaces"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "serde_json",
  "thiserror 2.0.21",
