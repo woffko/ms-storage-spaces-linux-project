@@ -25,11 +25,13 @@ import json, sys
 r = json.load(open(sys.argv[1], encoding="utf-8-sig"))
 if r.get("error"):
     print("error:", r["error"])
-for k in ("attached", "connected", "waited", "repaired"):
+for k in ("attached", "connected", "dropped", "waited", "repaired"):
     s = r.get(k)
     if s:
-        print(k, s["pool"]["health"], [(x["name"], x["health"], x["operational"]) for x in s["spaces"]],
-              [(j["name"], j["state"], j["total"]) for j in s.get("jobs", [])])
+        print(k, s["pool"]["health"], s["pool"]["operational"],
+              [(x["name"], x["health"], x["operational"]) for x in s["spaces"]],
+              [(j["name"], j["state"], j["total"]) for j in s.get("jobs", [])],
+              [(d["health"], d["operational"], d["usage"]) for d in s.get("disks", [])])
 for c in r.get("checks", []):
     print("check", c["space"], c["kind"], "ok" if c["ok"] else "FAILED")
 PY

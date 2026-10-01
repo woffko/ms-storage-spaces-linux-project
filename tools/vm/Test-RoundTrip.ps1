@@ -22,6 +22,8 @@ With -ProbeStrideKB N it also reads the 4 KiB block at every N KiB of the
 main space three times (4 MiB sequential reads, 4 KiB reads, 4 MiB again)
 and counts the tags found there ("probe"): after mirror copies were made
 to differ, this shows which copy Windows reads.
+With -DropDisk N it detaches image disk<N> after "connected" and records
+Windows' view 20 seconds later ("dropped": a disk lost while in use).
 With -WaitSeconds it keeps the pool attached that long before the checks
 (state "waited"), so that background work of Windows can run. Then it
 detaches the disks again. Run on the Windows test VM only.
@@ -31,6 +33,7 @@ param(
     [string] $Root = 'C:\sstest\roundtrip',
     [switch] $NoRepair,
     [int] $WaitSeconds = 0,
+    [int] $DropDisk = -1,
     [switch] $Optimize,
     [int] $ProbeStrideKB = 0,
     [string] $Written = ''
@@ -172,6 +175,12 @@ try {
         Where-Object OperationalStatus -eq 'Detached' | Connect-VirtualDisk
     Start-Sleep -Seconds 5
     $result.connected = Get-State
+
+    if ($DropDisk -ge 0) {
+        Dismount-DiskImage -ImagePath $images[$DropDisk] | Out-Null
+        Start-Sleep -Seconds 20
+        $result.dropped = Get-State
+    }
 
     if ($WaitSeconds -gt 0) {
         Start-Sleep -Seconds $WaitSeconds

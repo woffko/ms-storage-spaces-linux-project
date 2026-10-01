@@ -115,6 +115,12 @@ c9zero | - | blank:2; newpool; newspacex:c9fill:res=Simple,size=2048,prov=Fixed;
 # and a parity space (a Linux-created one crashed Windows when it arrived
 # without a disk).
 c11ctl | - | blank:4; newpool; newspacex:hsimple:res=Simple,cols=1,size=1024; newspacex:hwide:res=Simple,size=1024; newspacex:hmirror:res=Mirror,cols=1,size=1024; newspacex:hmirror2:res=Mirror,size=1024; newspacex:hparity:res=Parity,size=2048; snap:h0; dismount
+# Storage tiers as New-StorageTier and New-VirtualDisk -StorageTiers create
+# them (M10.3): two SSD and two HDD members, tier templates, a space of an
+# SSD mirror and an HDD simple tier; then on five disks mirror-accelerated
+# parity (SSD mirror, HDD parity of three columns).
+c10tier | - | blank:4; newpool; media:0:SSD; media:1:SSD; media:2:HDD; media:3:HDD; snap:t0; newtier:c10ssd:SSD:Mirror; newtier:c10hdd:HDD:Simple:2; snap:t1; newspacetiered:c10t:c10ssd=1024,c10hdd=2048; snap:t2; dismount
+c10mapar | - | blank:5; newpool; media:0:SSD; media:1:SSD; media:2:HDD; media:3:HDD; media:4:HDD; snap:m0; newtier:c10mssd:SSD:Mirror; newtier:c10mhdd:HDD:Parity:3; snap:m1; newspacetiered:c10m:c10mssd=1024,c10mhdd=2048; snap:m2; dismount
 LIST
 exit $status
 }

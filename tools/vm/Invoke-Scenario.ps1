@@ -16,6 +16,10 @@ by the steps blank and newpool (the directory is created then).
                              Parity), size (MB), prov (Thin, Fixed), cols,
                              copies, red, il (KB), au (MB), wc (write cache
                              MB)
+  newtier:NAME:MEDIA:RES[:COLS]  New-StorageTier (MEDIA SSD or HDD, RES
+                             Simple, Mirror or Parity, COLS columns)
+  newspacetiered:NAME:TIER=MB,...  New-VirtualDisk over the tiers named
+                             (fixed provisioning), each with its size
   renamepool:NEW             rename the pool (later steps use the new name)
   media:I:TYPE               Set-PhysicalDisk -MediaType (HDD, SSD) on I
   usage:I:USAGE              Set-PhysicalDisk -Usage on member I
@@ -338,6 +342,21 @@ foreach ($step in ($Steps.Split(';') | Where-Object { $_ })) {
             New-VirtualDisk @p | Out-Null
         }
         'removespace' { Remove-VirtualDisk -FriendlyName $a[1] -Confirm:$false }
+        'newtier' {
+            $p = @{ StoragePoolFriendlyName = $poolName; FriendlyName = $a[1]; MediaType = $a[2]; ResiliencySettingName = $a[3] }
+            if ($a.Count -gt 4) { $p.NumberOfColumns = [int]$a[4] }
+            New-StorageTier @p | Out-Null
+        }
+        'newspacetiered' {
+            $tiers = @(); $sizes = @()
+            foreach ($kv in $a[2].Split(',')) {
+                $t, $mb = $kv.Split('=')
+                $tiers += Get-StorageTier -FriendlyName $t
+                $sizes += [int64]$mb * 1MB
+            }
+            New-VirtualDisk -StoragePoolFriendlyName $poolName -FriendlyName $a[1] -StorageTiers $tiers `
+                -StorageTierSizes $sizes -ProvisioningType Fixed | Out-Null
+        }
         'blank' {
             $first = @(Get-Images).Count
             $sizeMB = if ($a.Count -gt 2) { [int]$a[2] } else { 8192 }
