@@ -1,5 +1,5 @@
 {
- "note": "tools/linux-created-checks.sh on the Linux test VM (Ubuntu 22.04, kernel 6.8): pools of three sparse 8 GiB images made by spaces pool create and spaces space create, one space each with the first 256 MiB of pattern; fio (random writes of 4 KiB to 1 MiB, crc32c verification) over 512 MiB above the pattern through each backend, read back read-only, pattern intact; NTFS by mkntfs, written through ntfs-3g by tools/ntfs-stress.py, every file's hash checked read-only",
+ "note": "tools/linux-created-checks.sh on the Linux test VM (Ubuntu 22.04, kernel 6.8): pools of three sparse 8 GiB images made by spaces pool create and spaces space create, one space each with the first 256 MiB of pattern; fio (random writes of 4 KiB to 1 MiB, crc32c verification) over 512 MiB above the pattern through each backend, read back read-only, pattern intact; NTFS by mkntfs, written through ntfs-3g by tools/ntfs-stress.py, every file's hash checked read-only; the NTFS spaces then taken by Windows 11 (tools/work-roundtrip.sh): healthy, chkdsk clean, every file's hash as written on Linux",
  "fio": {
   "lnx_simple": {
    "space": "simple, 3 GiB",
@@ -39,5 +39,54 @@
    "modelled": true,
    "mismatching_read_only": 0
   }
- }
+ },
+ "windows": {
+  "lnx_mirror": {
+   "attached": [
+    [
+     "lnx_mirror",
+     "Healthy",
+     "OK"
+    ]
+   ],
+   "repaired": [
+    [
+     "lnx_mirror",
+     "Healthy",
+     "OK"
+    ]
+   ],
+   "pool": [
+    "Healthy",
+    "OK"
+   ],
+   "chkdsk_exit": 0,
+   "files": 573,
+   "mismatching": []
+  },
+  "lnx_parity": {
+   "attached": [
+    [
+     "lnx_parity",
+     "Healthy",
+     "OK"
+    ]
+   ],
+   "repaired": [
+    [
+     "lnx_parity",
+     "Healthy",
+     "OK"
+    ]
+   ],
+   "pool": [
+    "Healthy",
+    "OK"
+   ],
+   "chkdsk_exit": 0,
+   "files": 573,
+   "mismatching": []
+  }
+ },
+ "windows_build": "10.0.26100.0"
 }

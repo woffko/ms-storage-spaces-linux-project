@@ -534,7 +534,8 @@ fn windows_bugchecks_on_an_absent_disk_whoever_created_the_pool() {
 /// crc32c verification through ublk and nbd (and dm for the simple space)
 /// on a simple, a mirror, a parity and a thin mirror space, and NTFS
 /// written through ntfs-3g on the mirror and the parity space, every file
-/// read back as modelled.
+/// read back as modelled; Windows 11 then attached both NTFS pools as
+/// healthy, chkdsk found nothing and every file matched.
 #[test]
 fn linux_created_spaces_pass_the_write_checks() {
     let e = evidence("linux-created-checks.json");
@@ -549,5 +550,13 @@ fn linux_created_spaces_pass_the_write_checks() {
     for (name, r) in e["ntfs_3g"].as_object().unwrap() {
         assert_eq!(r["modelled"], true, "{name}");
         assert_eq!(r["mismatching_read_only"], 0, "{name}");
+        // Windows took them: healthy, chkdsk clean, every file intact.
+        let w = &e["windows"][name];
+        assert_eq!(w["pool"], serde_json::json!(["Healthy", "OK"]), "{name}");
+        for key in ["attached", "repaired"] {
+            assert_eq!(w[key][0][1], "Healthy", "{name} {key}");
+        }
+        assert_eq!((w["chkdsk_exit"].as_i64(), w["files"].as_i64()), (Some(0), Some(573)), "{name}");
+        assert!(w["mismatching"].as_array().unwrap().is_empty(), "{name}");
     }
 }

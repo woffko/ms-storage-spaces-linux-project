@@ -531,7 +531,8 @@ rows of thin spaces not allocated yet (M7).
   evidence `linux-created-checks.json`): fio with crc32c verification
   through ublk, nbd and dm on simple, mirror, parity and thin spaces
   created on Linux, and NTFS through ntfs-3g on the mirror and parity
-  ones. (Their Windows round trip waits for the VM.)
+  ones; Windows then attached both NTFS pools as healthy, chkdsk clean,
+  every file intact.
 * Security review of management (docs/security.md): members are now locked
   exclusively also as image files and through symlinks; sizes are rounded
   with checked arithmetic and bounded to 2^32 slabs.
