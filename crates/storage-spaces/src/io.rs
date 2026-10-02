@@ -113,7 +113,11 @@ impl<T: WriteAt + ?Sized> WriteAt for Arc<T> {
 /// pool without touching its disks. The device itself is never written.
 pub struct Overlay<D> {
     base: D,
+    /// Pages whose content differs from the base's (a write that leaves a
+    /// page as it was, say zeros copied onto zeros, keeps no copy of it).
     pages: std::sync::Mutex<std::collections::BTreeMap<u64, Box<[u8; OVERLAY_PAGE]>>>,
+    /// Every page written, changed or not.
+    written: std::sync::Mutex<std::collections::BTreeSet<u64>>,
     flushes: std::sync::atomic::AtomicUsize,
 }
 
@@ -124,16 +128,17 @@ impl<D: ReadAt> Overlay<D> {
         Overlay {
             base,
             pages: Default::default(),
+            written: Default::default(),
             flushes: Default::default(),
         }
     }
 
     /// Byte offsets of the pages written so far.
     pub fn written_pages(&self) -> Vec<u64> {
-        self.pages
+        self.written
             .lock()
             .unwrap()
-            .keys()
+            .iter()
             .map(|p| p * OVERLAY_PAGE as u64)
             .collect()
     }
@@ -176,9 +181,15 @@ impl<D: ReadAt> WriteAt for Overlay<D> {
             let mut current = Box::new([0u8; OVERLAY_PAGE]);
             self.read_exact_at(&mut current[..], p * page)?;
             let (start, stop) = ((p * page).max(offset), ((p + 1) * page).min(end));
-            current[(start - p * page) as usize..(stop - p * page) as usize]
-                .copy_from_slice(&buf[(start - offset) as usize..(stop - offset) as usize]);
-            self.pages.lock().unwrap().insert(p, current);
+            let (at, new) = (
+                (start - p * page) as usize..(stop - p * page) as usize,
+                &buf[(start - offset) as usize..(stop - offset) as usize],
+            );
+            self.written.lock().unwrap().insert(p);
+            if current[at.clone()] != *new {
+                current[at].copy_from_slice(new);
+                self.pages.lock().unwrap().insert(p, current);
+            }
         }
         Ok(())
     }
@@ -192,8 +203,15 @@ impl<D: ReadAt> WriteAt for Overlay<D> {
 /// One write or flush that reached a member device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceEvent {
-    Write { device: usize, offset: u64, data: Vec<u8> },
-    Flush { device: usize },
+    /// (Writes of zeros share one buffer per length.)
+    Write {
+        device: usize,
+        offset: u64,
+        data: Arc<[u8]>,
+    },
+    Flush {
+        device: usize,
+    },
 }
 
 /// A device that records its writes and flushes, in one order across all
@@ -203,11 +221,17 @@ pub struct Recorder<D> {
     inner: D,
     device: usize,
     log: Arc<std::sync::Mutex<Vec<DeviceEvent>>>,
+    zeros: std::sync::Mutex<std::collections::HashMap<usize, Arc<[u8]>>>,
 }
 
 impl<D> Recorder<D> {
     pub fn new(inner: D, device: usize, log: Arc<std::sync::Mutex<Vec<DeviceEvent>>>) -> Self {
-        Recorder { inner, device, log }
+        Recorder {
+            inner,
+            device,
+            log,
+            zeros: Default::default(),
+        }
     }
 }
 
@@ -222,10 +246,20 @@ impl<D: ReadAt> ReadAt for Recorder<D> {
 
 impl<D: WriteAt> WriteAt for Recorder<D> {
     fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        let data = if buf.iter().all(|&b| b == 0) {
+            self.zeros
+                .lock()
+                .unwrap()
+                .entry(buf.len())
+                .or_insert_with(|| Arc::from(buf))
+                .clone()
+        } else {
+            Arc::from(buf)
+        };
         self.log.lock().unwrap().push(DeviceEvent::Write {
             device: self.device,
             offset,
-            data: buf.to_vec(),
+            data,
         });
         self.inner.write_all_at(buf, offset)
     }

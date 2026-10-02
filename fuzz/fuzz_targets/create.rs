@@ -42,7 +42,9 @@ fuzz_target!(|data: &[u8]| {
         1 => Some(512),
         _ => Some(4096),
     };
-    let Ok((plan, _)) = plan_create_pool(&disks, &name, logical, &mut guid) else { return };
+    let Ok((plan, _)) = plan_create_pool(&disks, &name, logical, &mut guid) else {
+        return;
+    };
     let images: Vec<Overlay<SparseImage>> = disks.iter().map(|d| Overlay::new(SparseImage::new(d.size))).collect();
     let members: Vec<&Overlay<SparseImage>> = images.iter().collect();
     plan.apply::<&Overlay<SparseImage>, _>(&[], &members).unwrap();
@@ -100,12 +102,19 @@ fuzz_target!(|data: &[u8]| {
             thin: next() & 1 == 1,
             copies: [None, Some(2), Some(3)][next() as usize % 3],
             columns: [None, Some(1), Some(2), Some(u64::from(next() % 9))][next() as usize % 4],
-            interleave: [None, Some(16 << 10), Some(64 << 10), Some(1 << 20), Some(u64::from(next()) << 12)]
-                [next() as usize % 5],
+            interleave: [
+                None,
+                Some(16 << 10),
+                Some(64 << 10),
+                Some(1 << 20),
+                Some(u64::from(next()) << 12),
+            ][next() as usize % 5],
             write_cache: [None, Some(64 << 20), Some(u64::from(next()) << 24)][next() as usize % 3],
         };
         let pool = Pool::open(members.clone()).unwrap();
-        let Ok((plan, _)) = plan_create_space(&pool, &spec, &mut guid) else { continue };
+        let Ok((plan, _)) = plan_create_space(&pool, &spec, &mut guid) else {
+            continue;
+        };
         drop(pool);
         plan.apply::<_, &Overlay<SparseImage>>(&members, &[]).unwrap();
         let pool = Pool::open(members.clone()).unwrap();

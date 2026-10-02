@@ -8,7 +8,9 @@ use storage_spaces::format::DiskHeader;
 use storage_spaces::records::{DiskBody, PoolBody, SpaceBody};
 
 fuzz_target!(|data: &[u8]| {
-    let Some((&selector, body)) = data.split_first() else { return };
+    let Some((&selector, body)) = data.split_first() else {
+        return;
+    };
     match selector % 5 {
         0 | 1 => {
             if let Ok(p) = PoolBody::decode(15 + selector % 2, body) {
@@ -23,7 +25,11 @@ fuzz_target!(|data: &[u8]| {
         3 => {
             for child in [false, true] {
                 if let Ok(s) = SpaceBody::decode(child, body) {
-                    assert_eq!(s.encode().expect("a decoded space record encodes"), body, "child {child}");
+                    assert_eq!(
+                        s.encode().expect("a decoded space record encodes"),
+                        body,
+                        "child {child}"
+                    );
                 }
             }
         }

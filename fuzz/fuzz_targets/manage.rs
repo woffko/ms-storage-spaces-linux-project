@@ -66,8 +66,15 @@ fuzz_target!(|data: &[u8]| {
         counter += 1;
         Guid([counter as u8; 16])
     };
-    let space = pool.user_spaces().nth(usize::from(*param % 4)).map(|s| s.name().to_owned());
-    let disk_id = pool.disks.keys().nth(usize::from(*param) % pool.disks.len().max(1)).copied();
+    let space = pool
+        .user_spaces()
+        .nth(usize::from(*param % 4))
+        .map(|s| s.name().to_owned());
+    let disk_id = pool
+        .disks
+        .keys()
+        .nth(usize::from(*param) % pool.disks.len().max(1))
+        .copied();
     let param = u64::from(*param);
     let plan = match op % 15 {
         0 => ops::plan_rename_pool(&pool, &"p".repeat(1 + param as usize % 300)),
@@ -76,7 +83,9 @@ fuzz_target!(|data: &[u8]| {
         3 => disk_id.map_or(Ok(Default::default()), |d| {
             ops::plan_set_disk(&pool, d, Some(param as u8 % 4), Some((param >> 2) as u8 % 6))
         }),
-        4 => space.map_or(Ok(Default::default()), |s| ops::plan_resize_space(&pool, &s, param << 28)),
+        4 => space.map_or(Ok(Default::default()), |s| {
+            ops::plan_resize_space(&pool, &s, param << 28)
+        }),
         5 => disk_id.map_or(Ok(Default::default()), |d| ops::plan_retire_disk(&pool, d)),
         6 => disk_id.map_or(Ok(Default::default()), |d| ops::plan_remove_disk(&pool, d)),
         7 => ops::plan_repair(&pool),
@@ -115,15 +124,27 @@ fuzz_target!(|data: &[u8]| {
             };
             ops::plan_add_disk(&pool, &blank, &mut guid)
         }
-        13 => ops::plan_create_tier(&pool, "fuzzed", param & 1 == 0, 1 + (param >> 1) as u8 % 3, (param & 16 != 0).then_some(1 + (param >> 5) % 8), &mut guid),
+        13 => ops::plan_create_tier(
+            &pool,
+            "fuzzed",
+            param & 1 == 0,
+            1 + (param >> 1) as u8 % 3,
+            (param & 16 != 0).then_some(1 + (param >> 5) % 8),
+            &mut guid,
+        ),
         14 => {
             // Over the pool's first two templates, if it has them.
             let Ok(db) = ops::check_pool(&pool) else { return };
-            let Ok(templates) = ops::tier_templates(&db) else { return };
+            let Ok(templates) = ops::tier_templates(&db) else {
+                return;
+            };
             if templates.len() < 2 {
                 return;
             }
-            let tiers = [(templates[0].name.clone(), (param + 1) << 28), (templates[1].name.clone(), (param + 2) << 28)];
+            let tiers = [
+                (templates[0].name.clone(), (param + 1) << 28),
+                (templates[1].name.clone(), (param + 2) << 28),
+            ];
             ops::plan_create_tiered_space(&pool, "fuzzed", &tiers, &mut guid).map(|(plan, _)| plan)
         }
         _ => {
