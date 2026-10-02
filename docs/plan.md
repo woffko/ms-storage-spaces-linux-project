@@ -1,7 +1,7 @@
 # Project plan
 
-Status as of 2026-09-30: Stages 1 and 2 have met their exit criteria
-(v0.2.0-ready; nothing is released before Stage 3 is complete). The plan is
+Status as of 2026-10-02: Stages 1, 2 and 3 have met their exit criteria
+(v1.0.0; tags v0.1.0, v0.2.0 and v1.0.0). The plan is
 split into three stages with checkable exit criteria. ReFS is a separate track (last section) that shares the test
 infrastructure but not the milestones.
 
@@ -476,7 +476,7 @@ rows of thin spaces not allocated yet (M7).
 * With the 24 h fuzzing clean, the state is v0.2.0-ready: Stage 2 (M6-M8)
   is complete.
 
-### Stage 3 progress (from 2026-09-30)
+### Stage 3 (exit criteria met, 2026-10-02: v1.0.0)
 
 * What Windows writes (Goal C, item 1): complete record models checked
   byte for byte on every record of the corpus; `New-StoragePool` (1, 3, 4
@@ -561,11 +561,24 @@ rows of thin spaces not allocated yet (M7).
   bugchecked Windows (0x50 in spaceport.sys) when the pool arrived without
   one disk; the same layout created by Windows (scenario c11ctl) crashed
   it the same way, at the same address (evidence
-  `windows-absent-disk-bugcheck.json`). VM experiments with disks absent
-  stopped after the second crash, as the goal requires.
-* Still open (2026-10-01): the 24 h fuzz of the planner targets `create`
-  and `manage` on the final code (the nine parser targets ran from
-  2026-09-30 23:28 on e5abb35); version 1.0.0 and the publication.
+  `windows-absent-disk-bugcheck.json`). With the user's consent the
+  experiments then went on with disks detached while in use, which did
+  not crash Windows (`health-drop.json`).
+* 24 h of fuzzing per target with one worker each at nice 19
+  (`tools/fuzz-long.sh`): the nine parser and writer targets from
+  2026-09-30 23:28 on e5abb35 (1 to 5 billion runs each; later changes did
+  not touch their code); `create` from 2026-10-01 08:13 on 6f188b2 (1.55
+  million runs) and `manage` from 2026-10-01 20:59 on b9ac212 (7.37 million
+  runs, its code since unchanged): no findings. The earlier runs of these
+  two found a size overflow when counting free slabs (extents beyond their
+  disk) and an unchecked partition table rewrite, and an error in the
+  `create` harness; all fixed, with tests (docs/security.md).
+* Release `v1.0.0` (2026-10-02): version 1.0.0, user guide, man page,
+  README, CHANGELOG, Debian and Arch packages, a static x86_64 musl build;
+  pushed to GitHub with the tags v0.1.0 (the last read-only commit, before
+  write support), v0.2.0 (the end of Stage 2) and v1.0.0, and a GitHub
+  release for v1.0.0. The crates stay off crates.io until decided
+  otherwise.
 
 ## Test infrastructure (continuous, feeds every stage)
 

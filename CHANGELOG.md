@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0 (unreleased)
+## 1.0.0 (2026-10-02)
 
 Pool management, the way Windows 11 24H2 does it: Windows takes pools
 created and changed on Linux as healthy, repairs and optimizes them.
@@ -46,7 +46,7 @@ created and changed on Linux as healthy, repairs and optimizes them.
   disks with simple, mirror and parity spaces arrives with one disk absent,
   whether Linux or Windows created the pool.
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-09-30)
 
 Writing, for spaces whose state is fully understood.
 
@@ -91,7 +91,7 @@ Writing, for spaces whose state is fully understood.
   from the newest checkpoint on (a wrapped log is no longer read in full).
 * `spaces dump` shows checkpoints.
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-09-28)
 
 First release: read-only access to Microsoft Storage Spaces pools created by
 Windows 11 (24H2, pool version 28, and Insider builds, pool version 29).
