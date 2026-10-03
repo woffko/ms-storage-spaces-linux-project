@@ -1610,3 +1610,44 @@ fn checking_volumes() {
     let report = damaged.check(&skip).unwrap();
     assert!(!report.problems.is_empty(), "the damage is found");
 }
+
+#[test]
+fn extent_maps_past_cluster_65535() {
+    // An extent map whose records start past cluster 0xffff of the stream:
+    // Windows leaves node flag 8 out and puts 0xffff in every key index
+    // entry (it takes the file for damaged otherwise).
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 135_200_000_000_000_000;
+    let data: Vec<u8> = (0..(65536 * 4096 + 4096u32)).map(|i| (i % 253) as u8).collect();
+    vol.create_file("/big.bin", &data, now).unwrap();
+    assert!(read_all(&vol, "/big.bin") == data);
+    let record = vol.record(&vol.lookup("/big.bin").unwrap()).unwrap();
+    let node = Node::at(&record, 0).unwrap();
+    let level = node
+        .rows()
+        .map(|r| r.unwrap())
+        .find(|r| r.key.len() >= 0x18 && r.key[8..12] == [2, 0, 0, 0x80] && r.key[12] == 0x80 && r.key[0x11] == 0x10)
+        .expect("the live level");
+    let map = Node::at(level.value, 0).unwrap();
+    assert!(!map.is_leaf(), "a map this large is kept in a page");
+    let child = PageRef::parse(map.rows().next().unwrap().unwrap().value).unwrap();
+    let page = vol.read_page(&child, false).unwrap();
+    let h = PAGE_HEADER_SIZE
+        + u32::from_le_bytes(page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + 4].try_into().unwrap()) as usize;
+    assert_eq!(page[h + 0x0d] & 8, 0, "no key index markers");
+    let (index, count) = (
+        u32::from_le_bytes(page[h + 0x10..h + 0x14].try_into().unwrap()) as usize,
+        u32::from_le_bytes(page[h + 0x14..h + 0x18].try_into().unwrap()) as usize,
+    );
+    for i in 0..count {
+        assert_eq!(
+            page[h + index + 4 * i + 2..h + index + 4 * i + 4],
+            [0xff, 0xff],
+            "entry {i}"
+        );
+    }
+    assert_eq!(vol.check(&skip).unwrap().problems, Vec::<String>::new());
+}

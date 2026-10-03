@@ -88,7 +88,7 @@ enum Command {
         #[arg(long)]
         allow_other: bool,
         /// Mount for writing (experimental: every change is a transaction
-        /// as `refs write` makes; files up to 64 MiB are written; not
+        /// as `refs write` makes; a file is written back whole; not
         /// --space).
         #[arg(long)]
         rw: bool,
@@ -144,7 +144,8 @@ enum Command {
         yes: bool,
     },
     /// Create a file holding the content of a local file (experimental:
-    /// writes the volume, only with --yes; up to 64 MiB, a printable ASCII
+    /// writes the volume, only with --yes; up to one page of extent map,
+    /// about 500 MiB on 4 KiB clusters; a printable ASCII
     /// name).
     Create {
         /// The image, disk or partition.
@@ -203,7 +204,8 @@ enum Command {
     },
     /// Replace a file's content (or a named stream's) with a local file's,
     /// or append it (experimental: writes the volume, only with --yes; up
-    /// to 64 MiB, 8 MiB for integrity streams; not files with snapshots).
+    /// to one page of extent map, 8 MiB for integrity streams; not files
+    /// with snapshots).
     Write {
         /// The image, disk or partition.
         device: PathBuf,
@@ -312,6 +314,45 @@ enum Command {
 
 /// A device for the volume: a file, or a space of a pool.
 type Device = Box<dyn ReadAt>;
+
+/// A local file as the data `refs::write` writes from (its length fixed
+/// when opened).
+struct FileSource(File, u64);
+
+impl FileSource {
+    fn open(path: &std::path::Path) -> Result<Self> {
+        let f = File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+        let len = f.metadata()?.len();
+        Ok(FileSource(f, len))
+    }
+
+    fn empty() -> Result<Self> {
+        Ok(FileSource(Self::temporary()?.0, 0))
+    }
+
+    /// An unlinked temporary file (in $REFS_TMPDIR, else the system's).
+    fn temporary() -> Result<Self> {
+        let dir = std::env::var_os("REFS_TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from);
+        let path = dir.join(format!("refs-{}", std::process::id()));
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| format!("cannot make {}", path.display()))?;
+        let _ = std::fs::remove_file(&path);
+        Ok(FileSource(f, 0))
+    }
+}
+
+impl refs::write::Source for FileSource {
+    fn len(&self) -> u64 {
+        self.1
+    }
+    fn read_into(&self, offset: u64, buf: &mut [u8]) -> refs::Result<()> {
+        Ok(std::os::unix::fs::FileExt::read_exact_at(&self.0, buf, offset)?)
+    }
+}
 
 /// A device that refuses writes (a volume mounted read-only).
 #[cfg(feature = "fuse")]
@@ -1025,9 +1066,9 @@ fn main() -> Result<()> {
             from,
             yes,
         } => {
-            let bytes = match &from {
-                Some(f) => std::fs::read(f).with_context(|| format!("cannot read {}", f.display()))?,
-                None => Vec::new(),
+            let source = match &from {
+                Some(f) => FileSource::open(f)?,
+                None => FileSource::empty()?,
             };
             let file = std::fs::OpenOptions::new()
                 .read(true)
@@ -1039,12 +1080,12 @@ fn main() -> Result<()> {
                 None => *find_volumes(&file)?.first().context("no ReFS volume on the device")?,
             };
             let mut vol = Volume::open(file, offset)?;
-            writeln!(out, "{path}: {} bytes", bytes.len())?;
+            writeln!(out, "{path}: {} bytes", refs::write::Source::len(&source))?;
             if !yes {
                 writeln!(out, "nothing written (--yes writes)")?;
                 return Ok(());
             }
-            vol.create_file(&path, &bytes, now())?;
+            vol.create_file_from(&path, &source, now())?;
             writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
         }
         Command::Delete {
@@ -1109,6 +1150,50 @@ fn main() -> Result<()> {
             stream,
             yes,
         } => {
+            if stream.is_none() {
+                let mut vol = open_writable(&device, offset, yes)?;
+                let source = if append {
+                    // The old content, then the new, in a temporary file.
+                    let e = vol.lookup(&path)?;
+                    let file = vol.open_file(&e)?;
+                    let tmp = FileSource::temporary()?;
+                    let mut at = 0u64;
+                    if let Some(s) = &file.data {
+                        let mut buf = vec![0u8; 1 << 20];
+                        while at < s.size {
+                            let n = vol.read_stream(s, at, &mut buf)?;
+                            if n == 0 {
+                                break;
+                            }
+                            std::os::unix::fs::FileExt::write_all_at(&tmp.0, &buf[..n], at)?;
+                            at += n as u64;
+                        }
+                        at = s.size;
+                    }
+                    let mut new =
+                        std::fs::File::open(&from).with_context(|| format!("cannot read {}", from.display()))?;
+                    let mut buf = vec![0u8; 1 << 20];
+                    loop {
+                        let n = std::io::Read::read(&mut new, &mut buf)?;
+                        if n == 0 {
+                            break;
+                        }
+                        std::os::unix::fs::FileExt::write_all_at(&tmp.0, &buf[..n], at)?;
+                        at += n as u64;
+                    }
+                    FileSource(tmp.0, at)
+                } else {
+                    FileSource::open(&from)?
+                };
+                writeln!(out, "{path}: {} bytes", refs::write::Source::len(&source))?;
+                if !yes {
+                    writeln!(out, "nothing written (--yes writes)")?;
+                    return Ok(());
+                }
+                vol.write_file_from(&path, &source, now())?;
+                writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
+                return Ok(());
+            }
             let bytes = std::fs::read(&from).with_context(|| format!("cannot read {}", from.display()))?;
             let mut vol = open_writable(&device, offset, yes)?;
             let data = if append {

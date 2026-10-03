@@ -431,8 +431,9 @@ inode with its link count.
 
 With `--rw` (one image, disk or partition; not `--space`) the mount
 writes through the same code as the writing commands below: creating,
-writing, truncating and deleting files (up to 64 MiB each: a file opened
-for writing is kept in memory and written back whole when it is closed or
+writing, truncating and deleting files (a file opened for writing is
+kept in an unlinked temporary file, in `$REFS_TMPDIR` or the system's
+temporary directory, and written back whole when it is closed or
 synced), directories, renames and moves, hard links, times (`touch`), the
 read-only attribute (`chmod a-w`) and named streams (`setfattr -n
 user.NAME`). Every change is one transaction with a new checkpoint, so a
@@ -481,8 +482,10 @@ refs link devdrive.img --path /archive/log.txt --to /notes/log.txt --yes
 `refs overwrite` replaces bytes inside a file (not beyond its end, not in
 sparse ranges; integrity streams are copied) where they are, as Windows does,
 and sets the modification and change times to now. `refs create` makes a
-file (up to 1 KiB kept in its record, up to 64 MiB in clusters near the
-data of the files around it) with a printable ASCII name, in a directory
+file (up to 1 KiB kept in its record; larger ones in clusters near the
+data of the files around it, read from the local file piece by piece,
+up to what one page of extent map holds: about 500 MiB on 4 KiB
+clusters) with a printable ASCII name, in a directory
 of any size (its pages split as it grows and merge as it shrinks); it
 takes the permissions of the files beside it. `refs rename` renames a
 file or directory within its directory and `refs delete` deletes a file
@@ -493,11 +496,15 @@ lowers their reference counts and frees only clusters no other file
 has. `refs mkdir` creates a directory;
 `refs write` replaces a file's content (or appends to it with
 `--append`), keeping its creation time, attributes and permissions.
+New data goes into the volume's data containers and then into its
+metadata containers (keeping room there for metadata); when those are
+full, `refs` stops ("no room for the data"): Windows hands out further
+containers as it needs them, `refs` does not yet.
 `refs move` moves a file or directory into another directory and `refs
 link` gives a file another name (a hard link); changing a hard-linked
 file through one name changes it for all of them. `refs write --stream
-NAME` writes a named stream (an alternate data stream, up to 64 MiB; up
-to 1 KiB stays in the file's record) and `refs delete --stream NAME`
+NAME` writes a named stream (an alternate data stream; up to 1 KiB stays
+in the file's record) and `refs delete --stream NAME`
 deletes one. `refs set --integrity
 on` turns integrity streams on for an empty file (as Set-FileIntegrity
 does); its data is then written with checksums (CRC32-C per 4 KiB

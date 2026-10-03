@@ -35,8 +35,9 @@ pub type Rw = Box<dyn WriteAt>;
 
 const TTL: Duration = Duration::from_secs(1);
 
-/// The largest file the mount writes (a file is rewritten whole).
-const MAX_WRITTEN: usize = 64 << 20;
+/// The largest file the mount writes (a file is rewritten whole; the
+/// volume may take less: its extent map must fit one page).
+const MAX_WRITTEN: u64 = 4 << 30;
 
 /// Linux's open(2) and setxattr(2) flags.
 const O_TRUNC: i32 = 0o1000;
@@ -53,11 +54,74 @@ struct Dir {
 /// Directories kept read (the cache is emptied when full).
 const DIRECTORIES_KEPT: usize = 256;
 
-/// A file opened for writing: its whole content, written back on flush.
+/// A file opened for writing: its whole content in a temporary file
+/// (unlinked; in $REFS_TMPDIR, else the system's), written back on flush.
 struct Pending {
-    data: Vec<u8>,
+    file: std::fs::File,
+    len: u64,
     dirty: bool,
     handles: usize,
+}
+
+impl Pending {
+    fn new() -> Result<Self, Errno> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::var_os("REFS_TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from);
+        let path = dir.join(format!(
+            "refs-mount-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| {
+                eprintln!("{}: {e}", path.display());
+                Errno::EIO
+            })?;
+        let _ = std::fs::remove_file(&path);
+        Ok(Pending {
+            file,
+            len: 0,
+            dirty: false,
+            handles: 1,
+        })
+    }
+
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<(), Errno> {
+        std::os::unix::fs::FileExt::write_all_at(&self.file, data, offset).map_err(|_| Errno::EIO)?;
+        self.len = self.len.max(offset + data.len() as u64);
+        Ok(())
+    }
+
+    fn set_len(&mut self, len: u64) -> Result<(), Errno> {
+        self.file.set_len(len).map_err(|_| Errno::EIO)?;
+        self.len = len;
+        Ok(())
+    }
+
+    fn read_at(&self, offset: u64, size: u32) -> Result<Vec<u8>, Errno> {
+        let from = offset.min(self.len);
+        let to = (from + u64::from(size)).min(self.len);
+        let mut buf = vec![0u8; (to - from) as usize];
+        std::os::unix::fs::FileExt::read_exact_at(&self.file, &mut buf, from).map_err(|_| Errno::EIO)?;
+        Ok(buf)
+    }
+}
+
+/// A pending file as the data `refs::write` writes from.
+struct PendingData<'a>(&'a std::fs::File, u64);
+
+impl refs::write::Source for PendingData<'_> {
+    fn len(&self) -> u64 {
+        self.1
+    }
+    fn read_into(&self, offset: u64, buf: &mut [u8]) -> refs::Result<()> {
+        Ok(std::os::unix::fs::FileExt::read_exact_at(self.0, buf, offset)?)
+    }
 }
 
 struct State {
@@ -332,7 +396,7 @@ impl RefsFs {
             }
         };
         if let Some(p) = self.state.lock().unwrap().pending.get(&ino) {
-            size = p.data.len() as u64;
+            size = p.len;
         }
         let (uid, gid) = if self.writable { self.owner } else { (0, 0) };
         Ok(FileAttr {
@@ -374,27 +438,28 @@ impl RefsFs {
         ))
     }
 
-    /// A file's whole content.
-    fn content(&self, vol: &Volume<Rw>, path: &str) -> Result<Vec<u8>, Errno> {
+    /// A file's whole content, in a pending buffer.
+    fn content(&self, vol: &Volume<Rw>, path: &str) -> Result<Pending, Errno> {
+        let mut p = Pending::new()?;
         let file = self.file(vol, path)?;
         let Some(stream) = &file.data else {
-            return Ok(Vec::new());
+            return Ok(p);
         };
-        if stream.size > MAX_WRITTEN as u64 {
+        if stream.size > MAX_WRITTEN {
             return Err(Errno::EFBIG);
         }
-        let mut data = vec![0u8; stream.size as usize];
+        let mut buf = vec![0u8; 1 << 20];
         let mut at = 0;
-        while at < data.len() {
-            let n = vol
-                .read_stream(stream, at as u64, &mut data[at..])
-                .map_err(|e| errno(path, e))?;
+        while at < stream.size {
+            let n = vol.read_stream(stream, at, &mut buf).map_err(|e| errno(path, e))?;
             if n == 0 {
                 break;
             }
-            at += n;
+            p.write_at(at, &buf[..n])?;
+            at += n as u64;
         }
-        Ok(data)
+        p.set_len(stream.size)?;
+        Ok(p)
     }
 
     /// Runs a change on the volume (refused unless mounted for writing).
@@ -411,18 +476,18 @@ impl RefsFs {
 
     /// Writes back a file opened for writing, if it changed.
     fn write_back(&self, ino: u64) -> Result<(), Errno> {
-        let data = {
+        let (file, len) = {
             let mut s = self.state.lock().unwrap();
             match s.pending.get_mut(&ino) {
                 Some(p) if p.dirty => {
                     p.dirty = false;
-                    p.data.clone()
+                    (p.file.try_clone().map_err(|_| Errno::EIO)?, p.len)
                 }
                 _ => return Ok(()),
             }
         };
         let path = self.path(ino)?;
-        self.change(&path, |v| v.write_file(&path, &data, now()))
+        self.change(&path, |v| v.write_file_from(&path, &PendingData(&file, len), now()))
     }
 
     /// The entry reply for a path just made.
@@ -494,19 +559,19 @@ impl Filesystem for RefsFs {
         let r = (|| -> Result<(), Errno> {
             let path = self.path(ino.0)?;
             if let Some(size) = size {
-                if size > MAX_WRITTEN as u64 {
+                if size > MAX_WRITTEN {
                     return Err(Errno::EFBIG);
                 }
                 let pending = self.state.lock().unwrap().pending.contains_key(&ino.0);
                 if pending {
                     let mut s = self.state.lock().unwrap();
                     let p = s.pending.get_mut(&ino.0).unwrap();
-                    p.data.resize(size as usize, 0);
+                    p.set_len(size)?;
                     p.dirty = true;
                 } else {
-                    let mut data = self.content(&self.vol.read().unwrap(), &path)?;
-                    data.resize(size as usize, 0);
-                    self.change(&path, |v| v.write_file(&path, &data, now()))?;
+                    let mut p = self.content(&self.vol.read().unwrap(), &path)?;
+                    p.set_len(size)?;
+                    self.change(&path, |v| v.write_file_from(&path, &PendingData(&p.file, p.len), now()))?;
                 }
             }
             if atime.is_some() || mtime.is_some() || crtime.is_some() {
@@ -674,25 +739,19 @@ impl Filesystem for RefsFs {
             if let Some(p) = s.pending.get_mut(&ino.0) {
                 p.handles += 1;
                 if truncate {
-                    p.data.clear();
+                    p.set_len(0)?;
                     p.dirty = true;
                 }
                 return Ok(());
             }
             drop(s);
-            let data = if truncate {
-                Vec::new()
+            let mut p = if truncate {
+                Pending::new()?
             } else {
                 self.content(&vol, &path)?
             };
-            self.state.lock().unwrap().pending.insert(
-                ino.0,
-                Pending {
-                    data,
-                    dirty: truncate,
-                    handles: 1,
-                },
-            );
+            p.dirty = truncate;
+            self.state.lock().unwrap().pending.insert(ino.0, p);
             Ok(())
         })();
         match r {
@@ -715,14 +774,8 @@ impl Filesystem for RefsFs {
             let path = self.name_path(parent, name)?;
             self.change(&path, |v| v.create_file(&path, b"", now()))?;
             let ino = self.inode(&path, None);
-            self.state.lock().unwrap().pending.insert(
-                ino,
-                Pending {
-                    data: Vec::new(),
-                    dirty: false,
-                    handles: 1,
-                },
-            );
+            let p = Pending::new()?;
+            self.state.lock().unwrap().pending.insert(ino, p);
             self.attr(&self.vol.read().unwrap(), ino)
         })();
         match r {
@@ -743,9 +796,10 @@ impl Filesystem for RefsFs {
         reply: ReplyData,
     ) {
         if let Some(p) = self.state.lock().unwrap().pending.get(&ino.0) {
-            let from = (offset as usize).min(p.data.len());
-            let to = (from + size as usize).min(p.data.len());
-            return reply.data(&p.data[from..to]);
+            return match p.read_at(offset, size) {
+                Ok(b) => reply.data(&b),
+                Err(e) => reply.error(e),
+            };
         }
         let vol = self.vol.read().unwrap();
         let file = match self.path(ino.0).and_then(|p| self.file(&vol, &p)) {
@@ -781,14 +835,12 @@ impl Filesystem for RefsFs {
         let Some(p) = s.pending.get_mut(&ino.0) else {
             return reply.error(Errno::EBADF);
         };
-        let end = offset as usize + data.len();
-        if end > MAX_WRITTEN {
+        if offset + data.len() as u64 > MAX_WRITTEN {
             return reply.error(Errno::EFBIG);
         }
-        if p.data.len() < end {
-            p.data.resize(end, 0);
+        if let Err(e) = p.write_at(offset, data) {
+            return reply.error(e);
         }
-        p.data[offset as usize..end].copy_from_slice(data);
         p.dirty = true;
         reply.written(data.len() as u32)
     }

@@ -54,6 +54,10 @@ pub struct Volume<D> {
     /// Clusters per container, and each container's first physical cluster.
     pub clusters_per_container: u64,
     pub(crate) containers: BTreeMap<u64, u64>,
+    /// The class of each container, by its first physical cluster (u32 at
+    /// 0x14 of its row: 0 data, 1 metadata, 0x2000 not handed out yet,
+    /// 0x4000 full of data, others the log's and reserved areas).
+    pub(crate) container_classes: BTreeMap<u64, u32>,
     /// The log's state, read once (commits by `refs` leave the log alone).
     log: std::sync::OnceLock<LogState>,
     objects: BTreeMap<u64, PageRef>,
@@ -111,6 +115,7 @@ impl<D: ReadAt> Volume<D> {
             },
             clusters_per_container: 0,
             containers: BTreeMap::new(),
+            container_classes: BTreeMap::new(),
             objects: BTreeMap::new(),
             checkpoint_lcns: Vec::new(),
             log: std::sync::OnceLock::new(),
@@ -380,11 +385,13 @@ impl<D: ReadAt> Volume<D> {
 
     fn load_containers(&mut self) -> Result<()> {
         let mut containers = BTreeMap::new();
+        let mut classes = BTreeMap::new();
         let mut cpc = 0;
         let mut last = Err(format_err!("no container table"));
         for root in [ROOT_CONTAINERS, ROOT_CONTAINERS_COPY] {
             let r = self.checkpoint.roots[root].clone();
             containers.clear();
+            classes.clear();
             last = self.walk(&r, true, &mut |row| {
                 let v = row.value;
                 if row.key.len() < 8 || v.len() < 0x30 {
@@ -392,6 +399,7 @@ impl<D: ReadAt> Volume<D> {
                 }
                 cpc = le32(v, 0x18) as u64;
                 containers.insert(le64(row.key, 0), le64(v, v.len() - 16));
+                classes.insert(le64(v, v.len() - 16), le32(v, 0x14));
                 Ok(())
             });
             if last.is_ok() {
@@ -404,6 +412,7 @@ impl<D: ReadAt> Volume<D> {
         }
         self.clusters_per_container = cpc;
         self.containers = containers;
+        self.container_classes = classes;
         Ok(())
     }
 

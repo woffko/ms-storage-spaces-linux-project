@@ -756,6 +756,16 @@ rows of thin spaces not allocated yet (M7).
   deleted through it was identical to the local copy after a remount,
   and on Windows every hash matched, refsutil leak and triage were as for
   the untouched volume, and Windows deleted and copied trees there.
+  Files are written from a source piece by piece (`write_file_from`,
+  `create_file_from`; the mount keeps open files in temporary files), up
+  to one page of extent map (about 500 MiB on 4 KiB clusters). Found on
+  the way: an extent map with a record past cluster 0xffff must leave
+  node flag 8 out and put 0xffff in its key index entries (Windows drops
+  the file otherwise), and data must not go into containers Windows has
+  not handed out (class 0x2000: the volume then needs repair); data goes
+  into data containers, then metadata ones. Not done: handing out new
+  containers (the container tables, roots 7, 8 and 12, are not written
+  yet), extent maps of more than one page.
   `refs check` (Volume::check) checks a volume the way the write tests
   do: page checksums and structure, pages and file clusters used in
   their allocators, shared clusters counted; every corpus volume and

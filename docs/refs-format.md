@@ -323,6 +323,15 @@ table's rows for a text diff):
   a file's time rewrites the page of its directory, the object table and
   its copy, both allocators and the internal objects 0x500, 0x501, 0x701
   and 0x705.
+* Containers have classes (u32 at 0x14 of their row in the container
+  table): 1 metadata (the B+-tree pages), 0 data, 0x4000 data and full,
+  0x2000 not handed out yet, 0x4001, 0x4200, 0x2040 and 0x2440 for the
+  log and reserved areas. Windows hands out a new data container by
+  changing its class. Data `refs` writes into a container still at
+  0x2000 makes Windows report the volume as needing repair; `refs` puts
+  data into data containers, then into metadata containers (leaving
+  1024 clusters of each for pages), never elsewhere, and pages into
+  metadata containers (**verified**).
 * Allocator rows (roots 1, 2) are bitmaps of a cluster range with a count
   of free clusters; allocating a 16 KiB page sets four bits and lowers
   the count by four. Value: start, count, free (u16 at 0x10), kind (u16
@@ -439,7 +448,12 @@ table's rows for a text diff):
   is the page's reference (0x18 of the value: 1). The page: the header of
   its table's pages (0x48: the directory holding the record), the u32 8
   at 0x50, a leaf node (flags 0x0c) of the records, keyed as in the
-  value. Deleting or rewriting the data frees those pages too
+  value. Node flag 8 (0x0e in values, 0x0c in pages) means the key index
+  entries carry each record's first cluster in the stream in their high
+  half; a map with a record past cluster 0xffff leaves it out (0x06,
+  0x04) and has 0xffff in every entry (Windows' sparse file of 1 GiB;
+  Windows takes a file whose entries are cut to 16 bits for damaged and
+  drops it, **verified**). Deleting or rewriting the data frees those pages too
   (**verified**: no leak after deleting Windows' 6 MB file). `refs` puts
   maps of more than 2 KiB in such a page (**verified**: Windows read 6
   and 8 MB integrity streams written so and wrote into them).

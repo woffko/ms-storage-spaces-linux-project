@@ -250,18 +250,34 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         let mut runs = Vec::new();
         let (mut left, mut vcn) = (count, 0);
         let mut tried = std::collections::HashSet::new();
+        let class = |start: u64| self.vol.container_classes.range(..=start).next_back().map(|(_, &c)| c);
         while left > 0 {
             let rows = self.bitmaps(ROOT_MEDIUM_ALLOCATOR)?;
-            let free = |at: &RowAt| le16(&self.pages[at.page].data[at.value..], 0x10);
-            let next = if !tried.contains(&band) && rows.iter().any(|r| r.0 == band) {
+            let free = |at: &RowAt| u64::from(le16(&self.pages[at.page].data[at.value..], 0x10));
+            // Data containers (class 0) first, then metadata containers
+            // (class 1) as far as they keep room for pages; never containers
+            // not handed out yet (Windows takes data there for damage).
+            let next = if !tried.contains(&band) && rows.iter().any(|r| r.0 == band && class(r.0) == Some(0)) {
                 band
-            } else if let Some(r) = rows.iter().find(|r| !tried.contains(&r.0) && free(&r.2) > 0) {
+            } else if let Some(r) = rows
+                .iter()
+                .find(|r| !tried.contains(&r.0) && class(r.0) == Some(0) && free(&r.2) > 0)
+            {
+                r.0
+            } else if let Some(r) = rows
+                .iter()
+                .find(|r| !tried.contains(&r.0) && class(r.0) == Some(1) && free(&r.2) > METADATA_RESERVE)
+            {
                 r.0
             } else {
-                self.unpack_free(ROOT_MEDIUM_ALLOCATOR)?
+                return Err(Error::Unsupported(
+                    "no room for the data in the volume's data containers (Windows hands out more as it needs them)"
+                        .into(),
+                ));
             };
             tried.insert(next);
-            runs.extend(self.take_from_row(next, &mut left, &mut vcn)?);
+            let keep = if class(next) == Some(1) { METADATA_RESERVE } else { 0 };
+            runs.extend(self.take_from_row(next, &mut left, &mut vcn, keep)?);
         }
         Ok(runs)
     }
@@ -272,7 +288,7 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
     /// already in the row (the free clusters below it only when nothing is
     /// left above), in runs that end at the stream's clusters 1, 64, 256
     /// and multiples of 256.
-    fn take_from_row(&mut self, start: u64, left: &mut u64, vcn: &mut u64) -> Result<Vec<(u64, u64)>> {
+    fn take_from_row(&mut self, start: u64, left: &mut u64, vcn: &mut u64, keep: u64) -> Result<Vec<(u64, u64)>> {
         let (_, len, at) = self
             .bitmaps(ROOT_MEDIUM_ALLOCATOR)?
             .into_iter()
@@ -282,10 +298,12 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         let used =
             |j: u64| v[ALLOCATOR_HEADER + (j / 8) as usize] >> (j % 8) & 1 != 0 || self.freed.contains(&(start + j));
         let after = (0..len).rev().find(|&j| used(j)).map_or(0, |j| j + 1);
+        let free = u64::from(le16(v, 0x10));
+        let mut budget = free.saturating_sub(keep);
         let mut runs: Vec<(u64, u64)> = Vec::new();
         for (from, to) in [(after, len), (0, after)] {
             let mut j = from;
-            while *left > 0 && j < to {
+            while *left > 0 && budget > 0 && j < to {
                 if used(j) {
                     j += 1;
                     continue;
@@ -296,12 +314,13 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
                     _ => (*vcn / 256 + 1) * 256,
                 };
                 let mut n = 0;
-                while j + n < to && n < *left && *vcn + n < boundary && !used(j + n) {
+                while j + n < to && n < *left && n < budget && *vcn + n < boundary && !used(j + n) {
                     n += 1;
                 }
                 runs.push((j, n));
                 *left -= n;
                 *vcn += n;
+                budget -= n;
                 j += n;
             }
         }
@@ -317,26 +336,15 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         Ok(runs.into_iter().map(|(j, n)| (start + j, n)).collect())
     }
 
-    /// Turns the first block of a free uniform row (kind 2, all free) into
-    /// a bitmap row of 0x4000 free clusters, as Windows keeps rows in use;
-    /// its start.
-    fn unpack_free(&mut self, allocator: usize) -> Result<u64> {
-        let rows = self.rows(Tree::Root(allocator), &|_| true)?;
-        let start = rows
-            .iter()
-            .map(|r| &self.pages[r.page].data[r.value..r.value + r.len])
-            .find(|v| {
-                v.len() == 0x18 && le16(v, 0x12) == 2 && le16(v, 0x10) == 0xffff && le64(v, 8).is_multiple_of(0x4000)
-            })
-            .map(|v| le64(v, 0))
-            .ok_or_else(|| Error::Unsupported("the volume is full".into()))?;
-        self.unpack(allocator, start)?;
-        Ok(start)
-    }
-
     /// `n` free clusters of an allocator, aligned to `n`, marked used.
     fn take(&mut self, allocator: usize, n: usize) -> Result<Vec<u64>> {
         for (start, count, at) in self.bitmaps(allocator)? {
+            // Pages of the medium allocator go to metadata containers.
+            if allocator == ROOT_MEDIUM_ALLOCATOR
+                && self.vol.container_classes.range(..=start).next_back().map(|(_, &c)| c) != Some(1)
+            {
+                continue;
+            }
             let v = &self.pages[at.page].data[at.value..at.value + at.len];
             if (le16(v, 0x10) as usize) < n {
                 continue;
@@ -1427,10 +1435,16 @@ impl<D: WriteAt> Volume<D> {
     /// name row with the record and a file id row in the directory, whose
     /// times become `now`. The name must be printable ASCII for now.
     pub fn create_file(&mut self, path: &str, data: &[u8], now: u64) -> Result<()> {
+        self.create_file_from(path, &data, now)
+    }
+
+    /// Creates a file as `create_file` does, its data read from `data` run
+    /// by run.
+    pub fn create_file_from(&mut self, path: &str, data: &dyn Source, now: u64) -> Result<()> {
         let trimmed = path.trim_end_matches('/');
         let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
         check_name(name)?;
-        if data.len() as u64 > MAX_CREATED {
+        if data.len() > MAX_CREATED {
             return Err(Error::Unsupported(format!("files of more than {MAX_CREATED} bytes")));
         }
         match self.lookup(trimmed) {
@@ -1460,7 +1474,7 @@ impl<D: WriteAt> Volume<D> {
             let next_id = used.max(tx.last_file_id(dir)?) + 1;
             tx.set_last_file_id(dir, next_id)?;
 
-            let band = if data.len() > MAX_INLINE {
+            let band = if data.len() > MAX_INLINE as u64 {
                 Some(self.data_band(dir)?)
             } else {
                 None
@@ -1498,7 +1512,7 @@ impl<D: WriteAt> Volume<D> {
         &self,
         tx: &mut Transaction<'_, D>,
         band: Option<u64>,
-        data: &[u8],
+        data: &dyn Source,
         file: NewRecord,
     ) -> Result<Vec<u8>> {
         let NewRecord {
@@ -1508,21 +1522,21 @@ impl<D: WriteAt> Volume<D> {
             integrity,
             ..
         } = file;
-        let Some(band) = band.filter(|_| data.len() > MAX_INLINE) else {
-            let mut record = resident_record(data, now, id, security);
+        let Some(band) = band.filter(|_| data.len() > MAX_INLINE as u64) else {
+            let mut record = resident_record(&all_of(data)?, now, id, security);
             if integrity {
                 set_integrity_bits(&mut record, self.integrity_kind())?;
             }
             return Ok(record);
         };
-        if integrity && data.len() > MAX_INTEGRITY {
+        if integrity && data.len() > MAX_INTEGRITY as u64 {
             return Err(Error::Unsupported(format!(
                 "integrity streams of more than {MAX_INTEGRITY} bytes"
             )));
         }
         let (extents, allocated) = self.write_data(tx, band, data, integrity)?;
-        let live = self.map_value(tx, file.table, data.len() as u64, allocated, &extents)?;
-        let mut record = extent_record(data.len() as u64, allocated, live, now, id, security);
+        let live = self.map_value(tx, file.table, data.len(), allocated, &extents)?;
+        let mut record = extent_record(data.len(), allocated, live, now, id, security);
         if integrity {
             let a = le32(&record, 0x48) | INTEGRITY;
             record[0x48..0x4c].copy_from_slice(&a.to_le_bytes());
@@ -1539,20 +1553,20 @@ impl<D: WriteAt> Volume<D> {
         &self,
         tx: &mut Transaction<'_, D>,
         band: u64,
-        data: &[u8],
+        data: &dyn Source,
         integrity: bool,
     ) -> Result<(Vec<(u64, u64, u64, Vec<u8>)>, u64)> {
-        let clusters = (data.len() as u64).div_ceil(self.cluster);
+        let clusters = data.len().div_ceil(self.cluster);
         let runs = tx.take_data(band, clusters)?;
-        let mut at = 0usize;
+        let mut at = 0u64;
         let mut extents = Vec::new();
         for &(lcn, n) in &runs {
-            let len = ((n * self.cluster) as usize).min(data.len() - at);
+            let len = (n * self.cluster).min(data.len() - at);
             let mut buf = vec![0u8; (n * self.cluster) as usize];
-            buf[..len].copy_from_slice(&data[at..at + len]);
+            data.read_into(at, &mut buf[..len as usize])?;
             self.write_clusters(lcn, &buf)?;
             let sums = if integrity { self.checksums_of(&buf) } else { Vec::new() };
-            extents.push(((at as u64) / self.cluster, self.virtual_of(lcn)?, n, sums));
+            extents.push((at / self.cluster, self.virtual_of(lcn)?, n, sums));
             at += len;
         }
         self.dev.flush()?;
@@ -1595,7 +1609,8 @@ impl<D: WriteAt> Volume<D> {
         put(&mut page, h, 0x28);
         put(&mut page, h + 4, (0x28 + used) as u32);
         put(&mut page, h + 8, (index - 0x28 - used) as u32);
-        page[h + 0x0c..h + 0x10].copy_from_slice(&[0, 0x0c, 0, 0]);
+        // The value node's flags but the root's (2).
+        page[h + 0x0c..h + 0x10].copy_from_slice(&[0, node[0x0d] & !2, 0, 0]);
         put(&mut page, h + 0x10, index as u32);
         put(&mut page, h + 0x14, n as u32);
         put(&mut page, h + 0x20, area as u32);
@@ -1665,7 +1680,13 @@ impl<D: WriteAt> Volume<D> {
     /// integrity checksums or a reparse point are refused for now, and so
     /// are files with data clusters on volumes with shared clusters.
     pub fn write_file(&mut self, path: &str, data: &[u8], now: u64) -> Result<()> {
-        if data.len() as u64 > MAX_CREATED {
+        self.write_file_from(path, &data, now)
+    }
+
+    /// Replaces a file's content as `write_file` does, the new data read
+    /// from `data` run by run.
+    pub fn write_file_from(&mut self, path: &str, data: &dyn Source, now: u64) -> Result<()> {
+        if data.len() > MAX_CREATED {
             return Err(Error::Unsupported(format!("files of more than {MAX_CREATED} bytes")));
         }
         let FileAt {
@@ -1693,7 +1714,7 @@ impl<D: WriteAt> Volume<D> {
                 content: crate::file::Content::Extents(x),
                 ..
             }) if x.iter().any(|x| x.checksums.is_some()));
-        let band = if data.len() > MAX_INLINE {
+        let band = if data.len() > MAX_INLINE as u64 {
             Some(self.data_band(dir)?)
         } else {
             None
@@ -2212,7 +2233,7 @@ impl<D: WriteAt> Volume<D> {
         let band = self.data_band(file.dir)?;
         {
             let mut tx = Transaction::begin(&*self)?;
-            let (extents, allocated) = self.write_data(&mut tx, band, data, false)?;
+            let (extents, allocated) = self.write_data(&mut tx, band, &data, false)?;
             let mut rows = embedded_rows(&file.record)?;
             rows.retain(|r| !is_stream_row(r, Some(stream)));
             insert_attribute(
@@ -2722,6 +2743,41 @@ const INTEGRITY: u32 = 0x8000;
 const MAX_INTEGRITY: usize = 8 << 20;
 /// A data band that names no allocator row (data goes where there is room).
 const NO_BAND: u64 = u64::MAX;
+/// Free clusters data leaves in a metadata container's row (for pages).
+const METADATA_RESERVE: u64 = 1024;
+
+/// What a file's data is written from, piece by piece (a file, a buffer):
+/// the writer reads it run by run instead of holding it whole.
+pub trait Source {
+    /// Its length in bytes.
+    fn len(&self) -> u64;
+    /// Fills `buf` with its bytes from `offset` (within its length).
+    fn read_into(&self, offset: u64, buf: &mut [u8]) -> Result<()>;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Source for &[u8] {
+    fn len(&self) -> u64 {
+        <[u8]>::len(self) as u64
+    }
+    fn read_into(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        let at = offset as usize;
+        let src = self
+            .get(at..at + buf.len())
+            .ok_or_else(|| format_err!("reading past the end of the data"))?;
+        buf.copy_from_slice(src);
+        Ok(())
+    }
+}
+
+/// All of a (small) source's bytes.
+fn all_of(data: &dyn Source) -> Result<Vec<u8>> {
+    let mut v = vec![0u8; data.len() as usize];
+    data.read_into(0, &mut v)?;
+    Ok(v)
+}
 /// The largest extent map kept in its level's value; larger ones go to a
 /// page of their own.
 const MAP_INLINE: usize = 2048;
@@ -2918,7 +2974,7 @@ fn file_id_row(id: u64, utf16: &[u8]) -> (Vec<u8>, Vec<u8>) {
 /// Files `refs create` makes keep up to this much data in their record;
 /// larger ones up to the next limit get data clusters.
 const MAX_INLINE: usize = 1024;
-const MAX_CREATED: u64 = 64 << 20;
+const MAX_CREATED: u64 = 4 << 30;
 
 /// The record of a file whose data is in extents, as Windows writes it:
 /// the level set's header row (id 8) and the live level (id 0x1000) whose
@@ -3008,7 +3064,11 @@ fn level_value(size: u64, allocated: u64, extents: &[(u64, u64, u64, Vec<u8>)], 
     put32(&mut v, h, 0x28);
     put32(&mut v, h + 4, (0x28 + used) as u32);
     put32(&mut v, h + 8, free as u32);
-    v[h + 0x0c..h + 0x10].copy_from_slice(&[0, 0x0e, 0, 0]);
+    // Node flag 8: the key index entries carry each record's first
+    // cluster in the stream (their high half); when one is past 0xffff,
+    // Windows leaves the flag out and puts 0xffff in all of them.
+    let small = extents.iter().all(|x| x.0 <= 0xffff);
+    v[h + 0x0c..h + 0x10].copy_from_slice(&[0, if small { 0x0e } else { 0x06 }, 0, 0]);
     put32(&mut v, h + 0x10, index as u32);
     put32(&mut v, h + 0x14, n as u32);
     put32(&mut v, h + 0x20, (index + 4 * n) as u32);
@@ -3025,7 +3085,7 @@ fn level_value(size: u64, allocated: u64, extents: &[(u64, u64, u64, Vec<u8>)], 
         put32(
             &mut v,
             h + index + 4 * i,
-            at as u32 | (((*vcn).min(0xffff) as u32) << 16),
+            at as u32 | ((if small { *vcn as u32 } else { 0xffff }) << 16),
         );
         at += slots[i];
     }

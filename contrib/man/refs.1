@@ -181,7 +181,9 @@ With
 .B \-\-rw
 (one image, disk or partition; not
 .BR \-\-space )
-the mount writes: files (up to 64 MiB, written back whole when closed),
+the mount writes: files (written back whole when closed; the size
+limit is that of
+.BR create ),
 directories, renames, hard links, times, the read-only attribute and
 named streams, each change one transaction as the writing commands make
 it. Experimental. The helper
@@ -238,7 +240,9 @@ Experimental; only with
 .B create
 Create a file with the content of
 .I local-file
-(empty without), up to 64 MiB, named in printable ASCII. It takes the
+(empty without), up to what one page of extent map holds (about 500
+MiB on 4 KiB clusters, more on 64 KiB ones), named in printable ASCII,
+read from it piece by piece. It takes the
 permissions of the files beside it. Experimental; only with
 .BR \-\-yes .
 .TP
@@ -265,7 +269,9 @@ Replace a file's content with that of
 or with
 .B \-\-append
 add it to the end; the file keeps its creation time, attributes,
-permissions and named streams (up to 64 MiB, 8 MiB for integrity
+permissions and named streams (as large as
+.B create
+takes, 8 MiB for integrity
 streams; not files with snapshots or streams in clusters). With
 .BI \-\-stream " name"
 it writes that named stream instead (small ones stay in the file's
