@@ -702,6 +702,7 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         put(d, h + 8, (free - size - 4) as u32);
         put(d, h + 0x10, (index - 4) as u32);
         put(d, h + 0x14, (rows + 1) as u32);
+        self.set_deltas(page)?;
         if count {
             self.count_rows(page, 1);
         }
@@ -818,6 +819,7 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         if 0x28 + used > index {
             return Err(format_err!("{} bytes of rows for a node of {area}", used));
         }
+        let base = le64(d, h + 0x18);
         d[h..].fill(0);
         let put = |d: &mut Vec<u8>, at: usize, v: u32| d[at..at + 4].copy_from_slice(&v.to_le_bytes());
         let mut at = 0x28;
@@ -839,7 +841,8 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         put(d, h + 0x10, index as u32);
         put(d, h + 0x14, rows.len() as u32);
         put(d, h + 0x20, area as u32);
-        Ok(())
+        d[h + 0x18..h + 0x20].copy_from_slice(&base.to_le_bytes());
+        self.set_deltas(page)
     }
 
     /// A new page below `parent` (the table's root lends its header; no
@@ -878,6 +881,13 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
     /// two new pages; another page keeps its first half, a new page after it
     /// takes the rest, and the parent gets a row for the first half.
     fn split(&mut self, tree: Tree, page: usize, order: &dyn Fn(&[u8], &[u8]) -> std::cmp::Ordering) -> Result<()> {
+        // The container tables and the small allocator (kept at physical
+        // clusters) are not split.
+        if matches!(tree, Tree::Root(7 | 8 | 12)) {
+            return Err(Error::Unsupported(format!(
+                "splitting a page of table {tree:?} (a container table or the small allocator)"
+            )));
+        }
         let d = &self.pages[page].data;
         let h = PAGE_HEADER_SIZE + le32(d, PAGE_HEADER_SIZE) as usize;
         let (level, flags) = (d[h + 0x0c], d[h + 0x0d]);
@@ -893,7 +903,15 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
             k += 1;
         }
         let (left, right) = rows.split_at(k);
-        let last_left = left.last().unwrap().0.clone();
+        let mut last_left = left.last().unwrap().0.clone();
+        // Windows indexes the pages of its allocator tables by the last
+        // cluster they cover: (start + count - 1 of the last row, 1).
+        if matches!(tree, Tree::Root(1 | 2)) && level == 0 && last_left.len() == 16 {
+            let last = le64(&last_left, 0)
+                .saturating_add(le64(&last_left, 8))
+                .saturating_sub(1);
+            last_left = [last.to_le_bytes(), 1u64.to_le_bytes()].concat();
+        }
         // Children of the page (copied in this transaction) move with their
         // rows: those of the second half, and all of them when the root
         // splits (its children go to the two new pages).
@@ -917,7 +935,13 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
                     (last_left.clone(), self.index_row(&last_left)?),
                     (Vec::new(), self.index_row(&[])?),
                 ];
-                self.write_node(page, level + 1, NODE_INDEX | NODE_ROOT, &index)?;
+                // Windows' allocator roots over pages: flags 0xf.
+                let index_flags = if matches!(tree, Tree::Root(1 | 2)) {
+                    child_flags | NODE_INDEX | NODE_ROOT | NODE_DELTAS
+                } else {
+                    NODE_INDEX | NODE_ROOT
+                };
+                self.write_node(page, level + 1, index_flags, &index)?;
                 self.count_pages(tree, 2);
             }
             Some((parent, key)) => {
@@ -954,6 +978,48 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         Ok(())
     }
 
+    /// Node flag 8 (NODE_DELTAS): each key index entry carries in its high
+    /// half its row key's first u64 less a base the node header keeps at
+    /// 0x18 (Windows makes it the first key less 1); Windows takes an
+    /// entry that does not match for an invalid page. When a key does not
+    /// fit (below the base, or 0xffff or more past it, nor past the first
+    /// key less 1), the node goes without the flag, as Windows leaves it:
+    /// base 0, 0xffff in every entry.
+    fn set_deltas(&mut self, page: usize) -> Result<()> {
+        let d = &mut self.pages[page].data;
+        let h = PAGE_HEADER_SIZE + le32(d, PAGE_HEADER_SIZE) as usize;
+        if d[h + 0x0d] & NODE_DELTAS == 0 {
+            return Ok(());
+        }
+        let (index, count) = (le32(d, h + 0x10) as usize, le32(d, h + 0x14) as usize);
+        let at = |o: usize, n: usize| d.get(o..o + n).ok_or_else(|| format_err!("a key index past its page"));
+        let mut keys = Vec::with_capacity(count);
+        for i in 0..count {
+            let r = h + (le32(at(h + index + 4 * i, 4)?, 0) & 0xffff) as usize;
+            let (ko, kl) = (le16(at(r + 4, 2)?, 0) as usize, le16(at(r + 6, 2)?, 0) as usize);
+            keys.push(if kl >= 8 { Some(le64(at(r + ko, 8)?, 0)) } else { None });
+        }
+        let fits = |base: u64| keys.iter().flatten().all(|&k| k >= base && k - base < 0xffff);
+        let first = keys.iter().flatten().next().map(|k| k.saturating_sub(1));
+        let base = Some(le64(d, h + 0x18))
+            .filter(|&b| fits(b))
+            .or(first.filter(|&b| fits(b)));
+        if base.is_none() {
+            d[h + 0x0d] &= !NODE_DELTAS;
+        }
+        d[h + 0x18..h + 0x20].copy_from_slice(&base.unwrap_or(0).to_le_bytes());
+        for (i, k) in keys.iter().enumerate() {
+            let delta = match (base, k) {
+                (Some(b), Some(k)) => (k - b) as u32,
+                _ => 0xffff,
+            };
+            let at = h + index + 4 * i;
+            let e = (delta << 16) | (le32(d, at) & 0xffff);
+            d[at..at + 4].copy_from_slice(&e.to_le_bytes());
+        }
+        Ok(())
+    }
+
     /// Moves a leaf page's rows together (in key order) so that its free
     /// space is all at the end of the row area.
     fn compact(&mut self, page: usize) -> Result<()> {
@@ -967,19 +1033,21 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         );
         let mut rows = Vec::with_capacity(count);
         for i in 0..count {
-            let at = (le32(d, h + index + 4 * i) & 0xffff) as usize;
+            let entry = le32(d, h + index + 4 * i);
+            let at = (entry & 0xffff) as usize;
             let size = le32(d, h + at) as usize;
-            rows.push(
+            rows.push((
+                entry & 0xffff_0000,
                 d.get(h + at..h + at + size)
                     .ok_or_else(|| format_err!("row outside its page"))?
                     .to_vec(),
-            );
+            ));
         }
         let mut at = start;
         d[h + start..h + index].fill(0);
-        for (i, r) in rows.iter().enumerate() {
+        for (i, (high, r)) in rows.iter().enumerate() {
             d[h + at..h + at + r.len()].copy_from_slice(r);
-            let entry = 0xffff_0000u32 | at as u32;
+            let entry = high | at as u32;
             d[h + index + 4 * i..h + index + 4 * i + 4].copy_from_slice(&entry.to_le_bytes());
             at += r.len();
         }
@@ -3038,6 +3106,8 @@ const ROW_LAST: u16 = 2;
 /// Node flags: an index node, the table's root.
 const NODE_INDEX: u8 = 1;
 const NODE_ROOT: u8 = 2;
+/// Key index entries carry key deltas (see Transaction::set_deltas).
+const NODE_DELTAS: u8 = 8;
 /// The row flag of removed rows (they stay in the row area).
 const ROW_DELETED: u16 = 4;
 const ROW_FILE_ID: u16 = 0x20;

@@ -766,8 +766,12 @@ rows of thin spaces not allocated yet (M7).
   into data containers, then metadata ones. New data containers are
   handed out as Windows does (container tables and small allocator
   copied on write; full containers packed into uniform rows); Windows
-  read 150 MB written so and wrote on. Not done: extent maps of more
-  than one page, splitting the medium allocator's leaves.
+  read 150 MB written so and wrote on. The medium allocator's leaves
+  split as Windows indexes them (keys (last cluster, 1)); nodes with
+  flag 8 carry key deltas against a base in their header, which Windows
+  checks, and the writer keeps them (Windows read a three-leaf allocator
+  made so, wrote on and merged it back). Not done: extent maps of more
+  than one page.
   Volume::update_file changes a file's data in place as Windows does
   (changed bytes where they are, new runs after the file's own, a tail
   freed); the mount writes files back that way, so appending to a large

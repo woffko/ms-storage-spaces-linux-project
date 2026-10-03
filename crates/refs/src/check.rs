@@ -124,12 +124,36 @@ fn page_problems(page: &[u8]) -> Option<String> {
         return Some(format!("rows end at {o:#x}, the header says {end:#x}"));
     }
     let index_node = page.get(h + 0x0c).is_some_and(|&l| l > 0);
+    // Node flag 8: the entries' high halves carry their keys' first u64
+    // less the base at 0x18 (where it fits).
+    let deltas = page.get(h + 0x0d).is_some_and(|&f| f & 8 != 0);
+    let base = page
+        .get(h + 0x18..h + 0x20)
+        .map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()));
     let mut live = 0;
     for i in 0..count {
-        let e = u32_at(h + index + 4 * i)? & 0xffff;
+        let entry = u32_at(h + index + 4 * i)?;
+        let e = entry & 0xffff;
         let Some(&(size, flags)) = rows.get(&e) else {
             return Some(format!("key index entry {i} names no row ({e:#x})"));
         };
+        let (ko, kl) = (le16(page, h + e + 4) as usize, le16(page, h + e + 6) as usize);
+        let key0 = page
+            .get(h + e + ko..h + e + ko + 8)
+            .filter(|_| kl >= 8)
+            .map(|k| u64::from_le_bytes(k.try_into().unwrap()));
+        if deltas
+            && let Some(k) = key0
+            && k >= base
+            && k - base < 0xffff
+            && (entry >> 16) as u64 != k - base
+        {
+            return Some(format!(
+                "key index entry {i} carries {:#x}, its key less the base {:#x}",
+                entry >> 16,
+                k - base
+            ));
+        }
         if flags & 4 != 0 {
             return Some(format!("key index entry {i} names a removed row"));
         }

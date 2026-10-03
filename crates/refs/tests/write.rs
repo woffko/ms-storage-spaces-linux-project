@@ -154,6 +154,10 @@ fn assert_pages_valid<D: ReadAt>(vol: &Volume<D>, skip: &[u64], what: &str) {
             );
         }
     }
+    // The rest of what `refs check` looks at (key deltas, allocators,
+    // reference counts).
+    let report = vol.check(skip).unwrap();
+    assert!(report.problems.is_empty(), "{what}: {:?}", report.problems);
 }
 
 /// The clusters an allocator marks used.

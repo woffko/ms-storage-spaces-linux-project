@@ -163,6 +163,24 @@ table's descriptor (page + 0x50, or a record's start) counts the table's
 rows at 0x20. A row: u32 size (8-aligned), u16 key offset (0x10), u16
 key length, u16 flags (1 on name rows whose value embeds a record, 4 on
 removed rows), u16 value offset (8-aligned), u16 value length.
+
+Node flag 8 (key deltas): the high half of every key index entry holds
+the first u64 of its row's key less a base the node header keeps at
+0x18 (u64); Windows makes the base the node's first key less 1 and keeps
+it while the node changes (the medium allocator's index root: base
+0x87ffe, entries 0x0001 for (0x87fff, 1) and 0xc001 for (0x93fff, 1);
+the small allocator: base 0x23, 0x0001 for 0x24 and 0x3fdd for 0x4000;
+the block reference count table: base 0x300bff, entries 0x0001, 0x0401,
+0x0801, 0x0c01; extent maps: base 0, the first cluster in the stream).
+Keyless rows carry 0xffff. When a key does not fit (below the base, or
+0xffff or more above it), the node goes without the flag, base 0 and
+0xffff in every entry (allocator leaves, flags 4; extent maps past
+cluster 0xffff). Windows takes a node with the flag whose entries do not
+match for an invalid page (**verified**: 0xffff for a key that fits
+made the medium allocator invalid, the delta made it valid); without
+the flag the high halves are not looked at (the container allocator's
+leaf, flags 6, keeps stale deltas on three of its rows). `refs check`
+checks the deltas, and the writer keeps them in every node it changes.
 (**verified**: rows `refs` inserts this way are found by Windows.)
 
 Removing a row leaves it in place with flag 4 and drops its key index
@@ -340,9 +358,20 @@ table's rows for a text diff):
   clusters of each for pages); pages into metadata containers
   (**verified**: Windows read 150 MB written so on a small volume and
   100 MB on an empty one, wrote 100 MB more, refsutil leak and triage as
-  for the untouched volumes). Splitting a leaf of the medium allocator
-  is avoided: Windows' index rows there hold (last cluster, 1) and took
-  `refs`' split for a damaged page.
+  for the untouched volumes).
+* The allocator tables (roots 1, 2) index their pages by the last
+  cluster a page covers: index row keys (last cluster, 1), not the last
+  row's key, in an index root with flags 0xf (key deltas) over leaves
+  with flags 4. Windows balances rows between the two leaves of the
+  medium allocator before it adds a page (after freeing in a 52 GB
+  volume: (0x87fff, 1) became (0x93fff, 1) and three rows moved left).
+  `refs` splits a full leaf in two with such a key and its delta
+  (**verified**: Windows read a medium allocator of three leaves made so
+  when freeing 60 MB unpacked uniform rows, wrote 150 MB and deleted
+  30 MB into it, leak and triage as for the untouched volumes, and
+  merged the leaves back into two; with 0xffff in the new entry it took
+  the allocator for an invalid page). The container tables and the small
+  allocator (at physical clusters) are not split.
 * The small allocator (root 12) has a row of 12 clusters (bitmap padded
   with set bits to whole bytes) beside one of a container.
 * Allocator rows (roots 1, 2) are bitmaps of a cluster range with a count
@@ -463,9 +492,10 @@ table's rows for a text diff):
   is the page's reference (0x18 of the value: 1). The page: the header of
   its table's pages (0x48: the directory holding the record), the u32 8
   at 0x50, a leaf node (flags 0x0c) of the records, keyed as in the
-  value. Node flag 8 (0x0e in values, 0x0c in pages) means the key index
-  entries carry each record's first cluster in the stream in their high
-  half; a map with a record past cluster 0xffff leaves it out (0x06,
+  value. Node flag 8 (0x0e in values, 0x0c in pages; key deltas, base 0)
+  means the key index entries carry each record's first cluster in the
+  stream in their high half; a map with a record past cluster 0xffff
+  leaves it out (0x06,
   0x04) and has 0xffff in every entry (Windows' sparse file of 1 GiB;
   Windows takes a file whose entries are cut to 16 bits for damaged and
   drops it, **verified**). Deleting or rewriting the data frees those pages too
