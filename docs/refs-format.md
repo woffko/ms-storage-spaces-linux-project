@@ -381,7 +381,9 @@ that holds its place in the stream.
   one file, appended to a second, cut a third to 100 000 bytes, cloned a
   fourth and deleted a fifth: Windows read every file with the expected
   SHA-256, `refsutil leak` found the volume's 376 and triage nothing, and
-  Windows then changed compressed files itself; on another copy `refs`
+  Windows then changed compressed files itself; the same through the
+  read-write mount (`>>`, `dd conv=notrunc`, `cp`, `truncate`, `rm`);
+  on another copy `refs`
   deleted all 40 text files: the block reference count table, the
   container table and root 10 came out as Windows wrote them when it
   deleted those files, leak 376 as on Windows' image; before the type 5
