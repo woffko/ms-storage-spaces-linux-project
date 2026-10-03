@@ -725,8 +725,9 @@ rows of thin spaces not allocated yet (M7).
   grew to three levels; Windows read it, added 300 files and deleted 267
   there). Times, attributes and data of moved or linked files change in
   their record and in the index entry of the name used, as on Windows.
-  Next: named streams, integrity streams, directories (rename, move,
-  delete).
+  Directories are renamed, moved (not below themselves) and deleted
+  when empty, with Windows' rows. Next: named streams, integrity
+  streams.
 
 ## Test infrastructure (continuous, feeds every stage)
 

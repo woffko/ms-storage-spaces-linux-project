@@ -461,19 +461,19 @@ and sets the modification and change times to now. `refs create` makes a
 file (up to 1 KiB kept in its record, up to 64 MiB in clusters near the
 data of the files around it) with a printable ASCII name, in a directory
 of any size (its pages split as it grows and merge as it shrinks); it
-takes the permissions of the files beside it. `refs rename` renames a file within its directory and
-`refs delete` deletes it (for a hard-linked file: the one name);
-deleting a file's last name with data clusters is refused on volumes
-with block-cloned or deduplicated clusters. `refs mkdir` creates a
-directory; `refs write` replaces a file's content (or appends to it with
+takes the permissions of the files beside it. `refs rename` renames a
+file or directory within its directory and `refs delete` deletes a file
+(for a hard-linked file: the one name) or an empty directory; deleting a
+file's last name with data clusters is refused on volumes with
+block-cloned or deduplicated clusters. `refs mkdir` creates a directory;
+`refs write` replaces a file's content (or appends to it with
 `--append`), keeping its creation time, attributes and permissions.
-`refs move` moves a file into another directory and `refs link` gives it
-another name (a hard link); changing a hard-linked file through one name
-changes it for all of them.
+`refs move` moves a file or directory into another directory and `refs
+link` gives a file another name (a hard link); changing a hard-linked
+file through one name changes it for all of them.
 
 It writes the way Windows does (copy on write, then a new checkpoint), so
-an interruption leaves the volume as it was before. Renaming, moving and
-deleting directories are refused for now.
+an interruption leaves the volume as it was before.
 
 Read: files (resident, in extents, sparse, block-cloned, deduplicated),
 directories of any size, named streams, stream snapshots (`refsutil

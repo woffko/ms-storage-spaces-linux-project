@@ -362,6 +362,16 @@ table's rows for a text diff):
   updated), its file id row gets the new name, and the directory gets new
   times in its own row and in its entry in the parent. Deleting (step
   `delete`): both rows are removed, the directory gets new times.
+* Renaming or moving a directory (steps `rename`, `move`): its entry
+  (key flags 2, value unchanged) leaves the old parent and goes to the
+  new one under the new name, the link row of its own record (row 0x10)
+  names the new parent and name, its parent-child row (root 4) names the
+  new parent, and both parents get new times (their own rows, and their
+  entries in their parents). Deleting an empty directory (step `delete`)
+  removes its entry, its rows in both object tables and its parent-child
+  row and frees its pages; the parent gets new times. `refs` writes
+  these rows as Windows does (**verified**: equal rows but for the order
+  of the record's rows).
 * Creating a file (step `create`) adds two rows to its directory: the
   name row (type 0x30) with the embedded record, and a row of type 0x20
   (key: 0x20, flags 0x8000, the file id as u64 at 8; value: the name's

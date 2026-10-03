@@ -217,9 +217,10 @@ permissions of the files beside it. Experimental; only with
 .BR \-\-yes .
 .TP
 .BR rename ", " delete
-Rename a file within its directory, or delete it (one name of a hard
-link; deleting the last name of a file with data clusters is refused on
-volumes with cloned or deduplicated clusters). Experimental; only with
+Rename a file or directory within its directory, or delete a file (one
+name of a hard link; deleting the last name of a file with data clusters
+is refused on volumes with cloned or deduplicated clusters) or an empty
+directory. Experimental; only with
 .BR \-\-yes .
 .TP
 .B mkdir
@@ -227,8 +228,8 @@ Create a directory. Experimental; only with
 .BR \-\-yes .
 .TP
 .BR move ", " link
-Move a file into another directory, or give it another name (a hard
-link). Experimental; only with
+Move a file or directory into another directory, or give a file another
+name (a hard link). Experimental; only with
 .BR \-\-yes .
 .TP
 .B write

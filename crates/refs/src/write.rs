@@ -889,6 +889,25 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         Ok(())
     }
 
+    /// A whole table leaves the volume (a deleted directory's): its pages
+    /// are not written and their clusters become free.
+    fn drop_tree(&mut self, tree: Tree) -> Result<()> {
+        self.rows(tree, &|_| false)?;
+        let allocator = tree.allocator()?;
+        for i in 0..self.pages.len() {
+            if self.pages[i].tree == tree {
+                self.pages[i].dirty = false;
+                self.pages[i].parent = None;
+                let old = std::mem::take(&mut self.pages[i].old);
+                if !old.is_empty() {
+                    self.release(allocator, &old)?;
+                }
+            }
+        }
+        self.roots.remove(&tree);
+        Ok(())
+    }
+
     /// A page left out of its table: not written, its clusters free, one
     /// page fewer below the root.
     fn forget(&mut self, page: usize) -> Result<()> {
@@ -1369,6 +1388,9 @@ impl<D: WriteAt> Volume<D> {
     /// (refused on volumes with shared clusters); for a moved or linked
     /// file see `unlink`.
     pub fn delete_file(&mut self, path: &str, now: u64) -> Result<()> {
+        if let Target::Directory(oid) = self.lookup(path.trim_end_matches('/'))?.target {
+            return self.delete_directory(path, oid, now);
+        }
         let file = self.file_at(path)?;
         if let Some(home) = file.home {
             return self.unlink(file, home, now);
@@ -1402,8 +1424,13 @@ impl<D: WriteAt> Volume<D> {
         self.load()
     }
 
-    /// Renames a file within its directory.
+    /// Renames a file or directory within its directory.
     pub fn rename(&mut self, path: &str, new_name: &str, now: u64) -> Result<()> {
+        let trimmed = path.trim_end_matches('/');
+        if let Target::Directory(_) = self.lookup(trimmed)?.target {
+            let parent = trimmed.rsplit_once('/').map_or("", |(p, _)| p);
+            return self.move_directory(path, &format!("{parent}/{new_name}"), now);
+        }
         let file = self.file_at(path)?;
         check_name(new_name)?;
         let target = format!("{}/{new_name}", file.parent.trim_end_matches('/'));
@@ -1464,7 +1491,142 @@ impl<D: WriteAt> Volume<D> {
     /// its new directory and name, its file id row there names the home,
     /// and the new directory gets an index entry pointing at the home.
     pub fn move_file(&mut self, path: &str, to: &str, now: u64) -> Result<()> {
+        if let Target::Directory(_) = self.lookup(path.trim_end_matches('/'))?.target {
+            return self.move_directory(path, to, now);
+        }
         self.split_file(path, to, false, now)
+    }
+
+    /// Moves or renames a directory, as Windows does: its entry (times
+    /// and all) goes to the new parent under the new name, the link row of
+    /// its own record names them, its parent-child row follows, and the
+    /// parents get new times. Moving a directory below itself, and junctions,
+    /// are refused.
+    fn move_directory(&mut self, path: &str, to: &str, now: u64) -> Result<()> {
+        let trimmed = path.trim_end_matches('/');
+        let parent = trimmed.rsplit_once('/').map_or("", |(p, _)| p);
+        let entry = self.lookup(trimmed)?;
+        let Target::Directory(oid) = entry.target else {
+            return Err(Error::Unsupported(format!("{path} is not a directory")));
+        };
+        if entry.attributes & 0x400 != 0 || oid == ROOT_DIRECTORY {
+            return Err(Error::Unsupported(format!("{path}: a junction or the root")));
+        }
+        let to = to.trim_end_matches('/');
+        let (to_parent, to_name) = to.rsplit_once('/').unwrap_or(("", to));
+        check_name(to_name)?;
+        match self.lookup(to) {
+            Err(Error::NotFound(_)) => {}
+            Ok(_) => return Err(Error::Unsupported(format!("{to} exists"))),
+            Err(e) => return Err(e),
+        }
+        let from = self.directory_of(parent)?;
+        let target = self.directory_of(to_parent)?;
+        let mut up = target;
+        for _ in 0..4096 {
+            if up == oid {
+                return Err(Error::Unsupported(format!("{path}: moving a directory below itself")));
+            }
+            if up == ROOT_DIRECTORY {
+                break;
+            }
+            up = self.parent_of(up)?;
+        }
+        let name = entry.name.as_str();
+        {
+            let mut tx = Transaction::begin(&*self)?;
+            let at = tx.find(Tree::Object(from), &|k| is_entry_row(k, name))?;
+            let value = tx.pages[at.page].data[at.value..at.value + at.len].to_vec();
+            tx.remove_row(Tree::Object(from), &|k| is_entry_row(k, name))?;
+            let mut key = vec![ROW_NAME as u8, 0, 2, 0];
+            key.extend(utf16_bytes(to_name));
+            tx.insert_sorted(Tree::Object(target), &row(&key, &value, 0), &directory_key_order)?;
+            // Its own record names its parent and name.
+            let own = (ROW_OWN as u32).to_le_bytes();
+            let at = tx.find(Tree::Object(oid), &|k| k == own)?;
+            let record = tx.pages[at.page].data[at.value..at.value + at.len].to_vec();
+            let (_, rows) = record_names(&record)?;
+            let record = record_with_names(&record, vec![(target, utf16_bytes(to_name))], rows)?;
+            if record.len() == at.len {
+                tx.value_mut(at).copy_from_slice(&record);
+            } else {
+                tx.remove_row(Tree::Object(oid), &|k| k == own)?;
+                tx.insert_sorted(
+                    Tree::Object(oid),
+                    &row(&own, &record, ROW_EMBEDS_NODE),
+                    &directory_key_order,
+                )?;
+            }
+            if target != from {
+                let link = |p: u64| {
+                    let mut k = vec![0u8; 32];
+                    k[8..16].copy_from_slice(&p.to_le_bytes());
+                    k[24..32].copy_from_slice(&oid.to_le_bytes());
+                    k
+                };
+                let old = link(from);
+                tx.remove_row(Tree::Root(ROOT_PARENT_CHILD), &|k| k == old)?;
+                let new = link(target);
+                tx.insert_sorted(Tree::Root(ROOT_PARENT_CHILD), &row(&new, &new, 0), &u64_key_order)?;
+            }
+            self.touch_directory(&mut tx, parent, from, now)?;
+            if target != from {
+                self.touch_directory(&mut tx, to_parent, target, now)?;
+            }
+            tx.commit()?;
+        }
+        self.load()
+    }
+
+    /// Deletes an empty directory, as Windows does: its entry, its rows in
+    /// both object tables and the parent-child table go, its pages become
+    /// free, and its parent gets new times.
+    fn delete_directory(&mut self, path: &str, oid: u64, now: u64) -> Result<()> {
+        let trimmed = path.trim_end_matches('/');
+        let parent = trimmed.rsplit_once('/').map_or("", |(p, _)| p);
+        let entry = self.lookup(trimmed)?;
+        if entry.attributes & 0x400 != 0 || oid == ROOT_DIRECTORY {
+            return Err(Error::Unsupported(format!("{path}: a junction or the root")));
+        }
+        if !self.read_dir(oid)?.is_empty() {
+            return Err(Error::Unsupported(format!("{path}: the directory is not empty")));
+        }
+        let rows = self.object_rows(oid)?;
+        if rows.iter().any(|(k, _)| k.len() >= 2 && le16(k, 0) != ROW_OWN) {
+            return Err(Error::Unsupported(format!(
+                "{path}: the directory holds more than its own row"
+            )));
+        }
+        let from = self.directory_of(parent)?;
+        let name = entry.name.as_str();
+        {
+            let mut tx = Transaction::begin(&*self)?;
+            tx.remove_row(Tree::Object(from), &|k| is_entry_row(k, name))?;
+            for table in [ROOT_OBJECTS, ROOT_OBJECTS_COPY] {
+                tx.remove_row(Tree::Root(table), &|k| k.len() >= 16 && le64(k, 8) == oid)?;
+            }
+            let mut link = vec![0u8; 32];
+            link[8..16].copy_from_slice(&from.to_le_bytes());
+            link[24..32].copy_from_slice(&oid.to_le_bytes());
+            tx.remove_row(Tree::Root(ROOT_PARENT_CHILD), &|k| k == link)?;
+            tx.drop_tree(Tree::Object(oid))?;
+            self.touch_directory(&mut tx, parent, from, now)?;
+            tx.commit()?;
+        }
+        self.load()
+    }
+
+    /// The parent of a directory (the parent-child table).
+    fn parent_of(&self, oid: u64) -> Result<u64> {
+        let mut parent = None;
+        self.walk_while(&self.checkpoint.roots[ROOT_PARENT_CHILD].clone(), false, &mut |row| {
+            if row.key.len() >= 32 && le64(row.key, 24) == oid {
+                parent = Some(le64(row.key, 8));
+                return Ok(false);
+            }
+            Ok(true)
+        })?;
+        parent.ok_or_else(|| format_err!("no parent of directory {oid:#x}"))
     }
 
     /// Gives a file whose record is in its directory entry a second name

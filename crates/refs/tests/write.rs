@@ -965,3 +965,61 @@ fn deep_directories_split_and_merge_index_pages() {
     assert_allocated(&vol, &skip, "emptied");
     assert_pages_valid(&vol, &skip, "emptied");
 }
+
+#[test]
+fn renaming_moving_and_deleting_directories() {
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 134_000_000_000_000_000;
+    let before = (used(&vol, 1).len(), used(&vol, 2).len());
+    vol.create_directory("/a", now).unwrap();
+    vol.create_directory("/a/b", now).unwrap();
+    vol.create_file("/a/b/f.txt", b"in b", now).unwrap();
+    let b = vol_dir(&vol, "/a/b");
+    // Renamed, then moved elsewhere: the object stays, its entry and its
+    // parent-child row follow.
+    vol.rename("/a", "a2", now).unwrap();
+    vol.move_file("/a2/b", "/dir/b2", now).unwrap();
+    assert_eq!(vol_dir(&vol, "/dir/b2"), b);
+    assert_eq!(read_all(&vol, "/dir/b2/f.txt"), b"in b");
+    for gone in ["/a", "/a2/b"] {
+        assert!(matches!(vol.lookup(gone), Err(refs::Error::NotFound(_))), "{gone}");
+    }
+    let parent_of = |vol: &Volume<_>, oid: u64| {
+        let mut parents = Vec::new();
+        vol.walk(&vol.checkpoint.roots[4].clone(), false, &mut |row| {
+            if u64::from_le_bytes(row.key[24..32].try_into().unwrap()) == oid {
+                parents.push(u64::from_le_bytes(row.key[8..16].try_into().unwrap()));
+            }
+            Ok(())
+        })
+        .unwrap();
+        parents
+    };
+    assert_eq!(parent_of(&vol, b), vec![vol_dir(&vol, "/dir")]);
+    // Not below itself, not while it holds files.
+    for err in [
+        vol.move_file("/dir", "/dir/b2/dir", now).unwrap_err(),
+        vol.delete_file("/dir/b2", now).unwrap_err(),
+    ] {
+        assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
+    }
+    // Emptied and deleted: no object, no parent-child row, pages free.
+    vol.delete_file("/dir/b2/f.txt", now).unwrap();
+    vol.delete_file("/dir/b2", now).unwrap();
+    vol.delete_file("/a2", now).unwrap();
+    assert!(matches!(vol.lookup("/dir/b2"), Err(refs::Error::NotFound(_))));
+    assert!(vol.object(b).is_err());
+    assert!(parent_of(&vol, b).is_empty());
+    assert_eq!(
+        (used(&vol, 1).len(), used(&vol, 2).len()),
+        before,
+        "allocators as before"
+    );
+    assert_allocated(&vol, &skip, "directories");
+    assert_pages_valid(&vol, &skip, "directories");
+    let fresh = Volume::open(&overlay, offset).unwrap();
+    assert_eq!(read_all(&fresh, "/dir/inner.txt").len(), 3000);
+}
