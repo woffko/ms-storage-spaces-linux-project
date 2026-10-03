@@ -472,6 +472,33 @@ impl<D: ReadAt> Volume<D> {
         Ok(out)
     }
 
+    /// The physical clusters of the pages an extent map keeps outside its
+    /// value (large maps: the value's node is an index over pages).
+    pub(crate) fn extent_map_pages(&self, value: &[u8]) -> Result<Vec<u64>> {
+        let mut out = Vec::new();
+        self.map_pages(&Node::at(value, 0)?, 0, &mut out)?;
+        Ok(out)
+    }
+
+    fn map_pages(&self, node: &Node<'_>, depth: usize, out: &mut Vec<u64>) -> Result<()> {
+        if depth > 16 {
+            return Err(format_err!("extent map deeper than 16 levels"));
+        }
+        if node.is_leaf() {
+            return Ok(());
+        }
+        let per_page = (self.page_size / self.cluster) as usize;
+        for row in node.rows() {
+            let child = crate::page::PageRef::parse(row?.value)?;
+            for &l in &child.lcns[..per_page] {
+                out.push(self.translate(l)?);
+            }
+            let page = self.read_page(&child, false)?;
+            self.map_pages(&Node::at(&page, crate::page::PAGE_HEADER_SIZE)?, depth + 1, out)?;
+        }
+        Ok(())
+    }
+
     fn extent_node(&self, node: &Node<'_>, depth: usize, kind: u16, out: &mut Vec<Extent>) -> Result<()> {
         if depth > 16 {
             return Err(format_err!("extent map deeper than 16 levels"));

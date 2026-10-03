@@ -2039,6 +2039,7 @@ impl<D: WriteAt> Volume<D> {
                     let lcn = self.translate(x.vlcn)?;
                     clusters.extend(lcn..lcn + x.clusters);
                 }
+                clusters.extend(self.extent_map_pages(row_value(r))?);
             }
             rows.retain(|r| !of_set(r));
             let runs: Vec<(u64, u64)> = clusters.iter().map(|&c| (c, 1)).collect();
@@ -2211,10 +2212,24 @@ impl<D: WriteAt> Volume<D> {
             }
             Ok(runs)
         };
-        let runs = file.data.as_ref().map(runs_of).transpose()?.unwrap_or_default();
+        let mut runs = file.data.as_ref().map(runs_of).transpose()?.unwrap_or_default();
         let mut stream_runs = Vec::new();
         for (_, s) in &file.streams {
             stream_runs.extend(runs_of(s)?);
+        }
+        // Pages of extent maps kept outside the record go with the data.
+        for r in embedded_rows(&record)? {
+            let key = row_key(&r);
+            let data_level = key.len() >= 0x18
+                && le32(key, 8) == 0x8000_0002
+                && le32(key, 12) & 0xffff == 0x80
+                && le64(key, 0x10) >= LIVE_STREAM;
+            let set_level = is_set_row(&r) && key.len() >= 0x40 && le64(key, 0x38) >= LIVE_STREAM;
+            if data_level || set_level {
+                let pages = self.extent_map_pages(row_value(&r))?;
+                let to = if data_level { &mut runs } else { &mut stream_runs };
+                to.extend(pages.into_iter().map(|c| (c, 1)));
+            }
         }
         Ok(FileAt {
             parent: parent.to_owned(),

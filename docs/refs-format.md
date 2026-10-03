@@ -417,7 +417,12 @@ table's rows for a text diff):
   to a new place with its own record, the old one is freed. `refs`
   writes the same records and checksums (**verified**: Windows read the
   data, checking it, and went on writing); it copies a whole stream of
-  up to 2 MiB on an overwrite, on volumes of 4 KiB clusters.
+  up to 2 MiB on an overwrite, on volumes of 4 KiB clusters. A larger
+  map (6 MB of integrity stream: three records of up to 768 clusters'
+  checksums) goes to a page of its own: the level value's node becomes
+  an index node (level 1) with one row, no key, row flag 2, whose value
+  is the page's reference. Deleting or rewriting the data frees those
+  pages too (**verified**: no leak after deleting Windows' 6 MB file).
 * Creating a file (step `create`) adds two rows to its directory: the
   name row (type 0x30) with the embedded record, and a row of type 0x20
   (key: 0x20, flags 0x8000, the file id as u64 at 8; value: the name's
