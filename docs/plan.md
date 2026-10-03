@@ -610,9 +610,9 @@ rows of thin spaces not allocated yet (M7).
   every checksum so that patched pages reach the parsers). The format is in
   `docs/refs-format.md`. Open: ReFS 3.4 to 3.13 (no images yet: they need
   Windows 10 or Server 2016 to 2022).
-* B2 (in progress): `refs mount` (FUSE, read-only; streams as extended
-  attributes, links and junctions as symbolic links, hard links as one
-  inode, directory listings cached), checked against Windows' listing of
+* B2 (done but changing compressed files): `refs mount` (FUSE, read-only;
+  streams as extended attributes, links and junctions as symbolic links,
+  hard links as one inode, directory listings cached), checked against Windows' listing of
   every corpus volume by `tools/refs-mount-check.sh`; `refs --space` reads
   ReFS inside a space of a pool. Block-cloned and deduplicated files
   (`refsutil dedup`) read correctly: their extents name shared clusters.
@@ -647,9 +647,10 @@ rows of thin spaces not allocated yet (M7).
   changing compressed files (Windows copies touched clusters on write
   into ordinary containers and lowers the old ones' reference counts; the
   last reference of a compacted cluster needs a sample).
-* B4 (research): write experiments on a small volume (scenario `small`,
-  `tools/vm/Invoke-RefsSteps.ps1`, `tools/refs-diff.py`, `refs map` and
-  `refs tree`) show what one change costs: copy-on-write pages up to both
+* B4 (done for everything above, each change checked on Windows; the
+  record of that work follows): write experiments on a small volume
+  (scenario `small`, `tools/vm/Invoke-RefsSteps.ps1`, `tools/refs-diff.py`,
+  `refs map` and `refs tree`) show what one change costs: copy-on-write pages up to both
   object tables, both allocators, internal objects, MLog records and both
   checkpoints (docs/refs-format.md, "Writing"). Next: the meaning of the
   allocator, object table and checkpoint fields, the MLog layout and
@@ -1068,11 +1069,14 @@ and on spaces exposed by stage 1.
    checkpoints, container table, object table, Minstore B+-trees, directories,
    files, attributes, sparse data, ADS, reparse points, checksums. Corpus
    generated on the VM (Dev Drive / VHDX formatted ReFS) with known trees.
+   Done for 3.14; 3.4 - 3.13 need older Windows to make samples.
 2. B2 FUSE mount (`fuser`), read-only; compression (LZ4/ZSTD), block clones,
-   integrity streams, snapshots.
-3. B3 ReFS 1.x/2.x read support.
+   integrity streams, snapshots. Done.
+3. B3 ReFS 1.x/2.x read support. Blocked: needs Windows that formats them.
 4. B4 write support: copy-on-write B+-tree updates, allocators, refcounts,
-   checkpoints, logging; validated by Windows `chkdsk` / `refsutil`.
+   checkpoints, logging; validated by Windows `chkdsk` / `refsutil`. Done
+   (a read-write FUSE mount, clones, integrity streams, files with stream
+   snapshots), except changing compressed files.
 
 ## Risks
 
