@@ -756,6 +756,10 @@ rows of thin spaces not allocated yet (M7).
   deleted through it was identical to the local copy after a remount,
   and on Windows every hash matched, refsutil leak and triage were as for
   the untouched volume, and Windows deleted and copied trees there.
+  `refs check` (Volume::check) checks a volume the way the write tests
+  do: page checksums and structure, pages and file clusters used in
+  their allocators, shared clusters counted; every corpus volume and
+  every image `refs` wrote during this work checks clean.
 
 ## Test infrastructure (continuous, feeds every stage)
 

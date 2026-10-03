@@ -242,6 +242,7 @@ fn windows_volumes_mark_every_page_used() {
         let vol = Volume::open(&image, manifest["partition_offset"].as_u64().unwrap()).unwrap();
         assert_allocated(&vol, &skip, name);
         assert_pages_valid(&vol, &skip, name);
+        assert_eq!(vol.check(&skip).unwrap().problems, Vec::<String>::new(), "{name}");
     }
 }
 
@@ -1579,4 +1580,33 @@ fn writing_an_empty_volume() {
     );
     assert_allocated(&vol, &skip, "empty volume written");
     assert_pages_valid(&vol, &skip, "empty volume written");
+}
+
+#[test]
+fn checking_volumes() {
+    // Windows' volumes and ours after writing check clean; a damaged
+    // directory page does not.
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 135_100_000_000_000_000;
+    assert_eq!(vol.check(&skip).unwrap().problems, Vec::<String>::new());
+    vol.create_file("/c.bin", &vec![5; 200_000], now).unwrap();
+    vol.link_file("/c.bin", "/dir/c2.bin", now).unwrap();
+    vol.write_stream("/small.txt", "s", &[1; 9000], now).unwrap();
+    vol.delete_file("/mid.bin", now).unwrap();
+    let report = vol.check(&skip).unwrap();
+    assert_eq!(report.problems, Vec::<String>::new());
+    assert_eq!(report.files, 6, "/dir/c2.bin is /c.bin");
+    // A byte of the root directory's page changed: its checksum fails.
+    let root = vol.object(ROOT_DIRECTORY).unwrap().clone();
+    let lcn = vol.translate(root.lcns[0]).unwrap();
+    let at = offset + lcn * vol.cluster + 0x200;
+    let mut b = [0u8];
+    overlay.read_exact_at(&mut b, at).unwrap();
+    storage_spaces::io::WriteAt::write_all_at(&overlay, &[b[0] ^ 0xff], at).unwrap();
+    let damaged = Volume::open(&overlay, offset).unwrap();
+    let report = damaged.check(&skip).unwrap();
+    assert!(!report.problems.is_empty(), "the damage is found");
 }

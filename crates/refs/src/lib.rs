@@ -3,6 +3,7 @@
 //! maps virtual clusters, directories and files. See docs/refs-format.md.
 
 pub mod boot;
+pub mod check;
 pub mod checksum;
 pub mod error;
 pub mod file;

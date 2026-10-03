@@ -253,6 +253,14 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Check the volume's consistency (read-only): every page's checksum
+    /// and structure, every page and file cluster used in its allocator,
+    /// clusters several files map counted as shared. Exits with 1 on a
+    /// problem.
+    Check {
+        #[command(flatten)]
+        source: Source,
+    },
     /// Every cluster the volume uses, by physical cluster: superblocks,
     /// checkpoints, the pages of each tree, the data runs of each file
     /// (for format work: what changed between two images).
@@ -1189,6 +1197,26 @@ fn main() -> Result<()> {
                 writeln!(out, "  = {}", hex(row.value)).map_err(refs::Error::Io)?;
                 Ok(())
             })?;
+        }
+        Command::Check { source } => {
+            let vol = open_volume(&source)?;
+            let report = vol.check(&[])?;
+            writeln!(
+                out,
+                "{} pages, {} directories, {} files, {} data clusters",
+                report.pages, report.directories, report.files, report.data_clusters
+            )?;
+            for p in &report.problems {
+                writeln!(out, "problem: {p}")?;
+            }
+            if report.problem_count > report.problems.len() as u64 {
+                writeln!(out, "... {} problems in all", report.problem_count)?;
+            }
+            if report.problem_count > 0 {
+                out.flush()?;
+                std::process::exit(1);
+            }
+            writeln!(out, "no problems found")?;
         }
         Command::Map { source } => {
             let vol = open_volume(&source)?;

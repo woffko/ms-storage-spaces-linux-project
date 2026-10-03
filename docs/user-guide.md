@@ -416,6 +416,7 @@ refs stat /dev/sdb2 --path /src/main.c    # times, extents, streams, snapshots, 
 refs cat /dev/sdb2 --path /notes.txt --stream summary
 refs cat /dev/sdb2 --path /db.mdf --snapshot nightly > db-nightly.mdf
 refs ls --space Data /dev/sdd /dev/sde    # ReFS inside a space
+refs check /dev/sdb2                      # consistency, read-only (exit 1 on a problem)
 refs mount --space Data /dev/sdd /dev/sde mnt    # options before the disks
 mkdir -p mnt && refs mount /dev/sdb2 mnt  # read-only FUSE mount, foreground
 refs mount --rw image.img mnt              # for writing (experimental)

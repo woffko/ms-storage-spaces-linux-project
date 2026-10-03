@@ -207,6 +207,12 @@ lets other users read it (needs
 in
 .IR /etc/fuse.conf ).
 .TP
+.B check
+Check the volume's consistency without writing: every page's checksum
+and structure (as Windows checks pages), every page and file cluster
+used in its allocator, and clusters several files map counted in the
+block reference count table. Exits with 1 when it finds a problem.
+.TP
 .B set
 Change a file's times (UTC, "YYYY-MM-DD hh:mm:ss" or a FILETIME number)
 or attributes (the bits users can set: read-only 1, hidden 2, system 4,
