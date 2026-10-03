@@ -1148,8 +1148,7 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         for &i in &order {
             let p = &self.pages[i];
             for (k, &lcn) in p.new.as_ref().unwrap().iter().enumerate() {
-                vol.dev
-                    .write_all_at(&p.data[k * cluster..(k + 1) * cluster], vol.offset + lcn * vol.cluster)?;
+                vol.write_clusters(lcn, &p.data[k * cluster..(k + 1) * cluster])?;
             }
         }
         vol.dev.flush()?;
@@ -1185,9 +1184,33 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
             .ok_or_else(|| format_err!("checkpoint reference outside the page"))?
             .fill(0);
         store_reference(&mut new[own..own + own_size], &[slot], &zeroed)?;
-        vol.dev.write_all_at(&new, vol.offset + slot * vol.cluster)?;
+        vol.write_clusters(slot, &new)?;
         vol.dev.flush()?;
         Ok(())
+    }
+}
+
+impl<D: WriteAt> Volume<D> {
+    /// Writes `data` from byte `at` of the volume; whatever the metadata
+    /// says, nothing is written outside the volume.
+    fn write_volume(&self, at: u64, data: &[u8]) -> Result<()> {
+        at.checked_add(data.len() as u64)
+            .filter(|&end| end <= self.boot.volume_size())
+            .ok_or_else(|| format_err!("a write at {at:#x} outside the volume"))?;
+        let at = self
+            .offset
+            .checked_add(at)
+            .ok_or_else(|| format_err!("a write at {at:#x} outside the device"))?;
+        self.dev.write_all_at(data, at)?;
+        Ok(())
+    }
+
+    /// Writes whole clusters from physical cluster `lcn`.
+    fn write_clusters(&self, lcn: u64, data: &[u8]) -> Result<()> {
+        let at = lcn
+            .checked_mul(self.cluster)
+            .ok_or_else(|| format_err!("cluster {lcn:#x} outside the volume"))?;
+        self.write_volume(at, data)
     }
 }
 
@@ -1329,9 +1352,11 @@ impl<D: WriteAt> Volume<D> {
                         continue;
                     }
                     let lcn = self.translate(x.vlcn + (from - start) / cluster)?;
-                    let at = self.offset + lcn * cluster + (from - start) % cluster;
-                    self.dev
-                        .write_all_at(&bytes[(from - offset) as usize..(to - offset) as usize], at)?;
+                    let at = lcn
+                        .checked_mul(cluster)
+                        .and_then(|b| b.checked_add((from - start) % cluster))
+                        .ok_or_else(|| format_err!("cluster {lcn:#x} outside the volume"))?;
+                    self.write_volume(at, &bytes[(from - offset) as usize..(to - offset) as usize])?;
                 }
                 self.dev.flush()?;
                 false
@@ -1474,7 +1499,7 @@ impl<D: WriteAt> Volume<D> {
             let len = ((n * self.cluster) as usize).min(data.len() - at);
             let mut buf = vec![0u8; (n * self.cluster) as usize];
             buf[..len].copy_from_slice(&data[at..at + len]);
-            self.dev.write_all_at(&buf, self.offset + lcn * self.cluster)?;
+            self.write_clusters(lcn, &buf)?;
             let sums = if integrity { self.checksums_of(&buf) } else { Vec::new() };
             extents.push(((at as u64) / self.cluster, self.virtual_of(lcn)?, n, sums));
             at += len;
@@ -1540,8 +1565,7 @@ impl<D: WriteAt> Volume<D> {
         store_reference(&mut index_row[vo..vo + vl], &named, &page)?;
         for (k, &l) in lcns.iter().enumerate() {
             let c = self.cluster as usize;
-            self.dev
-                .write_all_at(&page[k * c..(k + 1) * c], self.offset + l * self.cluster)?;
+            self.write_clusters(l, &page[k * c..(k + 1) * c])?;
         }
         self.dev.flush()?;
         // The value: the inline map's header, one page below, an index node

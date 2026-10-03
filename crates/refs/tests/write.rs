@@ -1423,3 +1423,34 @@ fn writing_integrity_streams_on_64k_clusters() {
     assert_eq!(read_all(&fresh, "/i64.bin"), data);
     vol.delete_file("/i64.bin", now).unwrap();
 }
+
+#[test]
+fn writes_stay_inside_the_volume_the_boot_sector_claims() {
+    // Found by the fuzz target refs_write: a boot sector claiming a volume
+    // that ends before a checkpoint slot made the commit write the new
+    // checkpoint past the volume's end. Now every write is checked.
+    let (image, manifest, _) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let vol = Volume::open(&overlay, offset).unwrap();
+    let (cluster, slots) = (vol.cluster, vol.checkpoint_lcns.clone());
+    let low = *slots.iter().min().unwrap();
+    drop(vol);
+    let mut boot = vec![0u8; 512];
+    overlay.read_exact_at(&mut boot, offset).unwrap();
+    let sectors = (low + 1) * cluster / 512;
+    boot[0x18..0x20].copy_from_slice(&sectors.to_le_bytes());
+    let sum = refs::checksum::boot_sum(&boot);
+    boot[0x16..0x18].copy_from_slice(&sum.to_le_bytes());
+    storage_spaces::io::WriteAt::write_all_at(&overlay, &boot, offset).unwrap();
+    let before = overlay.written_pages().len();
+    let end = offset + (low + 1) * cluster;
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    assert!(
+        vol.set_attributes("/small.txt", 0x21).is_err(),
+        "the other slot is outside"
+    );
+    let outside: Vec<u64> = overlay.written_pages().into_iter().filter(|&at| at >= end).collect();
+    assert!(outside.is_empty(), "written past the volume: {outside:x?}");
+    assert!(overlay.written_pages().len() >= before);
+}
