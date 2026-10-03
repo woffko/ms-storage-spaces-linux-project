@@ -246,9 +246,9 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
     /// used. They come from the bitmap row that starts at `band` (where
     /// data near it is) and, when it is full, from other bitmap rows, then
     /// from free uniform ranges turned into bitmap rows.
-    fn take_data(&mut self, band: u64, count: u64) -> Result<Vec<(u64, u64)>> {
+    fn take_data(&mut self, band: u64, count: u64, first_vcn: u64) -> Result<Vec<(u64, u64)>> {
         let mut runs = Vec::new();
-        let (mut left, mut vcn) = (count, 0);
+        let (mut left, mut vcn) = (count, first_vcn);
         let mut tried = std::collections::HashSet::new();
         let class = |start: u64| self.vol.container_classes.range(..=start).next_back().map(|(_, &c)| c);
         while left > 0 {
@@ -1557,7 +1557,7 @@ impl<D: WriteAt> Volume<D> {
         integrity: bool,
     ) -> Result<(Vec<(u64, u64, u64, Vec<u8>)>, u64)> {
         let clusters = data.len().div_ceil(self.cluster);
-        let runs = tx.take_data(band, clusters)?;
+        let runs = tx.take_data(band, clusters, 0)?;
         let mut at = 0u64;
         let mut extents = Vec::new();
         for &(lcn, n) in &runs {
@@ -1671,6 +1671,124 @@ impl<D: WriteAt> Volume<D> {
                 .collect(),
             _ => buf.chunks(16384).flat_map(|c| crc64(c).to_le_bytes()).collect(),
         }
+    }
+
+    /// Changes a file's data in place, as Windows does for a stream in
+    /// clusters without integrity checksums (and without snapshots or
+    /// shared clusters): the `dirty` byte ranges of `data` within its
+    /// clusters are written where they are, clusters it grows by are added
+    /// as new runs after its own, clusters past its new end are freed, and
+    /// its record gets the new sizes, extent map and modification and
+    /// change times `now`. Other files are rewritten whole
+    /// (`write_file_from`). The bytes outside `dirty` must be the file's.
+    pub fn update_file(&mut self, path: &str, data: &dyn Source, dirty: &[(u64, u64)], now: u64) -> Result<()> {
+        let fa = self.file_at(path)?;
+        let entry = self.lookup(path.trim_end_matches('/'))?;
+        let file = self.open_file(&entry)?;
+        let new_size = data.len();
+        let extents = match &file.data {
+            Some(crate::file::Stream {
+                content: crate::file::Content::Extents(x),
+                ..
+            }) if new_size > MAX_INLINE as u64
+                && !fa.snapshots
+                && !fa.reparse
+                && le32(&fa.record, 0x48) & INTEGRITY == 0
+                && x.iter().all(|x| x.written && x.checksums.is_none()) =>
+            {
+                x.clone()
+            }
+            _ => return self.write_file_from(path, data, now),
+        };
+        // Its runs from its first cluster on, without holes.
+        let mut xs: Vec<(u64, u64, u64)> = extents.iter().map(|x| (x.vcn, x.vlcn, x.clusters)).collect();
+        xs.sort_unstable();
+        let mut old_clusters = 0;
+        for &(vcn, _, n) in &xs {
+            if vcn != old_clusters {
+                return self.write_file_from(path, data, now);
+            }
+            old_clusters += n;
+        }
+        let physical: Vec<(u64, u64)> = xs
+            .iter()
+            .map(|&(_, vlcn, n)| Ok((self.translate(vlcn)?, n)))
+            .collect::<Result<_>>()?;
+        if self.refcounted(&physical)? {
+            return self.write_file_from(path, data, now);
+        }
+        let cluster = self.cluster;
+        let new_clusters = new_size.div_ceil(cluster);
+        // The changed bytes within the clusters it keeps, where they are.
+        let kept = old_clusters.min(new_clusters) * cluster;
+        for &(from, to) in dirty {
+            let to = to.min(kept).min(new_size);
+            for (&(vcn, _, n), &(lcn, _)) in xs.iter().zip(&physical) {
+                let (start, stop) = (vcn * cluster, (vcn + n) * cluster);
+                let (a, b) = (from.max(start), to.min(stop));
+                if a < b {
+                    let mut buf = vec![0u8; (b - a) as usize];
+                    data.read_into(a, &mut buf)?;
+                    self.write_volume(lcn * cluster + (a - start), &buf)?;
+                }
+            }
+        }
+        self.dev.flush()?;
+        let table = fa.home.unwrap_or(fa.dir);
+        let band = self.data_band(fa.dir)?;
+        let live_key = |k: &[u8]| {
+            k.len() >= 0x18 && le32(k, 8) == 0x8000_0002 && le32(k, 12) & 0xffff == 0x80 && le64(k, 0x10) == LIVE_STREAM
+        };
+        let mut rows = embedded_rows(&fa.record)?;
+        let at = rows
+            .iter()
+            .position(|r| live_key(row_key(r)))
+            .ok_or_else(|| format_err!("{path}: no live level of its data"))?;
+        let old_map = self.extent_map_pages(row_value(&rows[at]))?;
+        {
+            let mut tx = Transaction::begin(&*self)?;
+            let mut free = old_map;
+            if new_clusters > old_clusters {
+                // As Windows appends: new runs after the file's own.
+                let runs = tx.take_data(band, new_clusters - old_clusters, old_clusters)?;
+                let mut vcn = old_clusters;
+                for (lcn, n) in runs {
+                    let mut buf = vec![0u8; (n * cluster) as usize];
+                    let len = (n * cluster).min(new_size - vcn * cluster);
+                    data.read_into(vcn * cluster, &mut buf[..len as usize])?;
+                    self.write_clusters(lcn, &buf)?;
+                    xs.push((vcn, self.virtual_of(lcn)?, n));
+                    vcn += n;
+                }
+                self.dev.flush()?;
+            } else if new_clusters < old_clusters {
+                let mut kept_runs = Vec::new();
+                for (&(vcn, vlcn, n), &(lcn, _)) in xs.iter().zip(&physical) {
+                    let keep = new_clusters.saturating_sub(vcn).min(n);
+                    if keep > 0 {
+                        kept_runs.push((vcn, vlcn, keep));
+                    }
+                    free.extend(lcn + keep..lcn + n);
+                }
+                xs = kept_runs;
+            }
+            tx.free_data(&free)?;
+            let extents: Vec<(u64, u64, u64, Vec<u8>)> = xs.iter().map(|&(v, l, n)| (v, l, n, Vec::new())).collect();
+            let allocated = new_clusters * cluster;
+            let live = self.map_value(&mut tx, table, new_size, allocated, &extents)?;
+            let mut key = row_key(&rows[at]).to_vec();
+            key[0..8].copy_from_slice(&(live.len() as u64).to_le_bytes());
+            rows[at] = row(&key, &live, ROW_EMBEDS_NODE);
+            let mut record = record_with_rows(&fa.record, &rows, le32(&fa.record, 0x98))?;
+            record[0x58..0x60].copy_from_slice(&new_size.to_le_bytes());
+            record[0x60..0x68].copy_from_slice(&allocated.to_le_bytes());
+            for at in [0x30, 0x38] {
+                record[at..at + 8].copy_from_slice(&now.to_le_bytes());
+            }
+            store_in(&mut tx, &fa, &record)?;
+            tx.commit()?;
+        }
+        self.load()
     }
 
     /// Replaces a file's whole content with `data` (appending, truncating

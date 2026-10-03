@@ -61,6 +61,10 @@ struct Pending {
     len: u64,
     dirty: bool,
     handles: usize,
+    /// The byte ranges written (refs::write changes them in place), or
+    /// `whole`: the file is written anew.
+    ranges: Vec<(u64, u64)>,
+    whole: bool,
 }
 
 impl Pending {
@@ -88,17 +92,27 @@ impl Pending {
             len: 0,
             dirty: false,
             handles: 1,
+            ranges: Vec::new(),
+            whole: false,
         })
     }
 
     fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<(), Errno> {
         std::os::unix::fs::FileExt::write_all_at(&self.file, data, offset).map_err(|_| Errno::EIO)?;
         self.len = self.len.max(offset + data.len() as u64);
+        let (a, b) = (offset, offset + data.len() as u64);
+        match self.ranges.last_mut() {
+            Some(last) if a <= last.1 && b >= last.0 => *last = (last.0.min(a), last.1.max(b)),
+            _ => self.ranges.push((a, b)),
+        }
         Ok(())
     }
 
     fn set_len(&mut self, len: u64) -> Result<(), Errno> {
         self.file.set_len(len).map_err(|_| Errno::EIO)?;
+        if len > self.len {
+            self.ranges.push((self.len, len));
+        }
         self.len = len;
         Ok(())
     }
@@ -459,6 +473,8 @@ impl RefsFs {
             at += n as u64;
         }
         p.set_len(stream.size)?;
+        // What it holds is the file's own: nothing written yet.
+        p.ranges.clear();
         Ok(p)
     }
 
@@ -474,20 +490,28 @@ impl RefsFs {
         r
     }
 
-    /// Writes back a file opened for writing, if it changed.
+    /// Writes back a file opened for writing, if it changed: in place
+    /// what was written (`update_file`), or the file anew.
     fn write_back(&self, ino: u64) -> Result<(), Errno> {
-        let (file, len) = {
+        let (file, len, ranges, whole) = {
             let mut s = self.state.lock().unwrap();
             match s.pending.get_mut(&ino) {
                 Some(p) if p.dirty => {
                     p.dirty = false;
-                    (p.file.try_clone().map_err(|_| Errno::EIO)?, p.len)
+                    let ranges = std::mem::take(&mut p.ranges);
+                    let whole = std::mem::replace(&mut p.whole, false);
+                    (p.file.try_clone().map_err(|_| Errno::EIO)?, p.len, ranges, whole)
                 }
                 _ => return Ok(()),
             }
         };
         let path = self.path(ino)?;
-        self.change(&path, |v| v.write_file_from(&path, &PendingData(&file, len), now()))
+        let source = PendingData(&file, len);
+        if whole {
+            self.change(&path, |v| v.write_file_from(&path, &source, now()))
+        } else {
+            self.change(&path, |v| v.update_file(&path, &source, &ranges, now()))
+        }
     }
 
     /// The entry reply for a path just made.
@@ -571,7 +595,9 @@ impl Filesystem for RefsFs {
                 } else {
                     let mut p = self.content(&self.vol.read().unwrap(), &path)?;
                     p.set_len(size)?;
-                    self.change(&path, |v| v.write_file_from(&path, &PendingData(&p.file, p.len), now()))?;
+                    let ranges = std::mem::take(&mut p.ranges);
+                    let source = PendingData(&p.file, p.len);
+                    self.change(&path, |v| v.update_file(&path, &source, &ranges, now()))?;
                 }
             }
             if atime.is_some() || mtime.is_some() || crtime.is_some() {
@@ -741,6 +767,7 @@ impl Filesystem for RefsFs {
                 if truncate {
                     p.set_len(0)?;
                     p.dirty = true;
+                    p.whole = true;
                 }
                 return Ok(());
             }
@@ -751,6 +778,7 @@ impl Filesystem for RefsFs {
                 self.content(&vol, &path)?
             };
             p.dirty = truncate;
+            p.whole = truncate;
             self.state.lock().unwrap().pending.insert(ino.0, p);
             Ok(())
         })();
@@ -774,7 +802,8 @@ impl Filesystem for RefsFs {
             let path = self.name_path(parent, name)?;
             self.change(&path, |v| v.create_file(&path, b"", now()))?;
             let ino = self.inode(&path, None);
-            let p = Pending::new()?;
+            let mut p = Pending::new()?;
+            p.whole = true;
             self.state.lock().unwrap().pending.insert(ino, p);
             self.attr(&self.vol.read().unwrap(), ino)
         })();

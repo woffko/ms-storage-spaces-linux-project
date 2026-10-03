@@ -766,6 +766,11 @@ rows of thin spaces not allocated yet (M7).
   into data containers, then metadata ones. Not done: handing out new
   containers (the container tables, roots 7, 8 and 12, are not written
   yet), extent maps of more than one page.
+  Volume::update_file changes a file's data in place as Windows does
+  (changed bytes where they are, new runs after the file's own, a tail
+  freed); the mount writes files back that way, so appending to a large
+  file needs no room for a second copy (a 200 MB file appended, patched
+  and truncated through the mount read back on Windows with its hash).
   `refs check` (Volume::check) checks a volume the way the write tests
   do: page checksums and structure, pages and file clusters used in
   their allocators, shared clusters counted; every corpus volume and

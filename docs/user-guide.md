@@ -433,8 +433,11 @@ With `--rw` (one image, disk or partition; not `--space`) the mount
 writes through the same code as the writing commands below: creating,
 writing, truncating and deleting files (a file opened for writing is
 kept in an unlinked temporary file, in `$REFS_TMPDIR` or the system's
-temporary directory, and written back whole when it is closed or
-synced), directories, renames and moves, hard links, times (`touch`), the
+temporary directory; when it is closed or synced, what was written goes
+to the volume as Windows writes it: changed bytes where they are,
+appended data in new runs, a shortened file's tail freed; a file in its
+record, an integrity stream or a new or truncated file is written
+whole), directories, renames and moves, hard links, times (`touch`), the
 read-only attribute (`chmod a-w`) and named streams (`setfattr -n
 user.NAME`). Every change is one transaction with a new checkpoint, so a
 crash or a pulled cable leaves the volume as it was after the last

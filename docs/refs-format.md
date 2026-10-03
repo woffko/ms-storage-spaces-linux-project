@@ -347,7 +347,9 @@ table's rows for a text diff):
   every transaction (the log's sequence number, presumably).
 * Overwriting data (`Invoke-RefsSteps.ps1` step `write`): Windows
   writes a stream without integrity checksums where it is (the extents
-  stay) and commits the new times with copy on write.
+  stay) and commits the new times with copy on write. Appending adds
+  extent records after the file's own (its record count and sizes
+  grow); `refs` appends and truncates the same way (Volume::update_file).
 * Block reference counts (root 6): rows keyed by a range of virtual
   clusters (first, count; 0x400 clusters each seen); value: the key, a
   u64 at 0x10, the sum of the counts (u32 at 0x18), then from 0x1c a u16

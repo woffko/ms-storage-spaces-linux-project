@@ -1651,3 +1651,65 @@ fn extent_maps_past_cluster_65535() {
     }
     assert_eq!(vol.check(&skip).unwrap().problems, Vec::<String>::new());
 }
+
+#[test]
+fn updating_files_in_place() {
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 135_300_000_000_000_000;
+    let runs = |vol: &Volume<_>, path: &str| -> Vec<(u64, u64)> {
+        let file = vol.open_file(&vol.lookup(path).unwrap()).unwrap();
+        let refs::Content::Extents(x) = file.data.unwrap().content else {
+            panic!("inline")
+        };
+        x.iter().map(|x| (x.vcn, vol.translate(x.vlcn).unwrap())).collect()
+    };
+    let mut data: Vec<u8> = (0..300_000u32).map(|i| (i % 241) as u8).collect();
+    vol.create_file("/u.bin", &data, now).unwrap();
+    let before = runs(&vol, "/u.bin");
+    // Appended: the old runs stay, new ones follow.
+    let old = data.len() as u64;
+    data.extend((0..50_000u32).map(|i| (i % 7) as u8));
+    vol.update_file("/u.bin", &data.as_slice(), &[(old, data.len() as u64)], now)
+        .unwrap();
+    assert!(read_all(&vol, "/u.bin") == data);
+    let after = runs(&vol, "/u.bin");
+    assert_eq!(&after[..before.len()], &before[..], "the old runs stay where they were");
+    // Changed in the middle: where it is.
+    data[123_456..123_556].fill(0xee);
+    vol.update_file("/u.bin", &data.as_slice(), &[(123_456, 123_556)], now)
+        .unwrap();
+    assert!(read_all(&vol, "/u.bin") == data);
+    assert_eq!(runs(&vol, "/u.bin"), after);
+    // Truncated: the clusters past the end go free.
+    let used_before = used(&vol, 1).len();
+    data.truncate(100_000);
+    vol.update_file("/u.bin", &data.as_slice(), &[], now).unwrap();
+    assert!(read_all(&vol, "/u.bin") == data);
+    assert!(used(&vol, 1).len() < used_before);
+    assert_eq!(vol.lookup("/u.bin").unwrap().size, 100_000);
+    assert_eq!(vol.check(&skip).unwrap().problems, Vec::<String>::new());
+    // A large file grows where rewriting it whole would not fit: the old
+    // clusters stay in use until the commit.
+    let big: Vec<u8> = (0..200_000_000u32).map(|i| (i % 239) as u8).collect();
+    vol.create_file("/big.bin", &big, now).unwrap();
+    let mut more = big.clone();
+    more.extend_from_slice(b"appended");
+    assert!(
+        vol.write_file("/big.bin", &more, now).is_err(),
+        "no room for a second copy"
+    );
+    vol.update_file(
+        "/big.bin",
+        &more.as_slice(),
+        &[(big.len() as u64, more.len() as u64)],
+        now,
+    )
+    .unwrap();
+    assert!(read_all(&vol, "/big.bin") == more);
+    assert_eq!(vol.check(&skip).unwrap().problems, Vec::<String>::new());
+    assert_allocated(&vol, &skip, "updated");
+    assert_pages_valid(&vol, &skip, "updated");
+}
