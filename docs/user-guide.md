@@ -425,8 +425,8 @@ fusermount -u mnt
 The mount shows named streams as extended attributes `user.<name>`
 (`getfattr -d`; Linux limits them to 64 KiB, larger streams are read with
 `refs cat --stream`), symbolic links and junctions as symbolic links (an
-absolute target `C:\path` points into the mount) and hard-linked files
-with their link count (each name has its own inode).
+absolute target `C:\path` points into the mount) and hard links as one
+inode with its link count.
 
 With `--rw` (one image, disk or partition; not `--space`) the mount
 writes through the same code as the writing commands below: creating,

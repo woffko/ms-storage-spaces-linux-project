@@ -1,8 +1,9 @@
 //! A ReFS volume mounted through FUSE: read-only, or with `--rw` for
 //! writing through `refs::write`.
 //!
-//! Inodes are paths: every name looked up gets an inode for its path (a
-//! hard-linked file has one per name). Symbolic links and junctions are
+//! Inodes stand for paths (the write API takes paths), except that the
+//! names of a file whose record is kept in its home directory (moved, or
+//! hard-linked) share one inode. Symbolic links and junctions are
 //! links: a relative target keeps its path, an absolute one
 //! ("\\??\\E:\\dir") becomes the path inside the mount. Named streams are
 //! extended attributes "user.<name>".
@@ -60,8 +61,12 @@ struct Pending {
 }
 
 struct State {
-    paths: HashMap<u64, String>,
+    /// The paths of each inode (the first is used).
+    paths: HashMap<u64, Vec<String>>,
     inodes: HashMap<String, u64>,
+    /// Inodes of files whose record is kept in their home directory, by
+    /// (home, ordinal): all their names.
+    records: HashMap<(u64, u64), u64>,
     next: u64,
     dirs: HashMap<u64, Arc<Dir>>,
     files: HashMap<String, Arc<RefsFile>>,
@@ -121,21 +126,44 @@ fn errno(what: &str, e: refs::Error) -> Errno {
 }
 
 impl RefsFs {
-    /// The inode of a path, made on first sight.
-    fn inode(&self, path: &str) -> u64 {
+    /// The inode of a path (`entry`: what it names, if known), made on
+    /// first sight; the names of one record share it.
+    fn inode(&self, path: &str, entry: Option<&Entry>) -> u64 {
+        let record = match entry.map(|e| &e.target) {
+            Some(Target::Split { home, ordinal }) => Some((*home, *ordinal)),
+            _ => None,
+        };
         let mut s = self.state.lock().unwrap();
         if let Some(&ino) = s.inodes.get(path) {
+            if let Some(r) = record {
+                s.records.entry(r).or_insert(ino);
+            }
             return ino;
         }
-        let ino = s.next;
-        s.next += 1;
+        let ino = match record.and_then(|r| s.records.get(&r).copied()) {
+            Some(ino) => ino,
+            None => {
+                let ino = s.next;
+                s.next += 1;
+                if let Some(r) = record {
+                    s.records.insert(r, ino);
+                }
+                ino
+            }
+        };
         s.inodes.insert(path.to_owned(), ino);
-        s.paths.insert(ino, path.to_owned());
+        s.paths.entry(ino).or_default().push(path.to_owned());
         ino
     }
 
     fn path(&self, ino: u64) -> Result<String, Errno> {
-        self.state.lock().unwrap().paths.get(&ino).cloned().ok_or(Errno::ENOENT)
+        self.state
+            .lock()
+            .unwrap()
+            .paths
+            .get(&ino)
+            .and_then(|p| p.first().cloned())
+            .ok_or(Errno::ENOENT)
     }
 
     /// Forgets what was read before a change (listings and records), and
@@ -154,7 +182,14 @@ impl RefsFs {
                 .collect();
             for (p, i) in lost {
                 s.inodes.remove(&p);
-                s.paths.remove(&i);
+                let empty = s.paths.get_mut(&i).is_some_and(|names| {
+                    names.retain(|n| *n != p);
+                    names.is_empty()
+                });
+                if empty {
+                    s.paths.remove(&i);
+                    s.records.retain(|_, ino| *ino != i);
+                }
             }
         }
     }
@@ -174,7 +209,11 @@ impl RefsFs {
             let new = format!("{to}{}", &p[from.len()..]);
             s.inodes.remove(&p);
             s.inodes.insert(new.clone(), i);
-            s.paths.insert(i, new);
+            if let Some(names) = s.paths.get_mut(&i) {
+                for n in names.iter_mut().filter(|n| **n == p) {
+                    n.clone_from(&new);
+                }
+            }
         }
     }
 
@@ -388,8 +427,9 @@ impl RefsFs {
 
     /// The entry reply for a path just made.
     fn entry_reply(&self, path: &str, reply: ReplyEntry) {
-        let ino = self.inode(path);
         let vol = self.vol.read().unwrap();
+        let entry = self.resolve(&vol, path).ok().flatten();
+        let ino = self.inode(path, entry.as_ref());
         match self.attr(&vol, ino) {
             Ok(attr) => reply.entry(&TTL, &attr, fuser::Generation(0)),
             Err(e) => reply.error(e),
@@ -413,12 +453,12 @@ impl Filesystem for RefsFs {
             return reply.error(e);
         }
         // The name as the volume spells it (lookups ignore case).
-        let path = match self.resolve(&vol, &path) {
-            Ok(Some(e)) => child(split(&path).0, &e.name),
-            Ok(None) => path,
+        let (path, entry) = match self.resolve(&vol, &path) {
+            Ok(Some(e)) => (child(split(&path).0, &e.name), Some(e)),
+            Ok(None) => (path, None),
             Err(e) => return reply.error(e),
         };
-        let ino = self.inode(&path);
+        let ino = self.inode(&path, entry.as_ref());
         match self.attr(&vol, ino) {
             Ok(attr) => reply.entry(&TTL, &attr, fuser::Generation(0)),
             Err(e) => reply.error(e),
@@ -601,6 +641,15 @@ impl Filesystem for RefsFs {
             let path = self.path(ino.0)?;
             let to = self.name_path(newparent, newname)?;
             self.change(&to, |v| v.link_file(&path, &to, now()))?;
+            // The new name is the same inode.
+            let mut s = self.state.lock().unwrap();
+            s.inodes.insert(to.clone(), ino.0);
+            s.paths.entry(ino.0).or_default().push(to.clone());
+            drop(s);
+            let vol = self.vol.read().unwrap();
+            if let Ok(Some(e)) = self.resolve(&vol, &to) {
+                self.inode(&to, Some(&e));
+            }
             Ok(to)
         })();
         match r {
@@ -665,7 +714,7 @@ impl Filesystem for RefsFs {
         let r = (|| -> Result<FileAttr, Errno> {
             let path = self.name_path(parent, name)?;
             self.change(&path, |v| v.create_file(&path, b"", now()))?;
-            let ino = self.inode(&path);
+            let ino = self.inode(&path, None);
             self.state.lock().unwrap().pending.insert(
                 ino,
                 Pending {
@@ -804,7 +853,7 @@ impl Filesystem for RefsFs {
             } else {
                 FileType::RegularFile
             };
-            all.push((self.inode(&child(&path, &e.name)), kind, e.name.clone()));
+            all.push((self.inode(&child(&path, &e.name), Some(e)), kind, e.name.clone()));
         }
         for (i, (child, kind, name)) in all.into_iter().enumerate().skip(offset as usize) {
             if reply.add(INodeNo(child), (i + 1) as u64, kind, name) {
@@ -939,12 +988,13 @@ pub fn serve(vol: Volume<Rw>, mountpoint: &Path, allow_other: bool, writable: bo
     let mut state = State {
         paths: HashMap::new(),
         inodes: HashMap::new(),
+        records: HashMap::new(),
         next: 2,
         dirs: HashMap::new(),
         files: HashMap::new(),
         pending: HashMap::new(),
     };
-    state.paths.insert(INodeNo::ROOT.0, "/".to_owned());
+    state.paths.insert(INodeNo::ROOT.0, vec!["/".to_owned()]);
     state.inodes.insert("/".to_owned(), INodeNo::ROOT.0);
     let fs = RefsFs {
         vol: RwLock::new(vol),
