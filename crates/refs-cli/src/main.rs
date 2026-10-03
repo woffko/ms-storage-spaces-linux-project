@@ -137,7 +137,7 @@ enum Command {
     },
     /// Create a file holding the content of a local file (experimental:
     /// writes the volume, only with --yes; up to 64 MiB, a printable ASCII
-    /// name, a directory of one page with room left).
+    /// name).
     Create {
         /// The image, disk or partition.
         device: PathBuf,
@@ -180,7 +180,7 @@ enum Command {
         yes: bool,
     },
     /// Create a directory (experimental: writes the volume, only with
-    /// --yes; a printable ASCII name; small volumes and directories).
+    /// --yes; a printable ASCII name).
     Mkdir {
         /// The image, disk or partition.
         device: PathBuf,

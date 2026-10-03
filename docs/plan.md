@@ -721,8 +721,10 @@ rows of thin spaces not allocated yet (M7).
   clusters) give Windows' rows for the same steps but for the order of
   the record's rows. Deleting rows merges underfull pages and removes
   emptied ones (a directory of 150 files emptied again is one page).
-  Next: splitting full index pages, named streams, integrity streams,
-  directories (rename, move, delete).
+  Full index pages split too (a directory of 500 files with long names
+  grew to three levels; Windows read it, added 300 files and deleted 267
+  there). Next: named streams, integrity streams, directories (rename,
+  move, delete), moved or linked files' times and data.
 
 ## Test infrastructure (continuous, feeds every stage)
 

@@ -460,8 +460,8 @@ sparse ranges, not in integrity streams) where they are, as Windows does,
 and sets the modification and change times to now. `refs create` makes a
 file (up to 1 KiB kept in its record, up to 64 MiB in clusters near the
 data of the files around it) with a printable ASCII name, in a directory
-small enough to fit one metadata page; it takes the permissions of the
-files beside it. `refs rename` renames a file within its directory and
+of any size (its pages split as it grows and merge as it shrinks); it
+takes the permissions of the files beside it. `refs rename` renames a file within its directory and
 `refs delete` deletes it (for a hard-linked file: the one name);
 deleting a file's last name with data clusters is refused on volumes
 with block-cloned or deduplicated clusters. `refs mkdir` creates a

@@ -172,11 +172,16 @@ tests check every page this way, Windows' pages included).
 
 Tables of more than one page: index nodes (level 1 and up; node flags:
 1 index, 2 root) hold a row per child whose key is the child's last key
-and whose value is the child's page reference; the last row has no key
-(row flag 2) and takes everything above. Pages below the root have no
-table descriptor (the u32 8 at 0x50, the node header at 0x58); the root's
-descriptor counts the table's rows (0x20) and the pages below the root
-(0x18) (**verified**: directories `refs` grew this way read on Windows).
+and whose value is the child's page reference. The last row of every
+index node has row flag 2 and takes everything above: in the last node
+of a level it has no key, in the others it keeps its child's last key
+(Windows reports a node whose last row lacks the flag as an invalid
+metadata page and drops the directory's contents; **verified**). Pages
+below the root have no table descriptor (the u32 8 at 0x50, the node
+header at 0x58); the root's descriptor counts the table's rows (0x20)
+and the pages below the root (0x18) (**verified**: directories `refs`
+grew this way, to three levels with index pages split, read on
+Windows).
 `refs` shrinks tables too: a page below the root left with less than a
 quarter of its room filled merges with a sibling when both fit in three
 quarters of a page (the later page takes the rows, the earlier one

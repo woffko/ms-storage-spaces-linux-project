@@ -535,7 +535,9 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
     }
 
     /// Lays out a node anew: `rows` from the start of its row area, the key
-    /// index at the end of the page.
+    /// index at the end of the page. In an index node the last row, and only
+    /// it, has row flag 2 (also when it keeps a key: Windows takes a node
+    /// whose last row lacks the flag for a damaged page).
     fn write_node(&mut self, page: usize, level: u8, flags: u8, rows: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
         self.mark(page);
         let d = &mut self.pages[page].data;
@@ -551,6 +553,11 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         let mut at = 0x28;
         for (i, (_, r)) in rows.iter().enumerate() {
             d[h + at..h + at + r.len()].copy_from_slice(r);
+            if level > 0 {
+                let last = if i + 1 == rows.len() { ROW_LAST } else { 0 };
+                let f = (le16(r, 8) & !ROW_LAST) | last;
+                d[h + at + 8..h + at + 10].copy_from_slice(&f.to_le_bytes());
+            }
             put(d, h + index + 4 * i, 0xffff_0000 | at as u32);
             at += r.len();
         }
@@ -644,8 +651,8 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
                 self.count_pages(tree, 2);
             }
             Some((parent, key)) => {
-                // The parent takes a row for the first half; splitting a full
-                // parent as well is not done yet.
+                // The parent takes a row for the first half; a full parent
+                // splits first (the page then has a parent with room).
                 let index = self.index_row(&last_left)?;
                 if (le32(
                     &self.pages[parent].data,
@@ -653,9 +660,8 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
                 ) as usize)
                     < index.len().next_multiple_of(8) + 4
                 {
-                    return Err(Error::Unsupported(
-                        "a full index page (the table is too large for now)".into(),
-                    ));
+                    self.split(tree, parent, order)?;
+                    return self.split(tree, page, order);
                 }
                 let r = self.new_child(tree, parent, key);
                 for &(c, in_left) in &children {
@@ -766,7 +772,8 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
     /// Merges a page holding less than a quarter of its room with a
     /// sibling (the next one, the one before for the last) when their rows
     /// fill at most three quarters of a page: the later page takes the rows
-    /// of both, the earlier one leaves the table.
+    /// of both, the earlier one leaves the table. An only child of the root
+    /// moves into the root when its rows fit there.
     fn merge(&mut self, page: usize) -> Result<()> {
         let size = |rows: &[(Vec<u8>, Vec<u8>)]| 0x28 + rows.iter().map(|(_, r)| r.len() + 4).sum::<usize>();
         let area = {
@@ -791,7 +798,8 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
             let (k, r) = &siblings[pos - 1];
             (self.child(tree, parent, k.clone(), row_value(r))?, page)
         } else {
-            return Ok(());
+            // An only child: the root may take its rows.
+            return self.collapse(parent);
         };
         let mut both = self.node_rows(first)?;
         both.extend(self.node_rows(second)?);
@@ -812,9 +820,10 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
 
     /// Takes a page whose rows are gone out of its table: its parent loses
     /// the row naming it (when that was the parent's last row, the row
-    /// before takes its place, without a key), a parent left without rows
-    /// goes too, its clusters become free, and a root left with one child
-    /// takes that child's rows when they fit (the table loses a level).
+    /// before takes its key), a parent left without rows goes too, a parent
+    /// left nearly empty merges, its clusters become free, and a root left
+    /// with one child takes that child's rows when they fit (the table
+    /// loses a level).
     fn drop_page(&mut self, page: usize) -> Result<()> {
         let tree = self.pages[page].tree;
         let (parent, key) = self.pages[page]
@@ -834,31 +843,46 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
             }
             return self.write_node(parent, 0, NODE_ROOT, &[]);
         }
-        if key.is_empty() {
+        if pos == rows.len() {
+            // It was the last row: the row before takes its key (the
+            // node's upper bound; none for the last node of a level).
             let (k, r) = rows.pop().unwrap();
-            rows.push((Vec::new(), row(&[], row_value(&r), ROW_LAST)));
+            rows.push((key.clone(), row(&key, row_value(&r), ROW_LAST)));
             for p in &mut self.pages {
                 if p.parent.as_ref() == Some(&(parent, k.clone())) {
-                    p.parent = Some((parent, Vec::new()));
+                    p.parent = Some((parent, key.clone()));
                 }
             }
         }
         let (level, flags) = self.node_level(parent);
         self.write_node(parent, level, flags, &rows)?;
-        if self.pages[parent].parent.is_none() && rows.len() == 1 {
-            let (k, r) = rows.pop().unwrap();
-            let child = self.child(tree, parent, k, row_value(&r))?;
-            let child_rows = self.node_rows(child)?;
-            let (level, flags) = self.node_level(child);
-            if self.write_node(parent, level, flags | NODE_ROOT, &child_rows).is_ok() {
-                self.pages[child].parent = None;
-                self.forget(child)?;
-                for p in &mut self.pages {
-                    if let Some((q, _)) = &mut p.parent
-                        && *q == child
-                    {
-                        *q = parent;
-                    }
+        if self.pages[parent].parent.is_some() {
+            self.merge(parent)
+        } else {
+            self.collapse(parent)
+        }
+    }
+
+    /// A root with one child takes that child's rows when they fit (the
+    /// table loses a level).
+    fn collapse(&mut self, root: usize) -> Result<()> {
+        let rows = self.node_rows(root)?;
+        if self.pages[root].parent.is_some() || rows.len() != 1 || self.node_level(root).0 == 0 {
+            return Ok(());
+        }
+        let tree = self.pages[root].tree;
+        let (k, r) = &rows[0];
+        let child = self.child(tree, root, k.clone(), row_value(r))?;
+        let child_rows = self.node_rows(child)?;
+        let (level, flags) = self.node_level(child);
+        if self.write_node(root, level, flags | NODE_ROOT, &child_rows).is_ok() {
+            self.pages[child].parent = None;
+            self.forget(child)?;
+            for p in &mut self.pages {
+                if let Some((q, _)) = &mut p.parent
+                    && *q == child
+                {
+                    *q = root;
                 }
             }
         }
@@ -1134,11 +1158,10 @@ impl<D: WriteAt> Volume<D> {
         })
     }
 
-    /// Creates a file with `data` (up to 1 KiB, kept in its record) and
-    /// all four times `now`, as Windows does: a name row with the record
-    /// and a file id row in the directory, whose times become `now`. For
-    /// now the directory must fit in one page with room left at its end,
-    /// and the name must be ASCII.
+    /// Creates a file with `data` (up to 1 KiB kept in its record, up to
+    /// 64 MiB in clusters) and all four times `now`, as Windows does: a
+    /// name row with the record and a file id row in the directory, whose
+    /// times become `now`. The name must be printable ASCII for now.
     pub fn create_file(&mut self, path: &str, data: &[u8], now: u64) -> Result<()> {
         let trimmed = path.trim_end_matches('/');
         let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
@@ -1764,9 +1787,7 @@ impl<D: WriteAt> Volume<D> {
     /// table's counter, 0x38 of its descriptor, gives the id) with a tree
     /// of one page holding its own row (its record: a link to its parent
     /// and name, an empty $I30 index), rows in both object tables, a
-    /// parent-child row, and an entry in the parent directory. For now the
-    /// object and parent-child tables and the parent directory must each
-    /// fit one page.
+    /// parent-child row, and an entry in the parent directory.
     pub fn create_directory(&mut self, path: &str, now: u64) -> Result<()> {
         let trimmed = path.trim_end_matches('/');
         let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));

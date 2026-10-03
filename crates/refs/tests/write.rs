@@ -110,6 +110,7 @@ fn assert_pages_valid<D: ReadAt>(vol: &Volume<D>, skip: &[u64], what: &str) {
         }
         assert_eq!(o, end, "{at}: rows end at {o:#x}, the header says {end:#x}");
         let mut live = 0;
+        let index_node = page[h + 0x0c] > 0;
         for i in 0..count {
             let e = u32_at(h + index + 4 * i) & 0xffff;
             let (size, flags) = rows
@@ -117,6 +118,15 @@ fn assert_pages_valid<D: ReadAt>(vol: &Volume<D>, skip: &[u64], what: &str) {
                 .copied()
                 .unwrap_or_else(|| panic!("{at}: entry {i} names no row ({e:#x})"));
             assert_eq!(flags & 4, 0, "{at}: entry {i} names a removed row");
+            // Index nodes: the last row, and only it, has flag 2 (Windows
+            // takes a node without it for a damaged page).
+            if index_node {
+                assert_eq!(
+                    flags & 2 != 0,
+                    i + 1 == count,
+                    "{at}: entry {i} of {count}: row flags {flags:#x}"
+                );
+            }
             live += size;
         }
         assert_eq!(free, index - start - live, "{at}: free bytes");
@@ -883,4 +893,60 @@ fn moving_and_linking_files() {
     }
     assert_allocated(&vol, &skip, "moved");
     assert_pages_valid(&vol, &skip, "moved");
+}
+
+#[test]
+fn deep_directories_split_and_merge_index_pages() {
+    const COUNT: usize = 500;
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 133_900_000_000_000_000;
+    // Long names make large index rows: the root index fills and splits
+    // (a third level), then index pages below it split.
+    vol.create_directory("/wide", now).unwrap();
+    let names: Vec<String> = (0..COUNT)
+        .map(|i| format!("/wide/{i:04} {}", "x".repeat(245)))
+        .collect();
+    for (i, path) in names.iter().enumerate() {
+        vol.create_file(path, format!("file {i}").as_bytes(), now).unwrap();
+    }
+    let dir = vol_dir(&vol, "/wide");
+    let level = |vol: &Volume<_>| {
+        let root = vol.read_page(vol.object(dir).unwrap(), false).unwrap();
+        let node = Node::at(&root, PAGE_HEADER_SIZE).unwrap();
+        let below = u64::from_le_bytes(
+            root[PAGE_HEADER_SIZE + 0x18..PAGE_HEADER_SIZE + 0x20]
+                .try_into()
+                .unwrap(),
+        );
+        (node.level, below, node.len())
+    };
+    // A root split leaves two children; a third comes from a page below
+    // the root that split.
+    let (depth, pages, children) = level(&vol);
+    assert!(
+        depth >= 2 && children >= 3,
+        "three levels or more, index pages split: level {depth}, {children} children, {pages} pages below the root"
+    );
+    assert_eq!(vol.read_dir(dir).unwrap().len(), COUNT);
+    for (i, path) in names.iter().enumerate().step_by(37) {
+        assert_eq!(read_all(&vol, path), format!("file {i}").as_bytes(), "{path}");
+    }
+    assert_allocated(&vol, &skip, "deep");
+    assert_pages_valid(&vol, &skip, "deep");
+    // Emptied again, out of order: pages merge and leave, levels go.
+    let mut order: Vec<usize> = (0..COUNT).collect();
+    order.sort_by_key(|&i| (i * 7919) % COUNT);
+    for (n, &i) in order.iter().enumerate() {
+        vol.delete_file(&names[i], now).unwrap();
+        if n % 200 == 199 {
+            assert_pages_valid(&vol, &skip, "emptying");
+        }
+    }
+    assert_eq!(vol.read_dir(dir).unwrap().len(), 0);
+    assert_eq!(level(&vol), (0, 0, 1), "one page again (the directory's own row)");
+    assert_allocated(&vol, &skip, "emptied");
+    assert_pages_valid(&vol, &skip, "emptied");
 }
