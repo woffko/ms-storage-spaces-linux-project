@@ -1617,6 +1617,62 @@ fn deleting_links_and_files_with_snapshots() {
 }
 
 #[test]
+fn changing_files_with_snapshots() {
+    // As Windows writes a file with stream snapshots: its live level maps
+    // only what was written since the last snapshot. Bytes in clusters
+    // only older levels have are copied on write into the live level,
+    // those it has are written where they are; the snapshots stay as they
+    // were.
+    let (image, manifest, skip) = load("r314feat");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 135_700_000_000_000_000;
+    let path = "/snap/file.txt";
+    let snapshots = |vol: &Volume<_>| {
+        let file = vol.open_file(&vol.lookup(path).unwrap()).unwrap();
+        file.snapshots
+            .iter()
+            .map(|(name, s)| {
+                let mut b = vec![0u8; s.size as usize];
+                let n = vol.read_stream(s, 0, &mut b).unwrap();
+                assert_eq!(n, b.len());
+                (name.clone(), b)
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = snapshots(&vol);
+    assert_eq!(before.len(), 2);
+    let mut data = read_all(&vol, path);
+    // Cluster 1: an older level's (copied); cluster 128: the live level's
+    // own (in place); then appended to.
+    data[5000..5003].copy_from_slice(b"one");
+    data[128 * 4096 + 10..128 * 4096 + 13].copy_from_slice(b"two");
+    let old = data.len() as u64;
+    data.extend((0..10_000u32).map(|i| (i % 211) as u8));
+    let dirty = [
+        (5000, 5003),
+        (128 * 4096 + 10, 128 * 4096 + 13),
+        (old, data.len() as u64),
+    ];
+    vol.update_file(path, &data.as_slice(), &dirty, now).unwrap();
+    assert_eq!(read_all(&vol, path), data);
+    assert_eq!(snapshots(&vol), before, "snapshots unchanged");
+    assert_pages_valid(&vol, &skip, "changed with snapshots");
+    vol.overwrite(path, 7000, b"three", now).unwrap();
+    data[7000..7005].copy_from_slice(b"three");
+    assert_eq!(read_all(&vol, path), data);
+    assert_eq!(snapshots(&vol), before, "snapshots unchanged by overwrite");
+    // Written anew, and shortened.
+    let fresh: Vec<u8> = (0..900_000u32).map(|i| (i % 197) as u8).collect();
+    vol.write_file(path, &fresh, now).unwrap();
+    assert_eq!(read_all(&vol, path), fresh);
+    assert_eq!(snapshots(&vol), before, "snapshots unchanged");
+    assert_allocated(&vol, &skip, "rewritten with snapshots");
+    assert_pages_valid(&vol, &skip, "rewritten with snapshots");
+}
+
+#[test]
 fn renaming_only_the_case_of_a_name() {
     let (image, manifest, skip) = load("r314small");
     let offset = manifest["partition_offset"].as_u64().unwrap();

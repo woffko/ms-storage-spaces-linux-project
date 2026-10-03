@@ -294,7 +294,9 @@ add it to the end; the file keeps its creation time, attributes,
 permissions and named streams (as large as
 .B create
 takes, 2 GiB for integrity
-streams; not files with snapshots or streams in clusters). With
+streams; a file with stream snapshots changes in its live level, the
+snapshots staying as they were; not files with named streams in
+clusters). With
 .BI \-\-stream " name"
 it writes that named stream instead (small ones stay in the file's
 record), and

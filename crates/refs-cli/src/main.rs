@@ -204,8 +204,8 @@ enum Command {
     },
     /// Replace a file's content (or a named stream's) with a local file's,
     /// or append it (experimental: writes the volume, only with --yes; up
-    /// to 64 GiB, 2 GiB for integrity streams; not files with
-    /// snapshots).
+    /// to 64 GiB, 2 GiB for integrity streams; a file with stream
+    /// snapshots changes in its live level).
     Write {
         /// The image, disk or partition.
         device: PathBuf,

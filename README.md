@@ -48,7 +48,7 @@ against pools created by Windows.
 | ReFS 3.x volumes (Dev Drives, data volumes, inside a space): files, sparse, block-cloned and deduplicated files, named streams, stream snapshots, links, attributes; integrity streams checked on every read | `refs` reads and mounts read-only (FUSE); verified on ReFS 3.14 |
 | Writing ReFS: files (up to 64 GiB each), directories, renames and moves, hard links, times and attributes, named streams, integrity streams, block clones (`refs clone`), deleting block-cloned files and files with snapshots; a read-write FUSE mount; `mount -t ReFS` and udisks2 through `mount.ReFS` | `refs set|overwrite|write|create|rename|move|link|clone|delete|mkdir --yes`, `refs mount --rw` (experimental); Windows takes the result as healthy (refsutil leak and triage) |
 | Checking ReFS | `refs check` (pages, allocators, shared clusters) |
-| ReFS compression, encryption; ReFS 1.x/2.x and 3.4-3.13 (no Windows at hand makes them); cloning files, stream snapshots by `refs` | not yet |
+| ReFS compression, encryption; ReFS 1.x/2.x and 3.4-3.13 (no Windows at hand makes them); making stream snapshots | not yet |
 
 ## Quick start
 

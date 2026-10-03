@@ -748,7 +748,10 @@ rows of thin spaces not allocated yet (M7).
   does (overwriting shared clusters in place is refused). Files with
   stream snapshots (every level's clusters freed), symbolic links and
   junctions are deleted too (Windows: healthy, no leak, recreated them).
-  Not done: rewriting files with snapshots.
+  Files with stream snapshots change in their live level as Windows
+  changes them (in place where the live level has the clusters, copied
+  on write where only snapshots have them; Windows read the result, the
+  snapshots unchanged, and wrote on).
   `refs mount --rw` writes through the FUSE mount (inodes are paths; a
   file is written back whole on close, up to 64 MiB); data takes other
   allocator rows, then free uniform ranges, once its band is full. A

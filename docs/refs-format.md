@@ -304,7 +304,17 @@ snapshots between overwrites and an append; the live data and both
 snapshots read back with Windows' SHA-256.) A level maps only what was
 written while it was live, so a file's clusters are what its levels map;
 deleting a file frees them all (**verified**: Windows found no leak
-after `refs` deleted the file with two snapshots).
+after `refs` deleted the file with two snapshots). The live level's value
+lists only its own records; 0x30 is the size in whole clusters, 0x48
+the bytes the level maps (4096 for one cluster written since the last
+snapshot), 0x50 1. `refs` changes such a file in its live level: bytes
+in clusters the live level maps are written where they are, clusters
+only older levels map are copied on write into it (their old bytes with
+the new ones), clusters it grows by go to it, and its clusters past a
+new end are freed; the snapshots keep theirs (**verified**: Windows read
+the file `refs` patched and appended to, listed both snapshots with
+their sizes, found no leak, wrote into it, and `refs` read the result
+and both snapshots with their hashes).
 
 ### Deduplication and block cloning
 

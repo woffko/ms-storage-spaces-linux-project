@@ -1732,6 +1732,29 @@ impl<D: WriteAt> Volume<D> {
         let data = file
             .data
             .ok_or_else(|| Error::Unsupported(format!("{path}: no data stream")))?;
+        // With stream snapshots: through the live level (in place only
+        // where it has the clusters; the snapshots' stay as they are).
+        if !file.snapshots.is_empty() {
+            let end = offset
+                .checked_add(bytes.len() as u64)
+                .filter(|&e| e <= data.size)
+                .ok_or_else(|| Error::Unsupported(format!("{path}: writing beyond its {} bytes", data.size)))?;
+            let fa = self.file_at(path)?;
+            let patch = Patch {
+                size: data.size,
+                at: offset,
+                bytes,
+            };
+            if data.size > MAX_INLINE as u64
+                && !fa.reparse
+                && self.update_live_level(path, fa, &data, &patch, &[(offset, end)], now)?
+            {
+                return Ok(());
+            }
+            return Err(Error::Unsupported(format!(
+                "{path}: overwriting this file with snapshots"
+            )));
+        }
         if let crate::file::Content::Extents(extents) = &data.content
             && extents.iter().any(|x| x.checksums.is_some())
         {
@@ -2158,6 +2181,185 @@ impl<D: WriteAt> Volume<D> {
         }
     }
 
+    /// `update_file` for a file with stream snapshots, as Windows changes
+    /// one: its live level maps only what was written since the last
+    /// snapshot, the older levels the rest. Clusters the live level maps
+    /// are written where they are; clusters only older levels map are
+    /// copied on write into the live level (their old bytes with the new
+    /// ones); clusters it grows by go to the live level; the live level's
+    /// clusters past a new end are freed (the snapshots keep theirs). The
+    /// live level's value: its own records, 0x48 its own bytes, 0x30 the
+    /// size in whole clusters. False (nothing written) for streams it
+    /// does not take: integrity streams, holes in the live level.
+    #[allow(clippy::too_many_arguments)]
+    fn update_live_level(
+        &mut self,
+        path: &str,
+        fa: FileAt,
+        stream: &crate::file::Stream,
+        data: &dyn Source,
+        dirty: &[(u64, u64)],
+        now: u64,
+    ) -> Result<bool> {
+        if le32(&fa.record, 0x48) & INTEGRITY != 0 {
+            return Ok(false);
+        }
+        let live_key = |k: &[u8]| {
+            k.len() >= 0x18 && le32(k, 8) == 0x8000_0002 && le32(k, 12) & 0xffff == 0x80 && le64(k, 0x10) == LIVE_STREAM
+        };
+        let mut rows = embedded_rows(&fa.record)?;
+        let at = rows
+            .iter()
+            .position(|r| live_key(row_key(r)))
+            .ok_or_else(|| format_err!("{path}: no live level of its data"))?;
+        let own = self.extents(row_value(&rows[at]))?;
+        if own.iter().any(|x| !x.written || x.checksums.is_some()) {
+            return Ok(false);
+        }
+        let new_size = data.len();
+        if new_size > MAX_CREATED {
+            return Err(Error::Unsupported(format!("files of more than {MAX_CREATED} bytes")));
+        }
+        let cluster = self.cluster;
+        let (old_clusters, new_clusters) = (stream.size.div_ceil(cluster), new_size.div_ceil(cluster));
+        let kept = old_clusters.min(new_clusters);
+        // The live level's own clusters: vcn -> virtual cluster.
+        let mut mine: BTreeMap<u64, u64> = BTreeMap::new();
+        for x in &own {
+            for k in 0..x.clusters {
+                mine.insert(x.vcn + k, x.vlcn + k);
+            }
+        }
+        // The clusters the changes touch, within those it keeps: written
+        // in place where the live level has them, else copied on write.
+        let mut touched = std::collections::BTreeSet::new();
+        for &(from, to) in dirty {
+            let to = to.min(new_size).min(kept * cluster);
+            if from < to {
+                touched.extend(from / cluster..to.div_ceil(cluster));
+            }
+        }
+        let mut copies: Vec<(u64, u64)> = Vec::new();
+        for &c in touched.iter().filter(|c| !mine.contains_key(c)) {
+            match copies.last_mut() {
+                Some(l) if l.1 == c => l.1 += 1,
+                _ => copies.push((c, c + 1)),
+            }
+        }
+        let mut contents = Vec::with_capacity(copies.len());
+        for &(a, b) in &copies {
+            let mut buf = vec![0u8; ((b - a) * cluster) as usize];
+            let old_end = (stream.size.min(b * cluster) - a * cluster) as usize;
+            let mut got = 0;
+            while got < old_end {
+                let n = self.read_stream(stream, a * cluster + got as u64, &mut buf[got..old_end])?;
+                if n == 0 {
+                    break;
+                }
+                got += n;
+            }
+            for &(from, to) in dirty {
+                let (from, to) = (from.max(a * cluster), to.min(b * cluster).min(new_size));
+                if from < to {
+                    let o = (from - a * cluster) as usize;
+                    data.read_into(from, &mut buf[o..o + (to - from) as usize])?;
+                }
+            }
+            if new_size < b * cluster {
+                buf[(new_size - a * cluster) as usize..].fill(0);
+            }
+            contents.push(buf);
+        }
+        // In place: the changed bytes in the live level's own clusters.
+        for &(from, to) in dirty {
+            let to = to.min(new_size).min(kept * cluster);
+            let mut at = from;
+            while at < to {
+                let c = at / cluster;
+                let stop = ((c + 1) * cluster).min(to);
+                if let Some(&vlcn) = mine.get(&c) {
+                    let mut buf = vec![0u8; (stop - at) as usize];
+                    data.read_into(at, &mut buf)?;
+                    let lcn = self.translate(vlcn)?;
+                    self.write_volume(lcn * cluster + (at - c * cluster), &buf)?;
+                }
+                at = stop;
+            }
+        }
+        self.dev.flush()?;
+        // The live level's clusters past the new end go.
+        let mut free = Vec::new();
+        for &vlcn in mine.range(new_clusters..).map(|(_, v)| v) {
+            free.push(self.translate(vlcn)?);
+        }
+        mine.retain(|&c, _| c < new_clusters);
+        free.extend(self.extent_map_pages(row_value(&rows[at]))?);
+        let table = fa.home.unwrap_or(fa.dir);
+        let band = self.data_band(fa.dir)?;
+        {
+            let mut tx = Transaction::begin(&*self)?;
+            tx.free_data(&free)?;
+            let mut writes: Vec<(u64, u64, Option<&[u8]>)> = copies
+                .iter()
+                .zip(&contents)
+                .map(|(&(a, b), buf)| (a, b, Some(&buf[..])))
+                .collect();
+            if new_clusters > old_clusters {
+                writes.push((old_clusters, new_clusters, None));
+            }
+            for (a, b, content) in writes {
+                let runs = tx.take_data(band, b - a, a)?;
+                let mut vcn = a;
+                for (lcn, n) in runs {
+                    let mut buf = vec![0u8; (n * cluster) as usize];
+                    match content {
+                        Some(content) => {
+                            let o = ((vcn - a) * cluster) as usize;
+                            let len = buf.len();
+                            buf.copy_from_slice(&content[o..o + len]);
+                        }
+                        None => {
+                            let len = (n * cluster).min(new_size - vcn * cluster);
+                            data.read_into(vcn * cluster, &mut buf[..len as usize])?;
+                        }
+                    }
+                    self.write_clusters(lcn, &buf)?;
+                    let v = self.virtual_of(lcn)?;
+                    for k in 0..n {
+                        mine.insert(vcn + k, v + k);
+                    }
+                    vcn += n;
+                }
+            }
+            self.dev.flush()?;
+            // Its records: runs of consecutive clusters.
+            let mut records: Vec<(u64, u64, u64, Vec<u8>)> = Vec::new();
+            for (&c, &v) in &mine {
+                match records.last_mut() {
+                    Some(r) if r.0 + r.2 == c && r.1 + r.2 == v => r.2 += 1,
+                    _ => records.push((c, v, 1, Vec::new())),
+                }
+            }
+            let logical = new_clusters * cluster;
+            let own_bytes = mine.len() as u64 * cluster;
+            let mut live = self.map_value(&mut tx, table, new_size, logical, &records)?;
+            live[0x48..0x50].copy_from_slice(&own_bytes.to_le_bytes());
+            let mut key = row_key(&rows[at]).to_vec();
+            key[0..8].copy_from_slice(&(live.len() as u64).to_le_bytes());
+            rows[at] = row(&key, &live, ROW_EMBEDS_NODE);
+            let mut record = record_with_rows(&fa.record, &rows, le32(&fa.record, 0x98))?;
+            record[0x58..0x60].copy_from_slice(&new_size.to_le_bytes());
+            record[0x60..0x68].copy_from_slice(&logical.to_le_bytes());
+            for at in [0x30, 0x38] {
+                record[at..at + 8].copy_from_slice(&now.to_le_bytes());
+            }
+            store_in(&mut tx, &fa, &record)?;
+            tx.commit()?;
+        }
+        self.load()?;
+        Ok(true)
+    }
+
     /// `update_file` for an integrity stream, as Windows changes one: the
     /// clusters the `dirty` ranges touch are copied on write (their old
     /// bytes with the new ones, to new clusters with new checksums; the
@@ -2380,6 +2582,13 @@ impl<D: WriteAt> Volume<D> {
             {
                 x.clone()
             }
+            Some(stream) if new_size > MAX_INLINE as u64 && fa.snapshots && !fa.reparse => {
+                let stream = stream.clone();
+                if self.update_live_level(path, fa, &stream, data, dirty, now)? {
+                    return Ok(());
+                }
+                return Err(Error::Unsupported(format!("{path}: changing this file with snapshots")));
+            }
             Some(stream) if new_size > MAX_INLINE as u64 && !fa.snapshots && !fa.reparse => {
                 let stream = stream.clone();
                 if self.update_integrity(path, fa, &stream, data, dirty, now)? {
@@ -2495,6 +2704,16 @@ impl<D: WriteAt> Volume<D> {
     pub fn write_file_from(&mut self, path: &str, data: &dyn Source, now: u64) -> Result<()> {
         if data.len() > MAX_CREATED {
             return Err(Error::Unsupported(format!("files of more than {MAX_CREATED} bytes")));
+        }
+        // A file with stream snapshots: everything written to its live level.
+        let fa = self.file_at(path)?;
+        if fa.snapshots && !fa.reparse && data.len() > MAX_INLINE as u64 {
+            let file = self.open_file(&self.lookup(path)?)?;
+            if let Some(stream) = file.data
+                && self.update_live_level(path, fa, &stream, data, &[(0, data.len())], now)?
+            {
+                return Ok(());
+            }
         }
         self.replace_data(
             path,
