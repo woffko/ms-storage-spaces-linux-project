@@ -738,8 +738,10 @@ rows of thin spaces not allocated yet (M7).
   sets as Windows numbers them). A power-cut test replays every prefix
   of a commit's writes. Large extent maps go to a page of their own
   (integrity streams up to 8 MiB; Windows read and wrote them), and
-  64 KiB-cluster volumes get CRC-64 per 16 KiB. Next: reference counts
-  (deleting cloned files), stream snapshots.
+  64 KiB-cluster volumes get CRC-64 per 16 KiB. Deleting files whose
+  clusters are block-cloned lowers their reference counts as Windows
+  does (overwriting shared clusters in place is refused). Next: stream
+  snapshots, cloning files.
 
 ## Test infrastructure (continuous, feeds every stage)
 

@@ -492,17 +492,55 @@ fn deleting_and_renaming_files() {
     vol.delete_file("/sizes/size_65537.bin", now).unwrap();
     assert_allocated(&vol, &skip, "freed from a uniform row");
     assert_pages_valid(&vol, &skip, "freed from a uniform row");
-    // Refused: cloned clusters (deleting, or overwriting them where they
-    // are, which would change the other copies), an existing target name.
+    // Refused: overwriting cloned clusters where they are (that would
+    // change the other copies), an existing target name.
     let copy2 = read_all(&vol, "/clones/copy2.bin");
     for err in [
-        vol.delete_file("/clones/copy1.bin", now).unwrap_err(),
         vol.overwrite("/clones/copy1.bin", 4096, b"changed", now).unwrap_err(),
         vol.rename("/sizes/size_0.bin", "size_1000.bin", now).unwrap_err(),
     ] {
         assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
     }
     assert_eq!(read_all(&vol, "/clones/copy2.bin"), copy2);
+    // Three files share these clusters (count 2 in the reference count
+    // table): deleting two lowers the counts, the clusters stay with the
+    // third; deleting it frees them.
+    let counts = |vol: &Volume<_>| {
+        let mut sum = 0u64;
+        vol.walk(&vol.checkpoint.roots[6].clone(), false, &mut |row| {
+            sum += u64::from(u32::from_le_bytes(row.value[0x18..0x1c].try_into().unwrap()));
+            Ok(())
+        })
+        .unwrap();
+        sum
+    };
+    let shared = counts(&vol);
+    assert!(shared > 0);
+    let clusters = {
+        let file = vol.open_file(&vol.lookup("/sizes/size_10485760.bin").unwrap()).unwrap();
+        let refs::Content::Extents(x) = file.data.unwrap().content else {
+            panic!("inline")
+        };
+        x.iter()
+            .flat_map(|x| {
+                let lcn = vol.translate(x.vlcn).unwrap();
+                lcn..lcn + x.clusters
+            })
+            .collect::<Vec<_>>()
+    };
+    vol.delete_file("/clones/copy1.bin", now).unwrap();
+    assert_eq!(counts(&vol), shared / 2, "one reference less");
+    assert_eq!(read_all(&vol, "/clones/copy2.bin"), copy2);
+    vol.delete_file("/clones/copy2.bin", now).unwrap();
+    assert_eq!(counts(&vol), 0);
+    let used1 = used(&vol, 1);
+    assert!(clusters.iter().all(|c| used1.contains(c)), "still the third file's");
+    assert_eq!(read_all(&vol, "/sizes/size_10485760.bin"), copy2);
+    vol.delete_file("/sizes/size_10485760.bin", now).unwrap();
+    let used1 = used(&vol, 1);
+    assert!(clusters.iter().all(|c| !used1.contains(c)), "freed with the last file");
+    assert_allocated(&vol, &skip, "clones deleted");
+    assert_pages_valid(&vol, &skip, "clones deleted");
 }
 
 #[test]

@@ -358,6 +358,43 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         Ok(())
     }
 
+    /// Frees a file's data clusters, minding block clones: a cluster the
+    /// block reference count table (root 6) counts further references for
+    /// loses one there (its count and the row's total at 0x18, as Windows
+    /// does; the row stays) and stays allocated; the others become free.
+    fn free_data(&mut self, clusters: &[u64]) -> Result<()> {
+        const REFCOUNTS: usize = 6;
+        let rows = self.rows(Tree::Root(REFCOUNTS), &|_| true)?;
+        let mut free = Vec::with_capacity(clusters.len());
+        for &c in clusters {
+            let v = self.vol.virtual_of(c)?;
+            let hit = rows.iter().copied().find(|r| {
+                let val = &self.pages[r.page].data[r.value..r.value + r.len];
+                val.len() >= 0x1c && le64(val, 0) <= v && v < le64(val, 0).saturating_add(le64(val, 8))
+            });
+            let Some(at) = hit else {
+                free.push(c);
+                continue;
+            };
+            let first = le64(&self.pages[at.page].data[at.value..], 0);
+            let i = 0x1c + 2 * (v - first) as usize;
+            let val = &self.pages[at.page].data[at.value..at.value + at.len];
+            if val.get(i..i + 2).is_none() {
+                return Err(format_err!("reference count row without a count for cluster {v:#x}"));
+            }
+            let count = le16(val, i);
+            if count == 0 {
+                free.push(c);
+                continue;
+            }
+            let val = self.value_mut(at);
+            val[i..i + 2].copy_from_slice(&(count - 1).to_le_bytes());
+            let total = le32(val, 0x18).saturating_sub(1);
+            val[0x18..0x1c].copy_from_slice(&total.to_le_bytes());
+        }
+        self.release(ROOT_MEDIUM_ALLOCATOR, &free)
+    }
+
     /// Turns the block of a fully used uniform allocator row (kind 2, no
     /// free clusters) that holds cluster `c` into a bitmap row of its
     /// 0x4000 clusters, all used, so that clusters there can be freed: the
@@ -1580,11 +1617,6 @@ impl<D: WriteAt> Volume<D> {
                 content: crate::file::Content::Extents(x),
                 ..
             }) if x.iter().any(|x| x.checksums.is_some()));
-        if self.refcounted(&runs)? {
-            return Err(Error::Unsupported(format!(
-                "{path}: shared (cloned or deduplicated) clusters"
-            )));
-        }
         let band = if data.len() > MAX_INLINE {
             Some(self.data_band(dir)?)
         } else {
@@ -1595,7 +1627,7 @@ impl<D: WriteAt> Volume<D> {
             let mut tx = Transaction::begin(&*self)?;
             // The old data clusters become free (kept until the commit).
             let clusters: Vec<u64> = runs.iter().flat_map(|&(lcn, n)| lcn..lcn + n).collect();
-            tx.release(ROOT_MEDIUM_ALLOCATOR, &clusters)?;
+            tx.free_data(&clusters)?;
             let file = NewRecord {
                 now,
                 id,
@@ -1701,16 +1733,11 @@ impl<D: WriteAt> Volume<D> {
         } = file;
         runs.extend(stream_runs);
         let id = le64(&record, 0x80);
-        if self.refcounted(&runs)? {
-            return Err(Error::Unsupported(format!(
-                "{path}: shared (cloned or deduplicated) clusters"
-            )));
-        }
         {
             let mut tx = Transaction::begin(&*self)?;
             // Its data clusters become free (kept until the commit).
             let clusters: Vec<u64> = runs.iter().flat_map(|&(lcn, n)| lcn..lcn + n).collect();
-            tx.release(ROOT_MEDIUM_ALLOCATOR, &clusters)?;
+            tx.free_data(&clusters)?;
             tx.remove_row(Tree::Object(dir), &|k| is_name_row(k, &name))?;
             tx.remove_row(Tree::Object(dir), &|k| {
                 k.len() >= 16 && le16(k, 0) == ROW_FILE_ID && le64(k, 8) == id
@@ -2170,12 +2197,6 @@ impl<D: WriteAt> Volume<D> {
                 clusters.extend(self.extent_map_pages(row_value(r))?);
             }
             rows.retain(|r| !of_set(r));
-            let runs: Vec<(u64, u64)> = clusters.iter().map(|&c| (c, 1)).collect();
-            if self.refcounted(&runs)? {
-                return Err(Error::Unsupported(format!(
-                    "{path}: shared (cloned or deduplicated) clusters"
-                )));
-            }
         }
         let mut record = record_with_rows(&file.record, &rows, le32(&file.record, 0x98))?;
         record[0x38..0x40].copy_from_slice(&now.to_le_bytes());
@@ -2188,7 +2209,7 @@ impl<D: WriteAt> Volume<D> {
     fn store_record(&mut self, file: &FileAt, record: &[u8], free: &[u64]) -> Result<()> {
         {
             let mut tx = Transaction::begin(&*self)?;
-            tx.release(ROOT_MEDIUM_ALLOCATOR, free)?;
+            tx.free_data(free)?;
             store_in(&mut tx, file, record)?;
             tx.commit()?;
         }
@@ -2293,18 +2314,13 @@ impl<D: WriteAt> Volume<D> {
                 "{parent}/{name}: stream snapshots or a link"
             )));
         }
-        if last && self.refcounted(&runs)? {
-            return Err(Error::Unsupported(format!(
-                "{parent}/{name}: the volume has shared (cloned or deduplicated) clusters"
-            )));
-        }
         {
             let mut tx = Transaction::begin(&*self)?;
             tx.remove_row(Tree::Object(dir), &|k| is_entry_row(k, &name))?;
             let key = record_key(id, home);
             if last {
                 let clusters: Vec<u64> = runs.iter().flat_map(|&(lcn, n)| lcn..lcn + n).collect();
-                tx.release(ROOT_MEDIUM_ALLOCATOR, &clusters)?;
+                tx.free_data(&clusters)?;
                 tx.remove_row(Tree::Object(home), &|k| k == key)?;
                 tx.remove_row(Tree::Object(home), &|k| {
                     k.len() >= 16 && le16(k, 0) == ROW_FILE_ID && le64(k, 8) == id

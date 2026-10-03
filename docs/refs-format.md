@@ -341,10 +341,17 @@ table's rows for a text diff):
   u64 at 0x10, the sum of the counts (u32 at 0x18), then from 0x1c a u16
   per cluster counting its references beyond the first (three files
   sharing a cluster: 2; 0 for a cluster one file has alone); empty on
-  volumes without block clones or deduplication. `refs` neither frees
-  nor overwrites in place a cluster with a count (deleting such a file is
-  refused, as is overwriting such clusters, which would change the other
-  files) and handles clusters of count 0 as on any volume.
+  volumes without block clones or deduplication. Copying a file
+  (Windows 11 clones its blocks) adds a row for each 0x400-aligned range
+  of its clusters with count 1; deleting one of the files sharing a
+  cluster lowers its count and the total (the row stays, at 0 too), and
+  only a cluster of count 0 is freed. The u64 at 0x10 changes with every
+  transaction that touches the table (the same in all its rows; meaning
+  unknown, `refs` keeps it). `refs` deletes and rewrites such files the
+  same way (**verified**: after refs deleted one or all three files
+  sharing clusters, Windows reported no leak, read the others, cloned
+  and deleted the rest) and refuses to overwrite shared clusters in
+  place (that would change the other files).
 * Moving a file to another directory, or giving it a second name (steps
   `move`, `link`): its record leaves its name row and becomes a row of
   type 0x40 of the directory it was made in (its home; key 0x40, 0x8000,
