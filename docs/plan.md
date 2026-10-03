@@ -635,14 +635,16 @@ rows of thin spaces not allocated yet (M7).
   64 KiB units compressed one by one with a CRC32-C each, described by
   rows of root 10 (docs/refs-format.md, "Compression"). `refs` reads such
   files (all 40 with Windows' SHA-256; fixture `r314compress`, damaged
-  units refused) and refuses to change them; ZSTD has no sample yet.
+  units refused) and refuses to change them. ZSTD (`refsutil compression
+  E: /c /f ZSTD`): a ZSTD frame per unit, read with the `ruzstd` crate
+  (all 20 files of fixture `r314zstd` with Windows' SHA-256).
   Integrity streams: the data checksums (CRC32-C per 4 KiB
   cluster, CRC-64 per 16 KiB of 64 KiB clusters; volume `r314integ64k`)
   are checked on every read, damaged data is refused. ReFS inside a space:
   a Dev Drive in a two-way mirror space of two disks (`-PoolDisks 2
   -Resiliency Mirror`, volume `r314mirror`) reads back as Windows listed
-  it, through the library and the mount (`refs --space`). Open: ZSTD
-  compression (no sample), changing compressed files.
+  it, through the library and the mount (`refs --space`). Open:
+  changing compressed files.
 * B4 (research): write experiments on a small volume (scenario `small`,
   `tools/vm/Invoke-RefsSteps.ps1`, `tools/refs-diff.py`, `refs map` and
   `refs tree`) show what one change costs: copy-on-write pages up to both

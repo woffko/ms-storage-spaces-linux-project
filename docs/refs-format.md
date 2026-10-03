@@ -323,15 +323,16 @@ ReFS compresses containers, not files (2026-10-04, Windows 11 26340:
 over 40 text files whose times were set three days back; `-Type
 Compress` and `refsutil compression /c` alone compressed nothing). The
 job *compacts* a data container: the clusters in use, in order, become
-one stream, cut into units of 64 KiB, each compressed (LZ4 blocks, no
-frame) or kept as it is when that does not make it shorter, and the
+one stream, cut into units of 64 KiB, each compressed (LZ4: a block,
+no frame; ZSTD: a frame with its content size, level 3 here) or kept
+as it is when that does not make it shorter, and the
 units are stored one after the other in clusters of another data
 container. Files keep their extents; a cluster's data is in the unit
 that holds its place in the stream.
 
 * The compacted container's row in the container table: class 0xa (u32
-  at 0x14), the kept clusters at 0x24, the format at 0x30 (1 LZ4; 2 ZSTD
-  and 3 LZ4 on QuickAssist hardware by forefst's notes), the unit size
+  at 0x14), the kept clusters at 0x24, the format at 0x30 (1 LZ4, 2
+  ZSTD; 3 LZ4 on QuickAssist hardware by forefst's notes), the unit size
   at 0x34 (0x10000), and in place of the physical start and clusters
   the *virtual* cluster of the compressed bytes (0x130000: container
   0x26) and their clusters (0x1628).
@@ -351,11 +352,17 @@ that holds its place in the stream.
 * Windows reported 376 leaked clusters on the compacted volume by itself
   (`refsutil leak`), the same after `refs` wrote a file on it.
 
+ZSTD (`refsutil compression E: /c /f ZSTD` on a volume with
+`Enable-ReFSDedup -Type DedupAndCompress`: 30.3 MB of text into 4.92 MB)
+lays out the same, format 2 in the row, a ZSTD frame per unit.
+
 `refs` reads compacted containers (Volume::read_virtual decompresses the
-units a read needs, checking their CRC32-C, and keeps the last few), and
+units a read needs, checking their CRC32-C, and keeps the last few; LZ4
+with its own decoder, ZSTD with the `ruzstd` crate after checking the
+frame's window and content size), and
 `refs check` looks for their compressed clusters in the medium
-allocator instead of the files' runs (**verified**: all 40 files read
-with Windows' SHA-256, a damaged unit is refused). Changing a file with
+allocator instead of the files' runs (**verified**: all 40 LZ4 and all
+20 ZSTD files read with Windows' SHA-256, a damaged unit is refused). Changing a file with
 compressed data is refused; new data never goes into a compacted
 container (its class is neither 0 nor 1).
 

@@ -887,6 +887,7 @@ dependencies = [
 name = "refs"
 version = "1.0.0"
 dependencies = [
+ "ruzstd",
  "serde_json",
  "storage-spaces",
  "thiserror 2.0.21",
@@ -970,6 +971,12 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "ruzstd"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a252f5e20f038fe7b4ea53e073e65398d652c864cc162fc77c56c2f13717b888"
 
 [[package]]
 name = "scopeguard"

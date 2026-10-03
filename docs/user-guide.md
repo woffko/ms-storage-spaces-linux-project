@@ -531,9 +531,9 @@ directories of any size, named streams, stream snapshots (`refsutil
 streamsnapshot`; `refs cat --snapshot`, not in the mount), hard links,
 symbolic links and junctions, attributes and times, volumes with 4 KiB
 and 64 KiB clusters, CRC-64 or SHA-256 metadata checksums and integrity
-streams, and files Windows compressed with LZ4 (`Enable-ReFSDedup -Type
-DedupAndCompress`; checked unit by unit) (verified on ReFS 3.14 volumes
-made by Windows 11). Not read yet: ZSTD-compressed files (no sample),
+streams, and files Windows compressed with LZ4 or ZSTD (`Enable-ReFSDedup
+-Type DedupAndCompress`, `refsutil compression`; checked unit by unit)
+(verified on ReFS 3.14 volumes made by Windows 11). Not read yet:
 encrypted files, ReFS 1.x/2.x and 3.4 to 3.13. Compressed files are
 not changed by `refs` (the writing commands refuse them).
 

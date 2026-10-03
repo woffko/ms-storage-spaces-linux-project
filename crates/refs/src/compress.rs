@@ -7,8 +7,8 @@
 //! unit that holds it.
 //!
 //! * The container table row: class 0xa (u32 at 0x14), the compression
-//!   format at 0x30 (1 LZ4, 2 ZSTD, 3 LZ4 on QuickAssist hardware, the same
-//!   blocks), the unit size at 0x34, and in place of the physical start
+//!   format at 0x30 (1 LZ4 blocks, 2 ZSTD frames, 3 LZ4 on QuickAssist
+//!   hardware), the unit size at 0x34, and in place of the physical start
 //!   the *virtual* cluster where the compressed bytes are, and their
 //!   clusters.
 //! * Root 10 rows keyed (container id u64, sequence u32, type u32): type 3
@@ -184,7 +184,7 @@ impl Compacted {
         }
         match self.format {
             1 | 3 => lz4_block(packed, size),
-            2 => Err(Error::Unsupported("ZSTD-compressed data".into())),
+            2 => zstd_frame(packed, size),
             f => Err(Error::Unsupported(format!("compression format {f}"))),
         }
     }
@@ -237,6 +237,62 @@ pub fn lz4_block(src: &[u8], size: usize) -> Result<Vec<u8>> {
     }
     if out.len() != size {
         return Err(format_err!("an LZ4 block of {} bytes, not {size}", out.len()));
+    }
+    Ok(out)
+}
+
+/// A ZSTD frame that decompresses to exactly `size` bytes (each unit of a
+/// ZSTD-compressed container is one, with its content size).
+pub fn zstd_frame(src: &[u8], size: usize) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let bad = |e: &dyn std::fmt::Display| format_err!("a damaged ZSTD frame: {e}");
+    // The frame header first: a window (what the decoder allocates) of at
+    // most 8 MiB, and a content size, when it has one, of `size`.
+    let header = src.get(..14).unwrap_or(src);
+    if header.get(..4) != Some(&[0x28, 0xb5, 0x2f, 0xfd][..]) || header.len() < 6 {
+        return Err(bad(&"no frame magic"));
+    }
+    let fhd = header[4];
+    let single = fhd & 0x20 != 0;
+    let mut at = 5;
+    if !single {
+        let wd = header[5];
+        let base = 1u64 << (10 + u32::from(wd >> 3));
+        if base + base / 8 * u64::from(wd & 7) > 8 << 20 {
+            return Err(bad(&"a window over 8 MiB"));
+        }
+        at += 1;
+    }
+    at += [0, 1, 2, 4][usize::from(fhd & 3)];
+    let fcs_len = match fhd >> 6 {
+        0 if single => 1,
+        0 => 0,
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    };
+    if fcs_len > 0 {
+        let field = header
+            .get(at..at + fcs_len)
+            .ok_or_else(|| bad(&"a short frame header"))?;
+        let mut fcs = field.iter().rev().fold(0u64, |a, &b| a << 8 | u64::from(b));
+        if fcs_len == 2 {
+            fcs += 256;
+        }
+        if fcs != size as u64 {
+            return Err(bad(&format!("content of {fcs} bytes, not {size}")));
+        }
+    } else if single {
+        return Err(bad(&"a single-segment frame without its size"));
+    }
+    let decoder = ruzstd::decoding::StreamingDecoder::new(src).map_err(|e| bad(&e))?;
+    let mut out = Vec::with_capacity(size);
+    decoder
+        .take(size as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| bad(&e))?;
+    if out.len() != size {
+        return Err(format_err!("a ZSTD frame of {} bytes, not {size}", out.len()));
     }
     Ok(out)
 }

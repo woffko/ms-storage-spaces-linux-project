@@ -45,10 +45,10 @@ against pools created by Windows.
 | Adding, retiring, removing and replacing disks; repair, optimize, scrub; health in Windows' terms | `spaces disk ...`, `spaces pool ...` |
 | Creating tiered spaces (SSD mirror over HDD simple or parity) | `spaces tier`, `spaces space create --tier` |
 | Creating dual parity spaces; writing tiered spaces | not yet |
-| ReFS 3.x volumes (Dev Drives, data volumes, inside a space): files, sparse, block-cloned, deduplicated and LZ4-compressed files, named streams, stream snapshots, links, attributes; integrity streams checked on every read | `refs` reads and mounts read-only (FUSE); verified on ReFS 3.14 |
+| ReFS 3.x volumes (Dev Drives, data volumes, inside a space): files, sparse, block-cloned, deduplicated and compressed (LZ4, ZSTD) files, named streams, stream snapshots, links, attributes; integrity streams checked on every read | `refs` reads and mounts read-only (FUSE); verified on ReFS 3.14 |
 | Writing ReFS: files (up to 64 GiB each), directories, renames and moves, hard links, times and attributes, named streams, integrity streams, block clones (`refs clone`), deleting block-cloned files and files with snapshots; a read-write FUSE mount; `mount -t ReFS` and udisks2 through `mount.ReFS` | `refs set|overwrite|write|create|rename|move|link|clone|delete|mkdir --yes`, `refs mount --rw` (experimental); Windows takes the result as healthy (refsutil leak and triage) |
 | Checking ReFS | `refs check` (pages, allocators, shared clusters) |
-| ReFS ZSTD compression and changing compressed files, encryption; ReFS 1.x/2.x and 3.4-3.13 (no Windows at hand makes them); making stream snapshots | not yet |
+| ReFS: changing compressed files, encryption; ReFS 1.x/2.x and 3.4-3.13 (no Windows at hand makes them); making stream snapshots | not yet |
 
 ## Quick start
 
@@ -171,7 +171,7 @@ refs ls --space Data /dev/sdd /dev/sde --path /
 
 ReFS is a separate track: reading ReFS 3.x and mounting it (done for ReFS
 3.14, with snapshots and deduplicated files), writing (done for the
-operations above, each checked on Windows; reading LZ4 compression),
+operations above, each checked on Windows; reading compression),
 then older versions, which need older Windows to make samples.
 Details in [docs/plan.md](docs/plan.md).
 

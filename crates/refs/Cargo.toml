@@ -11,6 +11,8 @@ exclude = ["tests"]
 [dependencies]
 storage-spaces.workspace = true
 thiserror.workspace = true
+# ZSTD frames of compressed containers (pure Rust).
+ruzstd = { version = "0.9", default-features = false, features = ["std"] }
 
 [lints.rust]
 # cargo fuzz builds with --cfg fuzzing; checksums are not checked then.
