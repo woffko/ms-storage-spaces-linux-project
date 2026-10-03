@@ -2,7 +2,8 @@
 //! crates/refs/tests (a clean log, no shared clusters), its stored bytes
 //! patched by the start of the input (as in refs_volume), then the
 //! operations the rest of the input picks (times, attributes, overwriting,
-//! creating, writing, renaming, moving, linking and deleting files and
+//! creating, writing, changing in place, renaming, moving, linking and
+//! deleting files and
 //! directories, also through the names those operations give) on a
 //! writable overlay. Fuzzing builds accept every checksum. Whatever
 //! the metadata says, nothing may panic and no byte may be written outside
@@ -77,7 +78,28 @@ fuzz_target!(|data: &[u8]| {
             1 => vol.set_attributes(path, n as u32),
             2 => vol.overwrite(path, (n % 4096) as u64, &arg[..arg.len().min(3)], now),
             3 => vol.create_file(path, &vec![0x5a; n % 6000], now),
-            4 => vol.write_file(path, &vec![0xa5; n % 9000], now),
+            4 if n % 2 == 0 => vol.write_file(path, &vec![0xa5; n % 9000], now),
+            4 => {
+                // The file's data, appended to and patched, changed in place.
+                let mut data = vol
+                    .lookup(path)
+                    .and_then(|e| vol.open_file(&e))
+                    .ok()
+                    .and_then(|f| f.data)
+                    .map(|s| {
+                        let mut b = vec![0u8; (s.size as usize).min(1 << 20)];
+                        let _ = vol.read_stream(&s, 0, &mut b);
+                        b
+                    })
+                    .unwrap_or_default();
+                let old = data.len() as u64;
+                data.resize(data.len() + n % 9000, 0x3c);
+                if let Some(b) = data.get_mut(n % 4096) {
+                    *b ^= 0xff;
+                }
+                let at = (n % 4096) as u64;
+                vol.update_file(path, &data.as_slice(), &[(at, at + 1), (old, data.len() as u64)], now)
+            }
             5 if n % 2 == 0 => vol.rename(path, "renamed", now),
             5 => vol.move_file(path, "/dir/moved", now),
             6 if n % 3 == 0 => vol.link_file(path, "/linked", now),
