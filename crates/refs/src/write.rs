@@ -2512,6 +2512,8 @@ impl<D: WriteAt> Volume<D> {
     /// are not cloned; `from` must not have snapshots, and both must be
     /// integrity streams or neither.
     pub fn clone_file(&mut self, from: &str, to: &str, now: u64) -> Result<()> {
+        // Its runs inside the volume (as for any file changed).
+        self.file_at(from)?;
         let source = self.open_file(&self.lookup(from)?)?;
         if !source.snapshots.is_empty() {
             return Err(Error::Unsupported(format!("{from}: snapshots")));
@@ -3364,6 +3366,23 @@ impl<D: WriteAt> Volume<D> {
                 }
                 to.extend(self.extent_map_pages(row_value(&r))?.into_iter().map(|c| (c, 1)));
             }
+        }
+        // Runs inside the volume, and not more of them than levels sharing
+        // clusters explain (freeing lists every cluster).
+        let total = self.boot.volume_size() / self.cluster;
+        let mut sum = 0u64;
+        for &(lcn, n) in runs.iter().chain(&stream_runs) {
+            if lcn.checked_add(n).is_none_or(|end| end > total) {
+                return Err(format_err!(
+                    "{path}: a run of {n} clusters at {lcn:#x}, past the volume's end"
+                ));
+            }
+            sum = sum.saturating_add(n);
+        }
+        if sum > 2 * total {
+            return Err(format_err!(
+                "{path}: runs of {sum} clusters, more than the volume holds"
+            ));
         }
         Ok(FileAt {
             parent: parent.to_owned(),
