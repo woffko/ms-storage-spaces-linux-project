@@ -1187,3 +1187,96 @@ fn deleting_named_streams_in_clusters() {
     assert_allocated(&vol, &skip, "streams");
     assert_pages_valid(&vol, &skip, "streams");
 }
+
+#[test]
+fn interrupted_writes_leave_the_old_or_the_new_volume() {
+    // Each operation's writes, replayed up to every point (and the last
+    // write torn in half), as a power cut would leave them: the volume
+    // opens as it was before or, once the checkpoint is down, after.
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let now = 134_400_000_000_000_000;
+    let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    type Op<'a> = Box<dyn Fn(&mut Volume<&Recorder<&Overlay<&SparseImage>>>) + 'a>;
+    let ops: Vec<(&str, Op)> = vec![
+        ("create", Box::new(|v| v.create_file("/new.bin", &big, now).unwrap())),
+        ("mkdir", Box::new(move |v| v.create_directory("/made", now).unwrap())),
+        ("delete", Box::new(move |v| v.delete_file("/mid.bin", now).unwrap())),
+        (
+            "link",
+            Box::new(move |v| v.link_file("/last.txt", "/dir/l.txt", now).unwrap()),
+        ),
+        (
+            "stream",
+            Box::new(move |v| v.write_stream("/small.txt", "s", b"stream", now).unwrap()),
+        ),
+    ];
+    let listing = |vol: &Volume<&Overlay<&SparseImage>>| {
+        let mut names: Vec<String> = Vec::new();
+        for dir in [ROOT_DIRECTORY, vol_dir(vol, "/dir")] {
+            names.extend(vol.read_dir(dir).unwrap().into_iter().map(|e| e.name));
+        }
+        names.sort();
+        names
+    };
+    for (what, op) in ops {
+        let overlay = Overlay::new(&image);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let dev = Recorder::new(&overlay, 0, log.clone());
+        let mut vol = Volume::open(&dev, offset).unwrap();
+        let before = (listing(&Volume::open(&overlay, offset).unwrap()), vol.checkpoint.clock);
+        op(&mut vol);
+        let after = (listing(&Volume::open(&overlay, offset).unwrap()), vol.checkpoint.clock);
+        assert_ne!(before, after, "{what}: changed something");
+        let writes: Vec<(u64, Arc<[u8]>)> = log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                DeviceEvent::Write { offset, data, .. } => Some((*offset, data.clone())),
+                DeviceEvent::Flush { .. } => None,
+            })
+            .collect();
+        for k in 0..=writes.len() {
+            for torn in [false, true] {
+                if torn && k == writes.len() {
+                    continue;
+                }
+                let replay = Overlay::new(&image);
+                for (at, data) in &writes[..k] {
+                    storage_spaces::io::WriteAt::write_all_at(&replay, data, *at).unwrap();
+                }
+                if torn {
+                    let (at, data) = &writes[k];
+                    storage_spaces::io::WriteAt::write_all_at(&replay, &data[..data.len() / 2], *at).unwrap();
+                }
+                let vol = Volume::open(&replay, offset).unwrap_or_else(|e| {
+                    panic!(
+                        "{what}: {k} of {} writes{}: {e}",
+                        writes.len(),
+                        if torn { " and half" } else { "" }
+                    )
+                });
+                let state = (listing(&vol), vol.checkpoint.clock);
+                assert!(
+                    state == before || state == after,
+                    "{what}: {k} of {} writes: neither the old nor the new volume",
+                    writes.len()
+                );
+                // New once the checkpoint is down (a torn checkpoint whose
+                // written half holds all that differs counts as down).
+                let down = k == writes.len() || (torn && k + 1 == writes.len());
+                assert!(
+                    down || state == before,
+                    "{what}: new after {k} of {} writes",
+                    writes.len()
+                );
+                assert!(k < writes.len() || state == after, "{what}: old after all writes");
+                if k % 7 == 0 || k + 1 >= writes.len() {
+                    assert_pages_valid(&vol, &skip, what);
+                    assert_allocated(&vol, &skip, what);
+                }
+            }
+        }
+    }
+}
