@@ -44,7 +44,7 @@ against pools created by Windows.
 | Creating tiered spaces (SSD mirror over HDD simple or parity) | `spaces tier`, `spaces space create --tier` |
 | Creating dual parity spaces; writing tiered spaces | not yet |
 | ReFS 3.x volumes (Dev Drives, data volumes, inside a space): files, sparse, block-cloned and deduplicated files, named streams, stream snapshots, links, attributes; integrity streams checked on every read | `refs` reads and mounts read-only (FUSE); verified on ReFS 3.14 |
-| Writing ReFS: times and attributes, overwriting file data, creating, renaming and deleting small files | `refs set|overwrite|create|rename|delete --yes` (experimental); Windows takes the result as healthy |
+| Writing ReFS: times and attributes, overwriting file data, creating, renaming and deleting files | `refs set|overwrite|create|rename|delete --yes` (experimental); Windows takes the result as healthy |
 | ReFS compression, encryption; ReFS 1.x/2.x; other ReFS writes | not yet |
 
 ## Quick start

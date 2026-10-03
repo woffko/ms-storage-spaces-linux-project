@@ -451,8 +451,9 @@ file (up to 1 KiB kept in its record, up to 64 MiB in clusters near the
 data of the files around it) with a printable ASCII name, in a directory
 small enough to fit one metadata page; it takes the permissions of the
 files beside it. `refs rename` (within the directory)
-and `refs delete` work on files whose data is kept in their record (small
-files).
+and `refs delete` work on files whose record is in their directory entry
+(most files; not hard links); deleting a file with data clusters is
+refused on volumes with block-cloned or deduplicated clusters.
 
 It writes the way Windows does (copy on write, then a new checkpoint), so
 an interruption leaves the volume as it was before. Files whose record
@@ -467,7 +468,7 @@ and 64 KiB clusters, CRC-64 or SHA-256 metadata checksums and integrity
 streams (verified on ReFS 3.14 volumes made by Windows 11). Not read yet:
 compressed files, encrypted files, ReFS 1.x/2.x; writing ReFS beyond
 times, attributes, overwriting, and creating, renaming and deleting
-small files is not supported yet.
+files is not supported yet.
 
 ## Troubleshooting
 

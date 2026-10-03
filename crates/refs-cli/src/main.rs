@@ -152,7 +152,8 @@ enum Command {
         yes: bool,
     },
     /// Delete a file (experimental: writes the volume, only with --yes;
-    /// files whose data is in their record).
+    /// not hard links; with data clusters, not on volumes with shared
+    /// clusters).
     Delete {
         /// The image, disk or partition.
         device: PathBuf,
@@ -164,8 +165,7 @@ enum Command {
         yes: bool,
     },
     /// Rename a file within its directory (experimental: writes the
-    /// volume, only with --yes; files whose data is in their record, a
-    /// printable ASCII name).
+    /// volume, only with --yes; not hard links; a printable ASCII name).
     Rename {
         /// The image, disk or partition.
         device: PathBuf,

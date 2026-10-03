@@ -684,8 +684,12 @@ rows of thin spaces not allocated yet (M7).
   deleted another. The first version wrote one run; Windows' append then
   bug-checked the VM (0x149, the run not found; analysed with the Windows
   debugger on the test VM): a run must not cross the file's cluster 64.
-  Next: deleting files in extents, growing files, directories, splitting
-  pages.
+  Deleting and renaming files in extents: the record moves as it is; a
+  deleted file's data clusters are freed (refused while the block
+  reference count table, root 6, has rows: clusters may be shared by
+  clones or deduplication). On Windows: healthy, `refsutil leak` as on
+  the untouched volume, and Windows then appended to and deleted our
+  files. Next: growing files, directories, splitting pages.
 
 ## Test infrastructure (continuous, feeds every stage)
 

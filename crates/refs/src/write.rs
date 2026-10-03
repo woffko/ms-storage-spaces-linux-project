@@ -816,13 +816,28 @@ impl<D: WriteAt> Volume<D> {
         Err(Error::Unsupported("no file to share a security descriptor with".into()))
     }
 
-    /// Deletes a file whose record is in its directory entry and whose
-    /// data is inline (or none): its name row and file id row.
+    /// Deletes a file whose record is in its directory entry: its name row
+    /// and file id row, and its data clusters (refused on volumes with
+    /// shared clusters).
     pub fn delete_file(&mut self, path: &str, now: u64) -> Result<()> {
-        let (parent, name, dir, record) = self.embedded_file(path)?;
+        let EmbeddedFile {
+            parent,
+            name,
+            dir,
+            record,
+            runs,
+        } = self.embedded_file(path)?;
         let id = le64(&record, 0x80);
+        if !runs.is_empty() && self.has_shared_clusters()? {
+            return Err(Error::Unsupported(format!(
+                "{path}: the volume has shared (cloned or deduplicated) clusters"
+            )));
+        }
         {
             let mut tx = Transaction::new(&*self);
+            // Its data clusters become free (kept until the commit).
+            let clusters: Vec<u64> = runs.iter().flat_map(|&(lcn, n)| lcn..lcn + n).collect();
+            tx.release(ROOT_MEDIUM_ALLOCATOR, &clusters)?;
             let root = tx.single_page(dir)?;
             tx.remove(root, &|k| is_name_row(k, &name))?;
             tx.remove(root, &|k| {
@@ -834,10 +849,16 @@ impl<D: WriteAt> Volume<D> {
         self.load()
     }
 
-    /// Renames a file whose record is in its directory entry and whose
-    /// data is inline (or none), within its directory.
+    /// Renames a file whose record is in its directory entry, within its
+    /// directory.
     pub fn rename(&mut self, path: &str, new_name: &str, now: u64) -> Result<()> {
-        let (parent, name, dir, mut record) = self.embedded_file(path)?;
+        let EmbeddedFile {
+            parent,
+            name,
+            dir,
+            mut record,
+            ..
+        } = self.embedded_file(path)?;
         check_name(new_name)?;
         let target = format!("{}/{new_name}", parent.trim_end_matches('/'));
         match self.lookup(&target) {
@@ -868,10 +889,22 @@ impl<D: WriteAt> Volume<D> {
         self.load()
     }
 
-    /// For a file whose record is in its directory entry and whose data is
-    /// inline or none: its directory's path, its name, the directory's
-    /// object id and the record.
-    fn embedded_file(&self, path: &str) -> Result<(String, String, u64, Vec<u8>)> {
+    /// Whether the block reference count table (root 6) counts clusters
+    /// that several files share (block clones, deduplication).
+    fn has_shared_clusters(&self) -> Result<bool> {
+        let mut any = false;
+        self.walk(&self.checkpoint.roots[6].clone(), false, &mut |_| {
+            any = true;
+            Ok(())
+        })?;
+        Ok(any)
+    }
+
+    /// For a file whose record is in its directory entry (no named streams
+    /// or snapshots in clusters, no reparse point): its directory's path,
+    /// its name, the directory's object id, the record and the physical
+    /// runs of its data.
+    fn embedded_file(&self, path: &str) -> Result<EmbeddedFile> {
         let trimmed = path.trim_end_matches('/');
         let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
         let entry = self.lookup(trimmed)?;
@@ -881,22 +914,34 @@ impl<D: WriteAt> Volume<D> {
             )));
         };
         let file = self.open_file(&entry)?;
-        let extents = file
-            .data
+        let other = file
+            .streams
             .iter()
-            .chain(file.streams.iter().chain(&file.snapshots).map(|(_, s)| s))
-            .any(|s| matches!(s.content, crate::file::Content::Extents(_)));
-        if extents || file.reparse.is_some() {
+            .chain(&file.snapshots)
+            .any(|(_, s)| matches!(s.content, crate::file::Content::Extents(_)));
+        if other || file.reparse.is_some() {
             return Err(Error::Unsupported(format!(
-                "{path}: only files whose data is in their record (no links)"
+                "{path}: named streams or snapshots in clusters, or a link"
             )));
         }
-        Ok((
-            parent.to_owned(),
-            name.to_owned(),
-            self.directory_of(parent)?,
-            record.clone(),
-        ))
+        // The physical runs of its data.
+        let mut runs = Vec::new();
+        if let Some(crate::file::Stream {
+            content: crate::file::Content::Extents(extents),
+            ..
+        }) = &file.data
+        {
+            for x in extents.iter().filter(|x| x.written) {
+                runs.push((self.translate(x.vlcn)?, x.clusters));
+            }
+        }
+        Ok(EmbeddedFile {
+            parent: parent.to_owned(),
+            name: name.to_owned(),
+            dir: self.directory_of(parent)?,
+            record: record.clone(),
+            runs,
+        })
     }
 
     /// New times for a directory written to: in its own row and in its
@@ -1141,6 +1186,17 @@ fn upcased(name: &[u8]) -> Vec<u16> {
             }
         })
         .collect()
+}
+
+/// A file whose record is in its directory entry: the directory's path,
+/// the name, the directory's object id, the record, the physical runs of
+/// its data.
+struct EmbeddedFile {
+    parent: String,
+    name: String,
+    dir: u64,
+    record: Vec<u8>,
+    runs: Vec<(u64, u64)>,
 }
 
 /// Names `refs` creates for now: printable ASCII, no characters Windows

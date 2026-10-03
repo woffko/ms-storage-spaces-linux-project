@@ -528,3 +528,51 @@ fn creating_files_in_extents() {
     let err = vol.delete_file("/names/large.bin", now).unwrap_err();
     assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
 }
+
+#[test]
+fn deleting_and_renaming_files_in_extents() {
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 133_400_000_000_000_000;
+    let runs = |vol: &Volume<&Overlay<&SparseImage>>, path: &str| -> Vec<u64> {
+        let file = vol.open_file(&vol.lookup(path).unwrap()).unwrap();
+        let refs::Content::Extents(x) = file.data.unwrap().content else {
+            panic!("{path}: inline")
+        };
+        x.iter()
+            .flat_map(|x| {
+                let lcn = vol.translate(x.vlcn).unwrap();
+                lcn..lcn + x.clusters
+            })
+            .collect()
+    };
+    // A file Windows wrote: renamed, then deleted; its clusters are free.
+    vol.rename("/dir/inner.txt", "inner renamed.txt", now).unwrap();
+    let clusters = runs(&vol, "/mid.bin");
+    vol.delete_file("/mid.bin", now).unwrap();
+    let used1 = used(&vol, 1);
+    assert!(clusters.iter().all(|c| !used1.contains(c)), "mid.bin's clusters freed");
+    assert!(matches!(vol.lookup("/mid.bin"), Err(refs::Error::NotFound(_))));
+    // Created and deleted again: the allocators are as before.
+    let before = (used(&vol, 1), used(&vol, 2).len());
+    vol.create_file("/dir/scratch.bin", &vec![7u8; 300_000], now).unwrap();
+    vol.delete_file("/dir/scratch.bin", now).unwrap();
+    assert_eq!(used(&vol, 1).len(), before.0.len(), "medium allocator as before");
+    assert_eq!(used(&vol, 2).len(), before.1, "container allocator as before");
+    assert_allocated(&vol, &skip, "small");
+    assert_pages_valid(&vol, &skip, "small");
+    let fresh = Volume::open(&overlay, offset).unwrap();
+    assert_eq!(
+        fresh
+            .read_dir(ROOT_DIRECTORY)
+            .unwrap()
+            .iter()
+            .filter(|e| e.name == "mid.bin")
+            .count(),
+        0
+    );
+    let inner = fresh.lookup("/dir/inner renamed.txt").unwrap();
+    assert_eq!(read_all(&fresh, "/dir/inner renamed.txt").len() as u64, inner.size);
+}

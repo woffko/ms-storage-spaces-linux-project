@@ -304,6 +304,10 @@ table's rows for a text diff):
 * Overwriting data (`Invoke-RefsSteps.ps1` step `write`): Windows
   writes a stream without integrity checksums where it is (the extents
   stay) and commits the new times with copy on write.
+* Block reference counts (root 6): rows keyed by a range of virtual
+  clusters (first, count) whose values count references per cluster
+  (u16 each, 2 for a cluster two files share); empty on volumes without
+  block clones or deduplication.
 * Renaming a file within its directory (step `rename`): its name row is
   replaced by one with the new name and the same record (change time
   updated), its file id row gets the new name, and the directory gets new

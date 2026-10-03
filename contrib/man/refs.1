@@ -184,8 +184,9 @@ beside it. Experimental; only with
 .BR \-\-yes .
 .TP
 .BR rename ", " delete
-Rename a file within its directory, or delete it; for files whose data is
-kept in their record (small files). Experimental; only with
+Rename a file within its directory, or delete it (not hard links;
+deleting a file with data clusters is refused on volumes with cloned or
+deduplicated clusters). Experimental; only with
 .BR \-\-yes .
 .SH LIMITS
 Verified against Windows on ReFS 3.14 volumes with 4 KiB and 64 KiB
