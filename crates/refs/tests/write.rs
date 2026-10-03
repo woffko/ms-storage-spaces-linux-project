@@ -1545,3 +1545,38 @@ fn data_beyond_its_band() {
     }
     assert_allocated(&vol, &skip, "freed again");
 }
+
+#[test]
+fn writing_an_empty_volume() {
+    // Nothing to share a security descriptor with or to place data near:
+    // the root's descriptor, data where the allocator has room.
+    let (image, manifest, skip) = load("r314empty");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 135_000_000_000_000_000;
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i % 247) as u8).collect();
+    vol.create_file("/first.txt", b"first", now).unwrap();
+    vol.create_directory("/dir", now).unwrap();
+    vol.create_file("/dir/data.bin", &data, now).unwrap();
+    assert_eq!(read_all(&vol, "/first.txt"), b"first");
+    assert_eq!(read_all(&vol, "/dir/data.bin"), data);
+    let root_security = {
+        let mut own = None;
+        vol.walk(&vol.object(ROOT_DIRECTORY).unwrap().clone(), false, &mut |row| {
+            if row.key.len() >= 2 && row.key[0] == 0x10 {
+                own = Some(u64::from_le_bytes(row.value[0x50..0x58].try_into().unwrap()));
+            }
+            Ok(())
+        })
+        .unwrap();
+        own.unwrap()
+    };
+    let record = vol.record(&vol.lookup("/first.txt").unwrap()).unwrap();
+    assert_eq!(
+        u64::from_le_bytes(record[0x50..0x58].try_into().unwrap()),
+        root_security
+    );
+    assert_allocated(&vol, &skip, "empty volume written");
+    assert_pages_valid(&vol, &skip, "empty volume written");
+}

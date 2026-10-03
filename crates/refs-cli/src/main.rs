@@ -913,7 +913,14 @@ fn main() -> Result<()> {
                 };
                 Volume::open(Box::new(ReadOnly(dev)) as fuse::Rw, offset)?
             };
-            fuse::serve(vol, &mountpoint, allow_other, rw)?;
+            let name = match &source.space {
+                Some(space) => format!("space:{space}"),
+                None => std::fs::canonicalize(&source.devices[0])
+                    .unwrap_or_else(|_| source.devices[0].clone())
+                    .display()
+                    .to_string(),
+            };
+            fuse::serve(vol, &name, &mountpoint, allow_other, rw)?;
         }
         Command::Set {
             device,

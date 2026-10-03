@@ -965,11 +965,12 @@ impl Filesystem for RefsFs {
 }
 
 /// Mounts the volume at `mountpoint` and serves it until unmounted; with
-/// `writable` changes go to the volume.
-pub fn serve(vol: Volume<Rw>, mountpoint: &Path, allow_other: bool, writable: bool) -> Result<()> {
+/// `writable` changes go to the volume. `source` names the mount (the
+/// device, as mount(8) and udisks2 expect to find it in the mount table).
+pub fn serve(vol: Volume<Rw>, source: &str, mountpoint: &Path, allow_other: bool, writable: bool) -> Result<()> {
     let mut config = Config::default();
     config.mount_options.extend([
-        MountOption::FSName("refs".into()),
+        MountOption::FSName(source.into()),
         MountOption::Subtype("refs".into()),
         MountOption::DefaultPermissions,
     ]);

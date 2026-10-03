@@ -978,7 +978,16 @@ passes the same checks. Release `v1.0.0`.
 
 ### Optional later work
 
-* udisks2 / libblockdev plugin so desktop tools see pools.
+* udisks2 / libblockdev plugin so desktop tools see pools. Done as far as
+  it goes without upstream changes: attached spaces are block devices
+  udisks2 lists (the udev rule attaches pools when their disks appear),
+  blkid 2.37 already reports ReFS, and `mount.ReFS` (contrib) lets
+  `mount -t ReFS`, fstab and `udisksctl mount` mount ReFS volumes through
+  `refs mount` (tried on the Linux test VM, udisks2 2.9.4). Not done:
+  udisks2 does not count those FUSE mounts as mounts (fuser mounts type
+  `fuse`, not `fuseblk`), and libblockdev has a fixed set of plugin types
+  (a Storage Spaces one, with pool management over D-Bus, would need
+  libblockdev and udisks2 changes upstream).
 * A native kernel dm target or kernel driver, only if ublk performance is
   insufficient.
 * Storage Spaces Direct (clustered) pools are out of scope.

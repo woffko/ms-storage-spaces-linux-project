@@ -13,6 +13,8 @@ trap 'rm -rf "$stage"' EXIT
 
 install -D -m 755 "$root/target/release/spaces" "$stage/usr/sbin/spaces"
 install -D -m 755 "$root/target/release/refs" "$stage/usr/bin/refs"
+install -D -m 755 "$root/contrib/mount.refs" "$stage/usr/sbin/mount.ReFS"
+ln -sf mount.ReFS "$stage/usr/sbin/mount.refs"
 install -D -m 644 "$root/contrib/udev/69-storage-spaces.rules" "$stage/usr/lib/udev/rules.d/69-storage-spaces.rules"
 sed 's#/usr/local/sbin/spaces#/usr/sbin/spaces#' "$root/contrib/systemd/storage-spaces-attach.service" \
   > "$stage/storage-spaces-attach.service"

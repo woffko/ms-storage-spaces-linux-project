@@ -1,0 +1,79 @@
+#!/bin/sh
+# mount(8) helper for ReFS: "mount -t ReFS /dev/sdb2 /mnt", fstab entries
+# and udisks2 mount ReFS volumes through FUSE with "refs mount". Install as
+# /sbin/mount.ReFS (the type blkid reports) and /sbin/mount.refs.
+#
+# Usage (as mount(8) calls it): mount.refs SOURCE DIR [-sfnv] [-o OPTIONS]
+#
+# Read-only unless the options hold both "rw" and "refs.rw": writing is
+# experimental, and udisks2 asks for "rw" by default. Mounted by root (as
+# mount(8) and udisks2 do), every user may enter it (FUSE's allow_other,
+# with the permissions the mount shows), unless "noallow_other"; mounted
+# by a user, only "allow_other" lets others in. Other options (nosuid,
+# nodev, uhelper=..., ...) are accepted and ignored; FUSE mounts are
+# nosuid and nodev anyway.
+set -eu
+
+# mount(8) runs helpers with a short PATH: look where refs is installed.
+refs=${REFS:-}
+if [ -z "$refs" ]; then
+  for c in "$(command -v refs 2>/dev/null || true)" /usr/bin/refs /usr/local/bin/refs; do
+    if [ -n "$c" ] && [ -x "$c" ]; then refs=$c; break; fi
+  done
+fi
+[ -n "$refs" ] || { echo "mount.refs: refs is not installed" >&2; exit 1; }
+[ $# -ge 2 ] || { echo "usage: mount.refs SOURCE DIR [-o OPTIONS]" >&2; exit 1; }
+source=$1
+dir=$2
+shift 2
+options=
+while [ $# -gt 0 ]; do
+  case $1 in
+    -o) options=${2:-}; shift 2 ;;
+    -o*) options=${1#-o}; shift ;;
+    -s|-f|-n|-v) shift ;;
+    -N|-t) shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+rw=0 refs_rw=0 allow_other=0
+if [ "$(id -u)" = 0 ]; then allow_other=1; fi
+old_ifs=$IFS
+IFS=,
+for o in $options; do
+  case $o in
+    rw) rw=1 ;;
+    ro) rw=0 ;;
+    refs.rw) refs_rw=1 ;;
+    allow_other) allow_other=1 ;;
+    noallow_other) allow_other=0 ;;
+  esac
+done
+IFS=$old_ifs
+
+set --
+if [ $rw = 1 ] && [ $refs_rw = 1 ]; then set -- "$@" --rw; fi
+if [ $allow_other = 1 ]; then set -- "$@" --allow-other; fi
+
+# refs serves the mount in the foreground: run it in its own session and
+# return once the mount is there (or report why it is not).
+log=$(mktemp)
+setsid "$refs" mount "$@" "$source" "$dir" >"$log" 2>&1 </dev/null &
+pid=$!
+i=0
+while [ $i -lt 100 ]; do
+  if mountpoint -q "$dir"; then
+    rm -f "$log"
+    exit 0
+  fi
+  if ! kill -0 $pid 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+  i=$((i + 1))
+done
+cat "$log" >&2
+rm -f "$log"
+kill $pid 2>/dev/null || true
+exit 32

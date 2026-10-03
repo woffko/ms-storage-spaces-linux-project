@@ -184,7 +184,16 @@ With
 the mount writes: files (up to 64 MiB, written back whole when closed),
 directories, renames, hard links, times, the read-only attribute and
 named streams, each change one transaction as the writing commands make
-it. Experimental.
+it. Experimental. The helper
+.B mount.ReFS
+(installed with
+.BR refs )
+mounts ReFS volumes for
+.BR mount (8),
+fstab and udisks2 this way, read-only unless the options hold both
+.B rw
+and
+.BR refs.rw .
 Named streams appear as extended attributes
 .BR user. \fIname\fR
 (up to 64 KiB, the Linux limit; larger ones are read with

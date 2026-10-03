@@ -438,7 +438,16 @@ user.NAME`). Every change is one transaction with a new checkpoint, so a
 crash or a pulled cable leaves the volume as it was after the last
 completed change. Symbolic links cannot be made. The mount is served by
 one thread; it suits copying files to or from a Dev Drive, not heavy
-use. Every metadata page is checked against its checksum; a volume that
+use.
+
+`contrib/mount.refs`, installed as `/sbin/mount.ReFS` (the type blkid
+reports) and `/sbin/mount.refs`, lets `mount -t ReFS /dev/sdb2 /mnt`,
+`/etc/fstab` entries (`/dev/sdb2 /mnt ReFS ro,nofail 0 0`) and udisks2
+(`udisksctl mount -b /dev/sdb2`, desktop file managers) mount ReFS
+volumes through `refs mount`, in the background. Mounted by root, every
+user may enter the mount; it is read-only unless the options hold both
+`rw` and `refs.rw`. udisks2 mounts such volumes but does not count FUSE
+mounts of block devices as mounted: unmount them with `umount`. Every metadata page is checked against its checksum; a volume that
 fails is reported, not guessed at. The data of integrity streams
 (`Set-FileIntegrity`, or volumes formatted with integrity streams) is
 checked on every read too: damaged data is an error (EIO in the mount),

@@ -38,6 +38,8 @@ package() {
   _root
   install -Dm755 "$srcdir/target/release/spaces" "$pkgdir/usr/bin/spaces"
   install -Dm755 "$srcdir/target/release/refs" "$pkgdir/usr/bin/refs"
+  install -Dm755 contrib/mount.refs "$pkgdir/usr/bin/mount.ReFS"
+  ln -sf mount.ReFS "$pkgdir/usr/bin/mount.refs"
   install -Dm644 contrib/udev/69-storage-spaces.rules "$pkgdir/usr/lib/udev/rules.d/69-storage-spaces.rules"
   sed 's#/usr/local/sbin/spaces#/usr/bin/spaces#' contrib/systemd/storage-spaces-attach.service |
     install -Dm644 /dev/stdin "$pkgdir/usr/lib/systemd/system/storage-spaces-attach.service"

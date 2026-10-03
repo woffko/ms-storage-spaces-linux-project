@@ -1780,7 +1780,7 @@ impl<D: WriteAt> Volume<D> {
                 }
             }
         }
-        Err(Error::Unsupported("no file to share a security descriptor with".into()))
+        self.root_security()
     }
 
     /// Deletes a name of a file: for a file whose record is in its
@@ -2527,7 +2527,9 @@ impl<D: WriteAt> Volume<D> {
                 }
             }
         }
-        Err(Error::Unsupported("no file data to place new data near".into()))
+        // No file data yet (an empty volume): no band; the data goes where
+        // the allocator has room.
+        Ok(NO_BAND)
     }
 
     /// Creates a directory, as Windows does: a new object (the object
@@ -2626,9 +2628,18 @@ impl<D: WriteAt> Volume<D> {
                 }
             }
         }
-        Err(Error::Unsupported(
-            "no directory to share a security descriptor with".into(),
-        ))
+        self.root_security()
+    }
+
+    /// The root directory's security descriptor reference: what a new
+    /// file or directory takes on a volume where nothing else is to share
+    /// (an empty volume: its ACEs that apply to children apply to them).
+    fn root_security(&self) -> Result<u64> {
+        let own = self.own_row(ROOT_DIRECTORY)?;
+        if own.len() >= 0x58 && le64(&own, 0x50) != 0 {
+            return Ok(le64(&own, 0x50));
+        }
+        Err(Error::Unsupported("no security descriptor to share".into()))
     }
 
     fn directory_of(&self, parent: &str) -> Result<u64> {
@@ -2709,6 +2720,8 @@ const INTEGRITY: u32 = 0x8000;
 /// The largest integrity stream `refs` writes (its checksums fit one
 /// page of extent map).
 const MAX_INTEGRITY: usize = 8 << 20;
+/// A data band that names no allocator row (data goes where there is room).
+const NO_BAND: u64 = u64::MAX;
 /// The largest extent map kept in its level's value; larger ones go to a
 /// page of their own.
 const MAP_INLINE: usize = 2048;

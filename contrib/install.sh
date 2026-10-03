@@ -12,6 +12,10 @@ install -D -m 644 "$here/man/spaces.8" /usr/local/share/man/man8/spaces.8
 if [ -x "$(dirname "$bin")/refs" ]; then
   install -m 755 "$(dirname "$bin")/refs" /usr/local/bin/refs
   install -D -m 644 "$here/man/refs.1" /usr/local/share/man/man1/refs.1
+  # mount -t ReFS (the type blkid reports), fstab and udisks2 mount ReFS
+  # through it.
+  install -m 755 "$here/mount.refs" /sbin/mount.ReFS
+  ln -sf mount.ReFS /sbin/mount.refs
 fi
 # Kernel modules the backends use.
 printf 'ublk_drv\nnbd\n' > /etc/modules-load.d/storage-spaces.conf
