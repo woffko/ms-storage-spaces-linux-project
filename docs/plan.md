@@ -745,8 +745,10 @@ rows of thin spaces not allocated yet (M7).
   (integrity streams up to 8 MiB; Windows read and wrote them), and
   64 KiB-cluster volumes get CRC-64 per 16 KiB. Deleting files whose
   clusters are block-cloned lowers their reference counts as Windows
-  does (overwriting shared clusters in place is refused). Next: stream
-  snapshots, cloning files.
+  does (overwriting shared clusters in place is refused). Files with
+  stream snapshots (every level's clusters freed), symbolic links and
+  junctions are deleted too (Windows: healthy, no leak, recreated them).
+  Not done: rewriting files with snapshots, cloning files.
 
 ## Test infrastructure (continuous, feeds every stage)
 

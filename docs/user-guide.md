@@ -463,7 +463,8 @@ data of the files around it) with a printable ASCII name, in a directory
 of any size (its pages split as it grows and merge as it shrinks); it
 takes the permissions of the files beside it. `refs rename` renames a
 file or directory within its directory and `refs delete` deletes a file
-(for a hard-linked file: the one name) or an empty directory; deleting a
+(for a hard-linked file: the one name; also symbolic links, junctions
+and files with stream snapshots) or an empty directory; deleting a
 file whose clusters other files share (block clones, deduplication)
 lowers their reference counts and frees only clusters no other file
 has. `refs mkdir` creates a directory;

@@ -283,7 +283,10 @@ has 0): size at 0x20, the level id at 0x44 and the set at 0x3c (0: the
 file's own $DATA levels), bit 0x1000 of the u16 at 2 set. Windows lists
 them as streams `NAME:$SNAPSHOT`. (**verified**: a file with two
 snapshots between overwrites and an append; the live data and both
-snapshots read back with Windows' SHA-256.)
+snapshots read back with Windows' SHA-256.) A level maps only what was
+written while it was live, so a file's clusters are what its levels map;
+deleting a file frees them all (**verified**: Windows found no leak
+after `refs` deleted the file with two snapshots).
 
 ### Deduplication and block cloning
 

@@ -1454,3 +1454,36 @@ fn writes_stay_inside_the_volume_the_boot_sector_claims() {
     assert!(outside.is_empty(), "written past the volume: {outside:x?}");
     assert!(overlay.written_pages().len() >= before);
 }
+
+#[test]
+fn deleting_links_and_files_with_snapshots() {
+    let (image, manifest, skip) = load("r314feat");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 134_700_000_000_000_000;
+    // Snapshots keep levels of the stream: all their clusters go.
+    let file = vol.open_file(&vol.lookup("/snap/file.txt").unwrap()).unwrap();
+    assert!(!file.snapshots.is_empty());
+    let mut clusters = Vec::new();
+    for s in file.data.iter().chain(file.snapshots.iter().map(|(_, s)| s)) {
+        if let refs::Content::Extents(x) = &s.content {
+            for x in x {
+                let lcn = vol.translate(x.vlcn).unwrap();
+                clusters.extend(lcn..lcn + x.clusters);
+            }
+        }
+    }
+    assert!(
+        vol.write_file("/snap/file.txt", b"x", now).is_err(),
+        "rewriting keeps refusing"
+    );
+    vol.delete_file("/snap/file.txt", now).unwrap();
+    let used1 = used(&vol, 1);
+    assert!(
+        clusters.iter().all(|c| !used1.contains(c)),
+        "every level's clusters freed"
+    );
+    assert_allocated(&vol, &skip, "snapshots deleted");
+    assert_pages_valid(&vol, &skip, "snapshots deleted");
+}

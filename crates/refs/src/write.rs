@@ -1214,6 +1214,14 @@ impl<D: WriteAt> Volume<D> {
     }
 }
 
+/// The clusters of physical runs, each once.
+fn clusters_of(runs: &[(u64, u64)]) -> Vec<u64> {
+    let mut clusters: Vec<u64> = runs.iter().flat_map(|&(lcn, n)| lcn..lcn + n).collect();
+    clusters.sort_unstable();
+    clusters.dedup();
+    clusters
+}
+
 /// The user-settable attribute bits (read-only, hidden, system, archive,
 /// temporary, offline, not content indexed).
 const SETTABLE_ATTRIBUTES: u32 = 0x1 | 0x2 | 0x4 | 0x20 | 0x100 | 0x1000 | 0x2000;
@@ -1624,10 +1632,11 @@ impl<D: WriteAt> Volume<D> {
             record: old,
             runs,
             home,
-            kept,
+            snapshots,
+            reparse,
             ..
         } = self.file_at(path)?;
-        if kept {
+        if snapshots || reparse {
             return Err(Error::Unsupported(format!("{path}: stream snapshots or a link")));
         }
         let entry = self.lookup(path)?;
@@ -1650,7 +1659,7 @@ impl<D: WriteAt> Volume<D> {
         {
             let mut tx = Transaction::begin(&*self)?;
             // The old data clusters become free (kept until the commit).
-            let clusters: Vec<u64> = runs.iter().flat_map(|&(lcn, n)| lcn..lcn + n).collect();
+            let clusters = clusters_of(&runs);
             tx.free_data(&clusters)?;
             let file = NewRecord {
                 now,
@@ -1743,9 +1752,6 @@ impl<D: WriteAt> Volume<D> {
         if let Some(home) = file.home {
             return self.unlink(file, home, now);
         }
-        if file.kept {
-            return Err(Error::Unsupported(format!("{path}: stream snapshots or a link")));
-        }
         let FileAt {
             parent,
             name,
@@ -1760,7 +1766,7 @@ impl<D: WriteAt> Volume<D> {
         {
             let mut tx = Transaction::begin(&*self)?;
             // Its data clusters become free (kept until the commit).
-            let clusters: Vec<u64> = runs.iter().flat_map(|&(lcn, n)| lcn..lcn + n).collect();
+            let clusters = clusters_of(&runs);
             tx.free_data(&clusters)?;
             tx.remove_row(Tree::Object(dir), &|k| is_name_row(k, &name))?;
             tx.remove_row(Tree::Object(dir), &|k| {
@@ -1948,16 +1954,19 @@ impl<D: WriteAt> Volume<D> {
         self.load()
     }
 
-    /// Deletes an empty directory, as Windows does: its entry, its rows in
+    /// Deletes an empty directory (also a junction or directory symbolic
+    /// link), as Windows does: its entry, its rows in
     /// both object tables and the parent-child table go, its pages become
     /// free, and its parent gets new times.
     fn delete_directory(&mut self, path: &str, oid: u64, now: u64) -> Result<()> {
         let trimmed = path.trim_end_matches('/');
         let parent = trimmed.rsplit_once('/').map_or("", |(p, _)| p);
-        let entry = self.lookup(trimmed)?;
-        if entry.attributes & 0x400 != 0 || oid == ROOT_DIRECTORY {
-            return Err(Error::Unsupported(format!("{path}: a junction or the root")));
+        if oid == ROOT_DIRECTORY {
+            return Err(Error::Unsupported(format!("{path}: the root")));
         }
+        let entry = self.lookup(trimmed)?;
+        // A junction or directory link: its own object, empty, goes as
+        // any directory (the target stays).
         if !self.read_dir(oid)?.is_empty() {
             return Err(Error::Unsupported(format!("{path}: the directory is not empty")));
         }
@@ -2320,7 +2329,6 @@ impl<D: WriteAt> Volume<D> {
             mut record,
             mut runs,
             stream_runs,
-            kept,
             ..
         } = file;
         runs.extend(stream_runs);
@@ -2333,17 +2341,12 @@ impl<D: WriteAt> Volume<D> {
             .ok_or_else(|| format_err!("{parent}/{name}: no link row for the name"))?;
         names.remove(at);
         let last = names.is_empty();
-        if last && kept {
-            return Err(Error::Unsupported(format!(
-                "{parent}/{name}: stream snapshots or a link"
-            )));
-        }
         {
             let mut tx = Transaction::begin(&*self)?;
             tx.remove_row(Tree::Object(dir), &|k| is_entry_row(k, &name))?;
             let key = record_key(id, home);
             if last {
-                let clusters: Vec<u64> = runs.iter().flat_map(|&(lcn, n)| lcn..lcn + n).collect();
+                let clusters = clusters_of(&runs);
                 tx.free_data(&clusters)?;
                 tx.remove_row(Tree::Object(home), &|k| k == key)?;
                 tx.remove_row(Tree::Object(home), &|k| {
@@ -2370,22 +2373,10 @@ impl<D: WriteAt> Volume<D> {
             Target::Directory(_) => return Err(Error::Unsupported(format!("{path} is a directory"))),
         };
         let file = self.open_file(&entry)?;
-        // The physical runs of its data, and of its named streams.
-        let runs_of = |s: &crate::file::Stream| -> Result<Vec<(u64, u64)>> {
-            let mut runs = Vec::new();
-            if let crate::file::Content::Extents(extents) = &s.content {
-                for x in extents.iter().filter(|x| x.written) {
-                    runs.push((self.translate(x.vlcn)?, x.clusters));
-                }
-            }
-            Ok(runs)
-        };
-        let mut runs = file.data.as_ref().map(runs_of).transpose()?.unwrap_or_default();
-        let mut stream_runs = Vec::new();
-        for (_, s) in &file.streams {
-            stream_runs.extend(runs_of(s)?);
-        }
-        // Pages of extent maps kept outside the record go with the data.
+        // The physical runs of its data and of its named streams: what
+        // every level maps (the live one, and those snapshots keep), and the
+        // pages of extent maps kept outside the record.
+        let (mut runs, mut stream_runs) = (Vec::new(), Vec::new());
         for r in embedded_rows(&record)? {
             let key = row_key(&r);
             let data_level = key.len() >= 0x18
@@ -2394,9 +2385,11 @@ impl<D: WriteAt> Volume<D> {
                 && le64(key, 0x10) >= LIVE_STREAM;
             let set_level = is_set_row(&r) && key.len() >= 0x40 && le64(key, 0x38) >= LIVE_STREAM;
             if data_level || set_level {
-                let pages = self.extent_map_pages(row_value(&r))?;
                 let to = if data_level { &mut runs } else { &mut stream_runs };
-                to.extend(pages.into_iter().map(|c| (c, 1)));
+                for x in self.extents(row_value(&r))?.iter().filter(|x| x.written) {
+                    to.push((self.translate(x.vlcn)?, x.clusters));
+                }
+                to.extend(self.extent_map_pages(row_value(&r))?.into_iter().map(|c| (c, 1)));
             }
         }
         Ok(FileAt {
@@ -2407,7 +2400,8 @@ impl<D: WriteAt> Volume<D> {
             runs,
             stream_runs,
             home,
-            kept: !file.snapshots.is_empty() || file.reparse.is_some(),
+            snapshots: !file.snapshots.is_empty(),
+            reparse: file.reparse.is_some(),
         })
     }
 
@@ -2804,10 +2798,10 @@ struct NewRecord {
 }
 
 /// A file by path: the directory's path, the name, the directory's object
-/// id, the record, the physical runs of its data and of its named
-/// streams, for a file whose record is a row of type 0x40 (moved or
-/// linked) its home directory, and whether it has what `refs` does not
-/// delete or rewrite yet (stream snapshots, a reparse point).
+/// id, the record, the physical runs of its data (every level's) and of
+/// its named streams, for a file whose record is a row of type 0x40
+/// (moved or linked) its home directory, and whether it has stream
+/// snapshots or a reparse point (which `refs write` does not rewrite).
 struct FileAt {
     parent: String,
     name: String,
@@ -2816,7 +2810,8 @@ struct FileAt {
     runs: Vec<(u64, u64)>,
     stream_runs: Vec<(u64, u64)>,
     home: Option<u64>,
-    kept: bool,
+    snapshots: bool,
+    reparse: bool,
 }
 
 /// Names `refs` creates for now: printable ASCII, no characters Windows
