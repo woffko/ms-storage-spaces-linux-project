@@ -1352,3 +1352,32 @@ fn writing_named_streams_in_clusters() {
     assert_allocated(&vol, &skip, "streams in clusters");
     assert_pages_valid(&vol, &skip, "streams in clusters");
 }
+
+#[test]
+fn writing_integrity_streams_on_64k_clusters() {
+    // 64 KiB clusters: CRC-64 per 16 KiB (kind 2), as Windows writes them.
+    let (image, manifest, skip) = load("r314basic64k");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    assert_eq!(vol.cluster, 65536);
+    let now = 134_600_000_000_000_000;
+    vol.create_file("/i64.bin", b"", now).unwrap();
+    vol.set_integrity("/i64.bin", true).unwrap();
+    let mut data: Vec<u8> = (0..3_000_000u32).map(|i| (i % 239) as u8).collect();
+    vol.write_file("/i64.bin", &data, now).unwrap();
+    let file = vol.open_file(&vol.lookup("/i64.bin").unwrap()).unwrap();
+    let refs::Content::Extents(x) = &file.data.unwrap().content else {
+        panic!("inline")
+    };
+    assert!(x.iter().all(|x| x.checksums.as_ref().is_some_and(|c| c.kind == 2)));
+    assert_eq!(read_all(&vol, "/i64.bin"), data);
+    vol.overwrite("/i64.bin", 100_000, b"64k", now).unwrap();
+    data[100_000..100_003].copy_from_slice(b"64k");
+    assert_eq!(read_all(&vol, "/i64.bin"), data);
+    assert_allocated(&vol, &skip, "integrity 64k");
+    assert_pages_valid(&vol, &skip, "integrity 64k");
+    let fresh = Volume::open(&overlay, offset).unwrap();
+    assert_eq!(read_all(&fresh, "/i64.bin"), data);
+    vol.delete_file("/i64.bin", now).unwrap();
+}

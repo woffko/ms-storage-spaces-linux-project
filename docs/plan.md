@@ -737,8 +737,9 @@ rows of thin spaces not allocated yet (M7).
   becomes a bitmap). Named streams are written to clusters too (stream
   sets as Windows numbers them). A power-cut test replays every prefix
   of a commit's writes. Large extent maps go to a page of their own
-  (integrity streams up to 8 MiB; Windows read and wrote them). Next:
-  CRC-64 on 64 KiB clusters, reference counts.
+  (integrity streams up to 8 MiB; Windows read and wrote them), and
+  64 KiB-cluster volumes get CRC-64 per 16 KiB. Next: reference counts
+  (deleting cloned files), stream snapshots.
 
 ## Test infrastructure (continuous, feeds every stage)
 

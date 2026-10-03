@@ -417,7 +417,9 @@ table's rows for a text diff):
   to a new place with its own record, the old one is freed. `refs`
   writes the same records and checksums (**verified**: Windows read the
   data, checking it, and went on writing); it copies a whole stream of
-  up to 8 MiB on an overwrite, on volumes of 4 KiB clusters. A larger
+  up to 8 MiB on an overwrite. On volumes of 64 KiB clusters the
+  checksums are CRC-64 per 16 KiB (kind 2, four per cluster), and
+  `refs` writes them so (**verified**: Windows read 6 MB written so). A larger
   map (6 MB of integrity stream: three records of up to 768 clusters'
   checksums) goes to a page of its own: the level value's node becomes
   an index node (level 1) with one row, no key, row flag 2, whose value

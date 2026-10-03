@@ -22,7 +22,7 @@ use std::collections::HashMap;
 
 use storage_spaces::io::WriteAt;
 
-use crate::checksum::crc32c;
+use crate::checksum::{crc32c, crc64};
 use crate::error::{Error, Result, format_err};
 use crate::file::{LIVE_STREAM, Target, Times};
 use crate::node::Node;
@@ -1178,18 +1178,19 @@ impl<D: WriteAt> Volume<D> {
     /// of its inline $DATA (1, CRC32-C; 4 KiB clusters only for now).
     pub fn set_integrity(&mut self, path: &str, on: bool) -> Result<()> {
         let entry = self.lookup(path.trim_end_matches('/'))?;
-        if entry.size != 0 || matches!(entry.target, Target::Directory(_)) || self.cluster != 4096 {
+        if entry.size != 0 || matches!(entry.target, Target::Directory(_)) {
             return Err(Error::Unsupported(format!(
-                "{path}: integrity is set on empty files (of volumes with 4 KiB clusters) only"
+                "{path}: integrity is set on empty files only"
             )));
         }
+        let kind = self.integrity_kind();
         let record = self.record(&entry)?;
         if inline_data(&record).is_none() {
             return Err(Error::Unsupported(format!("{path}: no inline data")));
         }
         self.change_record(path, |v| {
             if let Some(at) = inline_data(v) {
-                v[at - 2..at].copy_from_slice(&u16::from(on).to_le_bytes());
+                v[at - 2..at].copy_from_slice(&u16::from(if on { kind } else { 0 }).to_le_bytes());
                 let a = (le32(v, 0x48) & !INTEGRITY) | if on { INTEGRITY } else { 0 };
                 v[0x48..0x4c].copy_from_slice(&a.to_le_bytes());
             }
@@ -1380,13 +1381,13 @@ impl<D: WriteAt> Volume<D> {
         let Some(band) = band.filter(|_| data.len() > MAX_INLINE) else {
             let mut record = resident_record(data, now, id, security);
             if integrity {
-                set_integrity_bits(&mut record)?;
+                set_integrity_bits(&mut record, self.integrity_kind())?;
             }
             return Ok(record);
         };
-        if integrity && (self.cluster != 4096 || data.len() > MAX_INTEGRITY) {
+        if integrity && data.len() > MAX_INTEGRITY {
             return Err(Error::Unsupported(format!(
-                "integrity streams of more than {MAX_INTEGRITY} bytes, or on volumes of other than 4 KiB clusters"
+                "integrity streams of more than {MAX_INTEGRITY} bytes"
             )));
         }
         let (extents, allocated) = self.write_data(tx, band, data, integrity)?;
@@ -1410,7 +1411,7 @@ impl<D: WriteAt> Volume<D> {
         band: u64,
         data: &[u8],
         integrity: bool,
-    ) -> Result<(Vec<(u64, u64, u64, Vec<u32>)>, u64)> {
+    ) -> Result<(Vec<(u64, u64, u64, Vec<u8>)>, u64)> {
         let clusters = (data.len() as u64).div_ceil(self.cluster);
         let runs = tx.take_data(band, clusters)?;
         let mut at = 0usize;
@@ -1420,11 +1421,7 @@ impl<D: WriteAt> Volume<D> {
             let mut buf = vec![0u8; (n * self.cluster) as usize];
             buf[..len].copy_from_slice(&data[at..at + len]);
             self.dev.write_all_at(&buf, self.offset + lcn * self.cluster)?;
-            let sums = if integrity {
-                buf.chunks(self.cluster as usize).map(crc32c).collect()
-            } else {
-                Vec::new()
-            };
+            let sums = if integrity { self.checksums_of(&buf) } else { Vec::new() };
             extents.push(((at as u64) / self.cluster, self.virtual_of(lcn)?, n, sums));
             at += len;
         }
@@ -1443,9 +1440,9 @@ impl<D: WriteAt> Volume<D> {
         table: u64,
         size: u64,
         allocated: u64,
-        extents: &[(u64, u64, u64, Vec<u32>)],
+        extents: &[(u64, u64, u64, Vec<u8>)],
     ) -> Result<Vec<u8>> {
-        let inline = level_value(size, allocated, extents);
+        let inline = level_value(size, allocated, extents, self.integrity_kind());
         if inline.len() <= MAP_INLINE {
             return Ok(inline);
         }
@@ -1511,6 +1508,25 @@ impl<D: WriteAt> Volume<D> {
         put(&mut node, at, 0xffff_0028);
         v.extend(node);
         Ok(v)
+    }
+
+    /// The checksum kind of integrity streams on this volume: CRC32-C per
+    /// cluster on 4 KiB clusters (1), CRC-64 per 16 KiB on larger ones
+    /// (2), as Windows writes them.
+    fn integrity_kind(&self) -> u8 {
+        if self.cluster == 4096 { 1 } else { 2 }
+    }
+
+    /// The checksums of whole clusters of an integrity stream, as stored
+    /// after an extent record.
+    fn checksums_of(&self, buf: &[u8]) -> Vec<u8> {
+        match self.integrity_kind() {
+            1 => buf
+                .chunks(self.cluster as usize)
+                .flat_map(|c| crc32c(c).to_le_bytes())
+                .collect(),
+            _ => buf.chunks(16384).flat_map(|c| crc64(c).to_le_bytes()).collect(),
+        }
     }
 
     /// Replaces a file's whole content with `data` (appending, truncating
@@ -2556,10 +2572,10 @@ impl<D: WriteAt> Volume<D> {
 }
 
 /// Marks a record with inline data as an integrity stream: the attribute,
-/// and checksum kind 1 (CRC32-C) at 0x3a of the $DATA value.
-fn set_integrity_bits(record: &mut [u8]) -> Result<()> {
+/// and the checksum kind at 0x3a of the $DATA value.
+fn set_integrity_bits(record: &mut [u8], kind: u8) -> Result<()> {
     let at = inline_data(record).ok_or_else(|| format_err!("a record without inline data"))?;
-    record[at - 2..at].copy_from_slice(&1u16.to_le_bytes());
+    record[at - 2..at].copy_from_slice(&u16::from(kind).to_le_bytes());
     let a = le32(record, 0x48) | INTEGRITY;
     record[0x48..0x4c].copy_from_slice(&a.to_le_bytes());
     Ok(())
@@ -2836,16 +2852,13 @@ fn level_set_header() -> Vec<u8> {
 /// A live level's value (of a file's $DATA or of a stream set): a header,
 /// then a node of raw extent records keyed by their first cluster in the
 /// stream.
-fn level_value(size: u64, allocated: u64, extents: &[(u64, u64, u64, Vec<u32>)]) -> Vec<u8> {
+fn level_value(size: u64, allocated: u64, extents: &[(u64, u64, u64, Vec<u8>)], kind: u8) -> Vec<u8> {
     const NODE: usize = 0x88;
     let n = extents.len();
-    // Integrity streams: a CRC32-C per cluster after each record (records
-    // padded to 8 bytes), checksum kind 1 at 0x16.
+    // Integrity streams: checksums after each record (records padded to 8
+    // bytes), their kind at 0x16.
     let integrity = extents.iter().any(|x| !x.3.is_empty());
-    let slots: Vec<usize> = extents
-        .iter()
-        .map(|x| (24 + 4 * x.3.len()).next_multiple_of(8))
-        .collect();
+    let slots: Vec<usize> = extents.iter().map(|x| (24 + x.3.len()).next_multiple_of(8)).collect();
     let used: usize = slots.iter().sum();
     // The node ends 8-aligned: free bytes before an odd key index.
     let free = 4 * n % 8;
@@ -2860,7 +2873,7 @@ fn level_value(size: u64, allocated: u64, extents: &[(u64, u64, u64, Vec<u32>)])
     put32(&mut v, 0x10, 0x200);
     put32(&mut v, 0x14, 2);
     if integrity {
-        v[0x16] = 1;
+        v[0x16] = kind;
     }
     put64(&mut v, 0x20, n as u64);
     put32(&mut v, 0x2c, 0x28);
@@ -2883,12 +2896,10 @@ fn level_value(size: u64, allocated: u64, extents: &[(u64, u64, u64, Vec<u32>)])
         put64(&mut v, r, *vlcn);
         let flags: u16 = if sums.is_empty() { 0x50 } else { 0xd0 };
         v[r + 8..r + 10].copy_from_slice(&flags.to_le_bytes());
-        v[r + 10..r + 12].copy_from_slice(&((24 + 4 * sums.len()) as u16).to_le_bytes());
+        v[r + 10..r + 12].copy_from_slice(&((24 + sums.len()) as u16).to_le_bytes());
         put32(&mut v, r + 0x0c, *vcn as u32);
         put32(&mut v, r + 0x14, *clusters as u32);
-        for (k, s) in sums.iter().enumerate() {
-            put32(&mut v, r + 24 + 4 * k, *s);
-        }
+        v[r + 24..r + 24 + sums.len()].copy_from_slice(sums);
         put32(
             &mut v,
             h + index + 4 * i,
