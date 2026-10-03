@@ -576,3 +576,37 @@ fn deleting_and_renaming_files_in_extents() {
     let inner = fresh.lookup("/dir/inner renamed.txt").unwrap();
     assert_eq!(read_all(&fresh, "/dir/inner renamed.txt").len() as u64, inner.size);
 }
+
+#[test]
+fn created_files_take_ids_past_the_directory_counter() {
+    let (image, manifest, _) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let counter = |vol: &Volume<&Overlay<&SparseImage>>, table: usize| {
+        let mut c = 0;
+        vol.walk(&vol.checkpoint.roots[table].clone(), false, &mut |row| {
+            if u64::from_le_bytes(row.key[8..16].try_into().unwrap()) == ROOT_DIRECTORY {
+                c = u64::from_le_bytes(row.value[0x50..0x58].try_into().unwrap());
+            }
+            Ok(())
+        })
+        .unwrap();
+        c
+    };
+    let id = |vol: &Volume<&Overlay<&SparseImage>>, path: &str| match vol.lookup(path).unwrap().target {
+        refs::Target::Embedded(r) => u64::from_le_bytes(r[0x80..0x88].try_into().unwrap()),
+        _ => panic!("{path}"),
+    };
+    let before = counter(&vol, 0);
+    // Deleting the file with the highest id does not free its id.
+    vol.delete_file("/last.txt", 1).unwrap();
+    vol.create_file("/a.txt", b"a", 1).unwrap();
+    vol.create_file("/b.txt", b"b", 1).unwrap();
+    assert_eq!((id(&vol, "/a.txt"), id(&vol, "/b.txt")), (before + 1, before + 2));
+    assert_eq!(
+        (counter(&vol, 0), counter(&vol, 5)),
+        (before + 2, before + 2),
+        "both object tables"
+    );
+}

@@ -347,6 +347,29 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         Ok(root)
     }
 
+    /// A directory's last file id given out (its object table row, 0x50).
+    fn last_file_id(&mut self, dir: u64) -> Result<u64> {
+        let at = self.find(Tree::Root(ROOT_OBJECTS), &|k| k.len() >= 16 && le64(k, 8) == dir)?;
+        let v = &self.pages[at.page].data[at.value..at.value + at.len];
+        if v.len() < 0x58 {
+            return Err(format_err!("object table row of {} bytes", v.len()));
+        }
+        Ok(le64(v, 0x50))
+    }
+
+    /// Sets a directory's last file id in both object tables.
+    fn set_last_file_id(&mut self, dir: u64, id: u64) -> Result<()> {
+        for table in [ROOT_OBJECTS, ROOT_OBJECTS_COPY] {
+            let at = self.find(Tree::Root(table), &|k| k.len() >= 16 && le64(k, 8) == dir)?;
+            let v = self.value_mut(at);
+            if v.len() < 0x58 {
+                return Err(format_err!("object table row of {} bytes", v.len()));
+            }
+            v[0x50..0x58].copy_from_slice(&id.to_le_bytes());
+        }
+        Ok(())
+    }
+
     /// The keys of a page's rows.
     fn keys(&self, page: usize) -> Result<Vec<Vec<u8>>> {
         Node::at(&self.pages[page].data, PAGE_HEADER_SIZE)?
@@ -736,14 +759,18 @@ impl<D: WriteAt> Volume<D> {
             let root = tx.root(Tree::Object(dir))?;
             // The next file id, and the value every record of the
             // directory carries at 0x50.
+            // The next file id: past the directory's counter (its object
+            // table rows, 0x50: the last id given out, never lowered) and
+            // every id in use; the counter follows.
             let keys = tx.keys(root)?;
-            let next_id = keys
+            let used = keys
                 .iter()
                 .filter(|k| k.len() >= 16 && le16(k, 0) == ROW_FILE_ID)
                 .map(|k| le64(k, 8))
                 .max()
-                .unwrap_or(1)
-                + 1;
+                .unwrap_or(1);
+            let next_id = used.max(tx.last_file_id(dir)?) + 1;
+            tx.set_last_file_id(dir, next_id)?;
 
             let record = if data.len() <= MAX_INLINE {
                 resident_record(data, now, next_id, common)

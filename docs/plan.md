@@ -689,7 +689,12 @@ rows of thin spaces not allocated yet (M7).
   reference count table, root 6, has rows: clusters may be shared by
   clones or deduplication). On Windows: healthy, `refsutil leak` as on
   the untouched volume, and Windows then appended to and deleted our
-  files. Next: growing files, directories, splitting pages.
+  files. File ids: a directory's last file id given out is kept in its
+  object table rows (0x50); the first creates took the highest id in use
+  plus one and left the counter, so Windows could have given the same id
+  again; `refs create` now raises the counter in both object tables (on
+  Windows: our file id 5, Windows' next 6). Next: growing files,
+  directories, splitting pages.
 
 ## Test infrastructure (continuous, feeds every stage)
 

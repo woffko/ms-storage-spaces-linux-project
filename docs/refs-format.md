@@ -109,8 +109,11 @@ never crosses one. (**verified**)
 
 ### Object table
 
-Key: 16 bytes, the object id in the second u64. Value: the root of the
-object's tree as a page reference at 0x20. Directories are objects; the
+Key: 16 bytes, the object id in the second u64. Value: a counter pair
+at 0x18 (the log sequence of the object's last change), the root of the
+object's tree as a page reference at 0x20, and for directories the last
+file id given out at 0x50 (Windows raises it with every file it creates
+and never lowers it; new files take the next one, **verified**). Directories are objects; the
 root directory is 0x600; user objects start at 0x701. (**verified**)
 
 ## Directories
