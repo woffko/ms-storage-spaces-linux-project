@@ -316,6 +316,49 @@ the file `refs` patched and appended to, listed both snapshots with
 their sizes, found no leak, wrote into it, and `refs` read the result
 and both snapshots with their hashes).
 
+### Compression
+
+ReFS compresses containers, not files (2026-10-04, Windows 11 26340:
+`Enable-ReFSDedup -Type DedupAndCompress`, then `Start-ReFSDedupJob`
+over 40 text files whose times were set three days back; `-Type
+Compress` and `refsutil compression /c` alone compressed nothing). The
+job *compacts* a data container: the clusters in use, in order, become
+one stream, cut into units of 64 KiB, each compressed (LZ4 blocks, no
+frame) or kept as it is when that does not make it shorter, and the
+units are stored one after the other in clusters of another data
+container. Files keep their extents; a cluster's data is in the unit
+that holds its place in the stream.
+
+* The compacted container's row in the container table: class 0xa (u32
+  at 0x14), the kept clusters at 0x24, the format at 0x30 (1 LZ4; 2 ZSTD
+  and 3 LZ4 on QuickAssist hardware by forefst's notes), the unit size
+  at 0x34 (0x10000), and in place of the physical start and clusters
+  the *virtual* cluster of the compressed bytes (0x130000: container
+  0x26) and their clusters (0x1628).
+* Root 10 (empty before) has rows keyed (container id u64, sequence u32,
+  type u32), the key the first 16 bytes of the value. Type 3: from 0x30
+  a bitmap of the container's 0x4000 clusters, those kept; a cluster's
+  place in the stream is the number of kept clusters before it (15 224
+  of 16 384 here). Type 7, one per range of the stream (two here, 476
+  units each): 0x10 the range's first byte in the stream and 0x18 its
+  bytes, 0x20 the first of its compressed bytes (from the start of the
+  container's compressed bytes) and 0x28 their bytes, 0x30 flags (2:
+  checksums; 1 on the last range), 0x34 the units, 0x38 the offset
+  (0x40) of a u32 per unit where its compressed bytes end, 0x3c the
+  checksum kind (1: a CRC32-C of each unit's compressed bytes, a u32 per
+  unit after the ends). Type 5: a summary not needed to read (0x3ff,
+  0x400, ...).
+* Windows reported 376 leaked clusters on the compacted volume by itself
+  (`refsutil leak`), the same after `refs` wrote a file on it.
+
+`refs` reads compacted containers (Volume::read_virtual decompresses the
+units a read needs, checking their CRC32-C, and keeps the last few), and
+`refs check` looks for their compressed clusters in the medium
+allocator instead of the files' runs (**verified**: all 40 files read
+with Windows' SHA-256, a damaged unit is refused). Changing a file with
+compressed data is refused; new data never goes into a compacted
+container (its class is neither 0 nor 1).
+
 ### Deduplication and block cloning
 
 `refsutil dedup` and `Copy-Item` (block cloning) leave plain extent maps

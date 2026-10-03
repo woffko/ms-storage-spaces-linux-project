@@ -5,6 +5,7 @@
 pub mod boot;
 pub mod check;
 pub mod checksum;
+pub mod compress;
 pub mod error;
 pub mod file;
 pub mod node;

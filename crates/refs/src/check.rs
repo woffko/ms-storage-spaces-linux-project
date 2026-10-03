@@ -13,6 +13,8 @@
 //!   shared in the block reference count table.
 //! * The pages only the older checkpoint references and that are still
 //!   allocated are counted (Windows frees them with its next checkpoint).
+//! * Compacted (compressed) containers: their compressed clusters are used
+//!   in the medium allocator (the files' runs there are not looked up).
 
 use std::collections::BTreeMap;
 
@@ -287,6 +289,12 @@ impl<D: ReadAt> Volume<D> {
                 for s in streams {
                     if let Content::Extents(x) = &s.content {
                         for x in x.iter().filter(|x| x.written) {
+                            // In a compacted container: its compressed
+                            // clusters stand for them (checked below).
+                            if self.is_compacted(x.vlcn) {
+                                report.data_clusters += x.clusters;
+                                continue;
+                            }
                             match self.translate(x.vlcn) {
                                 Ok(lcn) => runs.push((lcn, x.clusters, name.clone())),
                                 Err(err) => report.problem(format!("{name}: {err}")),
@@ -297,6 +305,24 @@ impl<D: ReadAt> Volume<D> {
                 if let Ok(record) = self.record(&e) {
                     for page in self.map_pages_of_record(&record) {
                         runs.push((page, 1, format!("{name} (extent map)")));
+                    }
+                }
+            }
+        }
+        // The compressed clusters of compacted containers.
+        for (id, c) in &self.compacted {
+            for k in 0..c.clusters {
+                match self.translate(c.data + k) {
+                    Ok(lcn) if !medium.used(lcn) => {
+                        report.problem(format!(
+                            "compacted container {id:#x}: compressed cluster {lcn:#x} free in the medium allocator"
+                        ));
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        report.problem(format!("compacted container {id:#x}: {e}"));
+                        break;
                     }
                 }
             }

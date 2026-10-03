@@ -1727,6 +1727,8 @@ impl<D: WriteAt> Volume<D> {
     /// stream's data is copied on write instead (the whole stream, with new
     /// checksums, for now).
     pub fn overwrite(&mut self, path: &str, offset: u64, bytes: &[u8], now: u64) -> Result<()> {
+        // Its runs inside the volume, none in a compressed container.
+        self.file_at(path)?;
         let entry = self.lookup(path)?;
         let file = self.open_file(&entry)?;
         let data = file
@@ -3599,6 +3601,11 @@ impl<D: WriteAt> Volume<D> {
             if data_level || set_level {
                 let to = if data_level { &mut runs } else { &mut stream_runs };
                 for x in self.extents(row_value(&r))?.iter().filter(|x| x.written) {
+                    if self.is_compacted(x.vlcn) {
+                        return Err(Error::Unsupported(format!(
+                            "{path}: data in a compressed (compacted) container"
+                        )));
+                    }
                     to.push((self.translate(x.vlcn)?, x.clusters));
                 }
                 to.extend(self.extent_map_pages(row_value(&r))?.into_iter().map(|c| (c, 1)));
@@ -3694,7 +3701,7 @@ impl<D: WriteAt> Volume<D> {
                     content: crate::file::Content::Extents(x),
                     ..
                 }) = &file.data
-                    && let Some(x) = x.iter().find(|x| x.written)
+                    && let Some(x) = x.iter().find(|x| x.written && !self.is_compacted(x.vlcn))
                 {
                     let lcn = self.translate(x.vlcn)?;
                     if let Some(&(start, _)) = bands.iter().find(|(s, n)| *s <= lcn && lcn < s + n) {

@@ -534,11 +534,18 @@ fn map(vol: &Volume<Device>, out: &mut impl Write) -> Result<()> {
                 else {
                     continue;
                 };
-                for x in extents.iter().filter(|x| x.written) {
+                // In a compacted container: in its compressed run.
+                for x in extents.iter().filter(|x| x.written && !vol.is_compacted(x.vlcn)) {
                     let lcn = vol.translate(x.vlcn)?;
                     writeln!(out, "{lcn:#x} {} data {path}{name} vcn {}", x.clusters, x.vcn)?;
                 }
             }
+        }
+    }
+    for (id, vlcn, clusters) in vol.compressed_runs() {
+        for k in 0..clusters {
+            let lcn = vol.translate(vlcn + k)?;
+            writeln!(out, "{lcn:#x} 1 compressed data of container {id:#x}")?;
         }
     }
     Ok(())

@@ -70,6 +70,29 @@ fn a_damaged_page_is_an_error() {
 }
 
 #[test]
+fn a_damaged_compressed_unit_is_an_error() {
+    // Windows compressed the files of a container (LZ4 units of 64 KiB, a
+    // CRC32-C each): a byte changed in a unit's compressed bytes makes
+    // reading what it holds an error, not other data.
+    let (mut image, offset) = load("r314compress");
+    let vol = Volume::open(&image, offset).unwrap();
+    let file = vol.open_file(&vol.lookup("/text/t0.txt").unwrap()).unwrap();
+    let stream = file.data.unwrap();
+    let mut whole = vec![0u8; stream.size as usize];
+    vol.read_stream(&stream, 0, &mut whole).unwrap();
+    // The compressed bytes: container 0x60's, 5672 clusters from virtual
+    // cluster 0x130000; a byte of each changed.
+    let (first, cluster) = (vol.translate(0x130000).unwrap(), vol.cluster);
+    drop(vol);
+    for k in 0..5672 {
+        damage(&mut image, offset + (first + k) * cluster + 0x100, 0x40);
+    }
+    let vol = Volume::open(&image, offset).unwrap();
+    let err = vol.read_stream(&stream, 0, &mut whole).unwrap_err().to_string();
+    assert!(err.contains("checksum"), "{err}");
+}
+
+#[test]
 fn the_superblock_copies_stand_in_for_a_damaged_one() {
     for name in ["r314basic64k", "r314sha"] {
         let (mut image, offset) = load(name);

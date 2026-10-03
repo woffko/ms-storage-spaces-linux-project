@@ -1,6 +1,7 @@
 //! The ReFS parsers that take raw bytes: the boot sector (with its
-//! checksum), page references and headers, and B+-tree nodes with their
-//! rows and raw records, from any descriptor offset the input names.
+//! checksum), page references and headers, B+-tree nodes with their rows
+//! and raw records, from any descriptor offset the input names, and the
+//! LZ4 blocks of compressed containers.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -19,6 +20,9 @@ fuzz_target!(|data: &[u8]| {
     let Some((&at, rest)) = data.split_first() else {
         return;
     };
+    if let Ok(out) = refs::compress::lz4_block(rest, usize::from(at) * 256) {
+        assert_eq!(out.len(), usize::from(at) * 256);
+    }
     for node in [
         Node::at(rest, usize::from(at)),
         Node::with_header(rest, usize::from(at)),

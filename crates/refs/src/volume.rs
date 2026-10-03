@@ -19,6 +19,8 @@ pub const SUPERBLOCK_LCN: u64 = 0x1e;
 pub const ROOT_OBJECTS: usize = 0;
 pub const ROOT_CONTAINERS: usize = 7;
 pub const ROOT_CONTAINERS_COPY: usize = 8;
+/// Per-container rows (compacted containers' streams).
+pub const ROOT_CONTAINER_INDEX: usize = 10;
 /// Object ids.
 pub const ROOT_DIRECTORY: u64 = 0x600;
 /// Deepest tree walked (real trees have a few levels).
@@ -64,7 +66,17 @@ pub struct Volume<D> {
     /// The clock of the first checkpoint `refs` wrote through this value
     /// (0: none yet).
     pub(crate) own_since: std::sync::atomic::AtomicU64,
+    /// Compacted (compressed) containers, by id (not in `containers`).
+    pub(crate) compacted: crate::compress::Map,
+    /// The last units decompressed.
+    units: std::sync::Mutex<Vec<Unit>>,
 }
+
+/// A decompressed unit: (container, range, unit), its bytes.
+type Unit = ((u64, usize, usize), std::sync::Arc<Vec<u8>>);
+
+/// Units of compacted containers kept decompressed.
+const UNITS_KEPT: usize = 8;
 
 /// Verifies a superblock's or checkpoint's own checksum: the descriptor
 /// at `at` (a page reference to the page itself), over the first cluster
@@ -123,6 +135,8 @@ impl<D: ReadAt> Volume<D> {
             checkpoint_lcns: Vec::new(),
             log: std::sync::OnceLock::new(),
             own_since: std::sync::atomic::AtomicU64::new(0),
+            compacted: BTreeMap::new(),
+            units: std::sync::Mutex::new(Vec::new()),
         };
         vol.load()?;
         Ok(vol)
@@ -519,18 +533,26 @@ impl<D: ReadAt> Volume<D> {
     fn load_containers(&mut self) -> Result<()> {
         let mut containers = BTreeMap::new();
         let mut classes = BTreeMap::new();
+        let mut compacted = BTreeMap::new();
         let mut cpc = 0;
         let mut last = Err(format_err!("no container table"));
         for root in [ROOT_CONTAINERS, ROOT_CONTAINERS_COPY] {
             let r = self.checkpoint.roots[root].clone();
             containers.clear();
             classes.clear();
+            compacted.clear();
             last = self.walk(&r, true, &mut |row| {
                 let v = row.value;
                 if row.key.len() < 8 || v.len() < 0x30 {
                     return Err(format_err!("container table row of {} bytes", v.len()));
                 }
                 cpc = le32(v, 0x18) as u64;
+                // A compacted container names its compressed bytes by a
+                // virtual cluster instead (see `compress`).
+                if le32(v, 0x14) == crate::compress::COMPACTED {
+                    compacted.insert(le64(row.key, 0), crate::compress::Compacted::from_row(v)?);
+                    return Ok(());
+                }
                 containers.insert(le64(row.key, 0), le64(v, v.len() - 16));
                 classes.insert(le64(v, v.len() - 16), le32(v, 0x14));
                 Ok(())
@@ -546,7 +568,108 @@ impl<D: ReadAt> Volume<D> {
         self.clusters_per_container = cpc;
         self.containers = containers;
         self.container_classes = classes;
+        // Their streams' ranges and kept clusters: root 10.
+        if !compacted.is_empty() {
+            let r = self.checkpoint.roots[ROOT_CONTAINER_INDEX].clone();
+            self.walk(&r, false, &mut |row| {
+                if row.key.len() >= 16
+                    && let Some(c) = compacted.get_mut(&le64(row.key, 0))
+                {
+                    c.add_row(le32(row.key, 12), row.value, cpc)?;
+                }
+                Ok(())
+            })?;
+        }
+        self.compacted = compacted;
+        self.units.lock().unwrap().clear();
         Ok(())
+    }
+
+    /// The compacted (compressed) containers: id, the virtual cluster of
+    /// their compressed bytes and its clusters.
+    pub fn compressed_runs(&self) -> Vec<(u64, u64, u64)> {
+        self.compacted.iter().map(|(&id, c)| (id, c.data, c.clusters)).collect()
+    }
+
+    /// Whether virtual cluster `vlcn` is in a compacted container (its
+    /// data is read from the container's compressed units, see
+    /// `compressed_runs`).
+    pub fn is_compacted(&self, vlcn: u64) -> bool {
+        let shift = 64 - self.clusters_per_container.leading_zeros();
+        self.compacted.contains_key(&(vlcn >> shift))
+    }
+
+    /// Reads from a compacted container (see `compress`): each cluster
+    /// from its unit of the stream, zeros for a cluster it did not keep.
+    fn read_compacted(&self, id: u64, first: u64, skip: u64, buf: &mut [u8]) -> Result<()> {
+        let c = &self.compacted[&id];
+        let cluster = self.cluster;
+        let mut pos = first * cluster + skip;
+        let mut done = 0;
+        while done < buf.len() {
+            let within = pos % cluster;
+            let take = ((cluster - within) as usize).min(buf.len() - done);
+            let out = &mut buf[done..done + take];
+            match c.place(pos / cluster, cluster) {
+                None => out.fill(0),
+                Some(at) => {
+                    let at = at + within;
+                    let (r, u, unit_start) = c.unit_of(at)?;
+                    let data = self.unit(id, r, u)?;
+                    let o = (at - unit_start) as usize;
+                    out.copy_from_slice(
+                        data.get(o..o + take)
+                            .ok_or_else(|| format_err!("a cluster across compressed units"))?,
+                    );
+                }
+            }
+            done += take;
+            pos += take as u64;
+        }
+        Ok(())
+    }
+
+    /// Unit `u` of range `r` of compacted container `id`, decompressed
+    /// (the last few are kept).
+    fn unit(&self, id: u64, r: usize, u: usize) -> Result<std::sync::Arc<Vec<u8>>> {
+        let key = (id, r, u);
+        if let Some((_, d)) = self.units.lock().unwrap().iter().find(|(k, _)| *k == key) {
+            return Ok(d.clone());
+        }
+        let c = &self.compacted[&id];
+        let (start, end, size) = c.unit_bounds(r, u)?;
+        let cluster = self.cluster;
+        if end > c.clusters.saturating_mul(cluster) {
+            return Err(format_err!(
+                "a compressed unit past the container's compressed clusters"
+            ));
+        }
+        let mut packed = vec![0u8; (end - start) as usize];
+        let mut at = start;
+        let mut done = 0;
+        // Its bytes may cross the containers the compressed data spans.
+        while done < packed.len() {
+            let vlcn = c
+                .data
+                .checked_add(at / cluster)
+                .ok_or_else(|| format_err!("compressed bytes beyond any cluster"))?;
+            let left =
+                (self.clusters_per_container - (vlcn & (self.clusters_per_container - 1))) * cluster - at % cluster;
+            let n = (left as usize).min(packed.len() - done);
+            if self.is_compacted(vlcn) {
+                return Err(format_err!("compressed bytes in a compacted container"));
+            }
+            self.read_virtual(vlcn, at % cluster, &mut packed[done..done + n])?;
+            done += n;
+            at += n as u64;
+        }
+        let data = std::sync::Arc::new(c.decode(r, u, &packed, size)?);
+        let mut units = self.units.lock().unwrap();
+        if units.len() >= UNITS_KEPT {
+            units.remove(0);
+        }
+        units.push((key, data.clone()));
+        Ok(data)
     }
 
     fn load_objects(&mut self) -> Result<()> {
@@ -618,6 +741,10 @@ impl<D: ReadAt> Volume<D> {
             return Err(format_err!(
                 "a read from virtual cluster {vlcn:#x} leaves its container"
             ));
+        }
+        let shift = 64 - cpc.leading_zeros();
+        if self.compacted.contains_key(&(vlcn >> shift)) {
+            return self.read_compacted(vlcn >> shift, vlcn & (cpc - 1), skip, buf);
         }
         let at = self
             .translate(vlcn)?

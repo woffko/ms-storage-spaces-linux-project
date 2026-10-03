@@ -1673,6 +1673,34 @@ fn changing_files_with_snapshots() {
 }
 
 #[test]
+fn compressed_files_are_read_not_changed() {
+    // Files whose data Windows compressed (in a compacted container) read
+    // through their units; changing them is refused for now, and the
+    // volume checks clean.
+    let (image, manifest, skip) = load("r314compress");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 135_800_000_000_000_000;
+    assert_eq!(vol.check(&skip).unwrap().problems, Vec::<String>::new());
+    let data = read_all(&vol, "/text/t5.txt");
+    assert_eq!(data.len(), 1_586_214);
+    for err in [
+        vol.delete_file("/text/t5.txt", now).unwrap_err(),
+        vol.write_file("/text/t5.txt", b"new content, longer than an inline file", now)
+            .unwrap_err(),
+        vol.overwrite("/text/t5.txt", 10, b"x", now).unwrap_err(),
+        vol.clone_file("/text/t5.txt", "/copy.txt", now).unwrap_err(),
+    ] {
+        assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
+    }
+    // Other files change as on any volume.
+    vol.create_file("/new.bin", &vec![7u8; 100_000], now).unwrap();
+    assert_eq!(read_all(&vol, "/text/t5.txt"), data);
+    assert_pages_valid(&vol, &skip, "compressed volume written");
+}
+
+#[test]
 fn renaming_only_the_case_of_a_name() {
     let (image, manifest, skip) = load("r314small");
     let offset = manifest["partition_offset"].as_u64().unwrap();

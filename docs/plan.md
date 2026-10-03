@@ -628,13 +628,21 @@ rows of thin spaces not allocated yet (M7).
   `Start-ReFSDedupJob -CompressionFormat LZ4` and various tuning, level
   and chunk sizes (a job ran for a minute; `-FullRun` and
   `-MinimumLastModifiedTimeHours` are refused for compression): still
-  no compressible clusters. Integrity streams: the data checksums (CRC32-C per 4 KiB
+  no compressible clusters. On 2026-10-04 `Enable-ReFSDedup -Type
+  DedupAndCompress` and a job over 40 text files (their times set three
+  days back) compressed 59.5 MB into 22.2 MB with LZ4: the container is
+  compacted (class 0xa), its kept clusters (a bitmap) form a stream of
+  64 KiB units compressed one by one with a CRC32-C each, described by
+  rows of root 10 (docs/refs-format.md, "Compression"). `refs` reads such
+  files (all 40 with Windows' SHA-256; fixture `r314compress`, damaged
+  units refused) and refuses to change them; ZSTD has no sample yet.
+  Integrity streams: the data checksums (CRC32-C per 4 KiB
   cluster, CRC-64 per 16 KiB of 64 KiB clusters; volume `r314integ64k`)
   are checked on every read, damaged data is refused. ReFS inside a space:
   a Dev Drive in a two-way mirror space of two disks (`-PoolDisks 2
   -Resiliency Mirror`, volume `r314mirror`) reads back as Windows listed
-  it, through the library and the mount (`refs --space`). Open:
-  compression.
+  it, through the library and the mount (`refs --space`). Open: ZSTD
+  compression (no sample), changing compressed files.
 * B4 (research): write experiments on a small volume (scenario `small`,
   `tools/vm/Invoke-RefsSteps.ps1`, `tools/refs-diff.py`, `refs map` and
   `refs tree`) show what one change costs: copy-on-write pages up to both
