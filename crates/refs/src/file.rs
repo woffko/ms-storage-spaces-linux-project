@@ -43,7 +43,7 @@ const REPARSE: u32 = 0xc0;
 const STREAM_SET: u32 = 3;
 /// The level id of a live stream; levels kept by snapshots count up from
 /// it, smaller ids name the header of the level set.
-const LIVE_STREAM: u64 = 0x1000;
+pub(crate) const LIVE_STREAM: u64 = 0x1000;
 /// Named stream rows: an alternate data stream, a snapshot.
 const NAMED_STREAM: u16 = 0;
 const NAMED_SNAPSHOT: u16 = 2;

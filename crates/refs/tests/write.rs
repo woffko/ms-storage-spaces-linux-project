@@ -486,3 +486,45 @@ fn deleting_and_renaming_files() {
         assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
     }
 }
+
+#[test]
+fn creating_files_in_extents() {
+    let (image, manifest, skip) = load("r314basic4k");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let before = reachable(&vol, &skip);
+    let now = 133_300_000_000_000_000;
+    let data: Vec<u8> = (0..300 * 1024u32).map(|i| (i * 7 + i / 4096) as u8).collect();
+    for (path, len) in [("/sizes/five thousand.bin", 5000), ("/names/large.bin", data.len())] {
+        vol.create_file(path, &data[..len], now).unwrap();
+        assert_eq!(read_all(&vol, path), &data[..len], "{path}");
+        let file = vol.open_file(&vol.lookup(path).unwrap()).unwrap();
+        let refs::Content::Extents(extents) = &file.data.unwrap().content else {
+            panic!("{path}: inline")
+        };
+        let used = used(&vol, 1);
+        for x in extents {
+            // Windows' write path needs runs that do not cross the file's
+            // cluster 64 (nor, as Windows writes them, a multiple of 256).
+            let end = x.vcn + x.clusters;
+            assert!(
+                !(x.vcn < 64 && end > 64) && x.vcn / 256 == (end - 1) / 256,
+                "{path}: run {x:?}"
+            );
+            let lcn = vol.translate(x.vlcn).unwrap();
+            for c in lcn..lcn + x.clusters {
+                assert!(
+                    used.contains(&c),
+                    "{path}: data cluster {c:#x} not used in the allocator"
+                );
+                assert!(!before.contains(&c), "{path}: data cluster {c:#x} was in use");
+            }
+        }
+    }
+    assert_allocated(&vol, &skip, "created in extents");
+    assert_pages_valid(&vol, &skip, "created in extents");
+    // Deleting them is not done yet (their data clusters).
+    let err = vol.delete_file("/names/large.bin", now).unwrap_err();
+    assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
+}

@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use storage_spaces::io::WriteAt;
 
 use crate::error::{Error, Result, format_err};
-use crate::file::{Target, Times};
+use crate::file::{LIVE_STREAM, Target, Times};
 use crate::node::Node;
 use crate::page::{PAGE_HEADER_SIZE, PageRef, store_reference};
 use crate::util::{le16, le32, le64, utf16};
@@ -222,6 +222,66 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
                     .then_some((start, count, r))
             })
             .collect())
+    }
+
+    /// `count` clusters for file data from the medium allocator's bitmap
+    /// row that starts at `band` (the row where data near it is), in as few
+    /// runs as fit: (first physical cluster, clusters) each, marked used.
+    fn take_data(&mut self, band: u64, count: u64) -> Result<Vec<(u64, u64)>> {
+        let (start, len, at) = self
+            .bitmaps(ROOT_MEDIUM_ALLOCATOR)?
+            .into_iter()
+            .find(|(start, _, _)| *start == band)
+            .ok_or_else(|| format_err!("no allocator bitmap at {band:#x}"))?;
+        let v = &self.pages[at.page].data[at.value..at.value + at.len];
+        if (le16(v, 0x10) as u64) < count {
+            return Err(Error::Unsupported(
+                "no room for the data in its band (other bands are not used yet)".into(),
+            ));
+        }
+        let used =
+            |j: u64| v[ALLOCATOR_HEADER + (j / 8) as usize] >> (j % 8) & 1 != 0 || self.freed.contains(&(start + j));
+        // As Windows places data: after the data already in the row (the
+        // free clusters below it only when nothing is left above), in runs
+        // that end at the file's clusters 1, 64, 256 and multiples of 256.
+        let after = (0..len).rev().find(|&j| used(j)).map_or(0, |j| j + 1);
+        let mut runs: Vec<(u64, u64)> = Vec::new();
+        let mut left = count;
+        let mut vcn = 0;
+        for (from, to) in [(after, len), (0, after)] {
+            let mut j = from;
+            while left > 0 && j < to {
+                if used(j) {
+                    j += 1;
+                    continue;
+                }
+                let boundary = match vcn {
+                    0 => 1,
+                    1..64 => 64,
+                    _ => (vcn / 256 + 1) * 256,
+                };
+                let mut n = 0;
+                while j + n < to && n < left && vcn + n < boundary && !used(j + n) {
+                    n += 1;
+                }
+                runs.push((j, n));
+                left -= n;
+                vcn += n;
+                j += n;
+            }
+        }
+        if left > 0 {
+            return Err(Error::Unsupported("no room for the data in its band".into()));
+        }
+        let v = self.value_mut(at);
+        for &(j, n) in &runs {
+            for k in j..j + n {
+                v[ALLOCATOR_HEADER + (k / 8) as usize] |= 1 << (k % 8);
+            }
+        }
+        let free = le16(v, 0x10) - count as u16;
+        v[0x10..0x12].copy_from_slice(&free.to_le_bytes());
+        Ok(runs.into_iter().map(|(j, n)| (start + j, n)).collect())
     }
 
     /// `n` free clusters of an allocator, aligned to `n`, marked used.
@@ -661,8 +721,8 @@ impl<D: WriteAt> Volume<D> {
         let trimmed = path.trim_end_matches('/');
         let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
         check_name(name)?;
-        if data.len() > 1024 {
-            return Err(Error::Unsupported("files of more than 1 KiB (data in extents)".into()));
+        if data.len() as u64 > MAX_CREATED {
+            return Err(Error::Unsupported(format!("files of more than {MAX_CREATED} bytes")));
         }
         match self.lookup(trimmed) {
             Err(Error::NotFound(_)) => {}
@@ -685,7 +745,34 @@ impl<D: WriteAt> Volume<D> {
                 .unwrap_or(1)
                 + 1;
 
-            let record = resident_record(data, now, next_id, common);
+            let record = if data.len() <= MAX_INLINE {
+                resident_record(data, now, next_id, common)
+            } else {
+                // Data clusters where the data near it is, written now
+                // (they are free until the commit).
+                let band = self.data_band(dir)?;
+                let clusters = (data.len() as u64).div_ceil(self.cluster);
+                let runs = tx.take_data(band, clusters)?;
+                let mut at = 0usize;
+                let mut extents = Vec::new();
+                for &(lcn, n) in &runs {
+                    let len = ((n * self.cluster) as usize).min(data.len() - at);
+                    let mut buf = vec![0u8; (n * self.cluster) as usize];
+                    buf[..len].copy_from_slice(&data[at..at + len]);
+                    self.dev.write_all_at(&buf, self.offset + lcn * self.cluster)?;
+                    extents.push(((at as u64) / self.cluster, self.virtual_of(lcn)?, n));
+                    at += len;
+                }
+                self.dev.flush()?;
+                extent_record(
+                    data.len() as u64,
+                    clusters * self.cluster,
+                    &extents,
+                    now,
+                    next_id,
+                    common,
+                )
+            };
             let utf16: Vec<u8> = name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
             // The file id row.
             let (key, value) = file_id_row(next_id, &utf16);
@@ -693,7 +780,9 @@ impl<D: WriteAt> Volume<D> {
             // The name row with the record.
             let mut key = vec![ROW_NAME as u8, 0, 1, 0];
             key.extend(&utf16);
-            tx.insert(root, &row(&key, &record, 1), &|k| directory_key_order(&key, k).is_lt())?;
+            tx.insert(root, &row(&key, &record, ROW_EMBEDS_NODE), &|k| {
+                directory_key_order(&key, k).is_lt()
+            })?;
             self.touch_directory(&mut tx, parent, dir, now)?;
             tx.commit()?;
         }
@@ -770,7 +859,9 @@ impl<D: WriteAt> Volume<D> {
             tx.insert(root, &row(&key, &value, 0), &|k| directory_key_order(&key, k).is_lt())?;
             let mut key = vec![ROW_NAME as u8, 0, 1, 0];
             key.extend(&utf16);
-            tx.insert(root, &row(&key, &record, 1), &|k| directory_key_order(&key, k).is_lt())?;
+            tx.insert(root, &row(&key, &record, ROW_EMBEDS_NODE), &|k| {
+                directory_key_order(&key, k).is_lt()
+            })?;
             self.touch_directory(&mut tx, &parent, dir, now)?;
             tx.commit()?;
         }
@@ -834,6 +925,52 @@ impl<D: WriteAt> Volume<D> {
         Ok(())
     }
 
+    /// The medium allocator's bitmap row that holds the data of a file
+    /// near directory `dir` (Windows keeps file data apart from metadata).
+    fn data_band(&self, dir: u64) -> Result<u64> {
+        let mut bands = Vec::new();
+        self.walk(
+            &self.checkpoint.roots[ROOT_MEDIUM_ALLOCATOR].clone(),
+            false,
+            &mut |row| {
+                let v = row.value;
+                if v.len() >= 0x18 && le16(v, 0x12) == ALLOCATOR_BITMAP {
+                    bands.push((le64(v, 0), le64(v, 8)));
+                }
+                Ok(())
+            },
+        )?;
+        let mut dirs = std::collections::VecDeque::from([dir, ROOT_DIRECTORY]);
+        let mut seen = 0;
+        while let Some(d) = dirs.pop_front() {
+            seen += 1;
+            if seen > 256 {
+                break;
+            }
+            for e in self.read_dir(d)? {
+                if let Target::Directory(child) = e.target {
+                    if e.attributes & 0x404 == 0 {
+                        dirs.push_back(child);
+                    }
+                    continue;
+                }
+                let Ok(file) = self.open_file(&e) else { continue };
+                if let Some(crate::file::Stream {
+                    content: crate::file::Content::Extents(x),
+                    ..
+                }) = &file.data
+                    && let Some(x) = x.iter().find(|x| x.written)
+                {
+                    let lcn = self.translate(x.vlcn)?;
+                    if let Some(&(start, _)) = bands.iter().find(|(s, n)| *s <= lcn && lcn < s + n) {
+                        return Ok(start);
+                    }
+                }
+            }
+        }
+        Err(Error::Unsupported("no file data to place new data near".into()))
+    }
+
     fn directory_of(&self, parent: &str) -> Result<u64> {
         if parent.trim_matches('/').is_empty() {
             return Ok(ROOT_DIRECTORY);
@@ -893,6 +1030,8 @@ fn inline_data(record: &[u8]) -> Option<usize> {
 }
 
 const ROW_OWN: u16 = 0x10;
+/// The row flag of rows whose value embeds a node (records, extent maps).
+const ROW_EMBEDS_NODE: u16 = 1;
 /// The row flag of removed rows (they stay in the row area).
 const ROW_DELETED: u16 = 4;
 const ROW_FILE_ID: u16 = 0x20;
@@ -1037,4 +1176,97 @@ fn file_id_row(id: u64, utf16: &[u8]) -> (Vec<u8>, Vec<u8>) {
     value[10..12].copy_from_slice(&(utf16.len() as u16).to_le_bytes());
     value.extend(utf16);
     (key, value)
+}
+
+/// Files `refs create` makes keep up to this much data in their record;
+/// larger ones up to the next limit get data clusters.
+const MAX_INLINE: usize = 1024;
+const MAX_CREATED: u64 = 64 << 20;
+
+/// The record of a file whose data is in extents, as Windows writes it:
+/// the level set's header row (id 8) and the live level (id 0x1000) whose
+/// value is an extent node; `extents` are (first cluster in the file,
+/// first virtual cluster, clusters).
+fn extent_record(size: u64, allocated: u64, extents: &[(u64, u64, u64)], now: u64, id: u64, common: u64) -> Vec<u8> {
+    let multi = |len: usize, level: u64, parent: u64, header: u64| {
+        let mut k = vec![0u8; 0x28];
+        k[0..8].copy_from_slice(&(len as u64).to_le_bytes());
+        k[8..12].copy_from_slice(&0x8000_0002u32.to_le_bytes());
+        k[12..16].copy_from_slice(&0x000e_0080u32.to_le_bytes());
+        k[0x10..0x18].copy_from_slice(&level.to_le_bytes());
+        k[0x18..0x20].copy_from_slice(&parent.to_le_bytes());
+        k[0x20..0x28].copy_from_slice(&header.to_le_bytes());
+        k
+    };
+    // The header of the level set: the next free level id, one level.
+    let mut set = vec![0u8; 0x28];
+    set[0..4].copy_from_slice(&0x1001u32.to_le_bytes());
+    set[8..16].copy_from_slice(&1u64.to_le_bytes());
+    let set_row = row(&multi(set.len(), 8, 8, 1), &set, 0);
+    // The live level: a header, then a node of raw extent records keyed by
+    // their first cluster in the file.
+    const NODE: usize = 0x88;
+    let n = extents.len();
+    // The node ends 8-aligned: free bytes before an odd key index.
+    let free = 4 * n % 8;
+    let index = 0x28 + 24 * n + free;
+    let mut v = vec![0u8; NODE + index + 4 * n];
+    let put32 = |v: &mut Vec<u8>, at: usize, x: u32| v[at..at + 4].copy_from_slice(&x.to_le_bytes());
+    let put64 = |v: &mut Vec<u8>, at: usize, x: u64| v[at..at + 8].copy_from_slice(&x.to_le_bytes());
+    put32(&mut v, 0, NODE as u32);
+    v[4..8].copy_from_slice(&[0x28, 0, 1, 0]);
+    put32(&mut v, 8, 1);
+    put32(&mut v, 0x0c, 0x200);
+    put32(&mut v, 0x10, 0x200);
+    put32(&mut v, 0x14, 2);
+    put64(&mut v, 0x20, n as u64);
+    put32(&mut v, 0x2c, 0x28);
+    put64(&mut v, 0x30, allocated);
+    put64(&mut v, 0x38, size);
+    put64(&mut v, 0x40, size);
+    put64(&mut v, 0x48, allocated);
+    put64(&mut v, 0x50, 1);
+    let h = NODE;
+    put32(&mut v, h, 0x28);
+    put32(&mut v, h + 4, (0x28 + 24 * n) as u32);
+    put32(&mut v, h + 8, free as u32);
+    v[h + 0x0c..h + 0x10].copy_from_slice(&[0, 0x0e, 0, 0]);
+    put32(&mut v, h + 0x10, index as u32);
+    put32(&mut v, h + 0x14, n as u32);
+    put32(&mut v, h + 0x20, (index + 4 * n) as u32);
+    for (i, &(vcn, vlcn, clusters)) in extents.iter().enumerate() {
+        let r = h + 0x28 + 24 * i;
+        put64(&mut v, r, vlcn);
+        v[r + 8..r + 12].copy_from_slice(&[0x50, 0, 0x18, 0]);
+        put32(&mut v, r + 0x0c, vcn as u32);
+        put32(&mut v, r + 0x14, clusters as u32);
+        put32(
+            &mut v,
+            h + index + 4 * i,
+            (0x28 + 24 * i) as u32 | ((vcn.min(0xffff) as u32) << 16),
+        );
+    }
+    // Flag 1: the value embeds a node (as name rows embed records).
+    let live_row = row(&multi(v.len(), LIVE_STREAM, 8, 0), &v, ROW_EMBEDS_NODE);
+    // The record: as for inline data, with two rows and no inline flag.
+    let mut r = resident_record(&[], now, id, common);
+    r.truncate(0xa8);
+    r[0x20..0x28].copy_from_slice(&2u64.to_le_bytes());
+    r[0x4c..0x50].fill(0);
+    r[0x58..0x60].copy_from_slice(&size.to_le_bytes());
+    r[0x60..0x68].copy_from_slice(&allocated.to_le_bytes());
+    let index = 0x28 + set_row.len() + live_row.len();
+    let mut node = vec![0u8; index + 8];
+    node[0..4].copy_from_slice(&0x28u32.to_le_bytes());
+    node[4..8].copy_from_slice(&(index as u32).to_le_bytes());
+    node[0x0c..0x10].copy_from_slice(&[0, 2, 0, 0]);
+    node[0x10..0x14].copy_from_slice(&(index as u32).to_le_bytes());
+    node[0x14..0x18].copy_from_slice(&2u32.to_le_bytes());
+    node[0x20..0x24].copy_from_slice(&((index + 8) as u32).to_le_bytes());
+    node[0x28..0x28 + set_row.len()].copy_from_slice(&set_row);
+    node[0x28 + set_row.len()..index].copy_from_slice(&live_row);
+    node[index..index + 4].copy_from_slice(&0xffff_0028u32.to_le_bytes());
+    node[index + 4..index + 8].copy_from_slice(&(0xffff_0000u32 | (0x28 + set_row.len()) as u32).to_le_bytes());
+    r.extend(node);
+    r
 }

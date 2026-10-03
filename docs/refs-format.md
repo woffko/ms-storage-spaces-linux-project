@@ -187,18 +187,31 @@ reads back with Windows' SHA-256):
   created), stream size at 0x20, valid length at 0x28, 2 at 0x38, the
   bytes from 0x3c;
 * **$DATA in extents** (0x80000002, 0x000e0080): one row per *level* (see
-  below), the live stream's level id 0x1000 at key 0x10; stream size at
-  value 0x38; the value is a node whose leaf entries are raw extent
-  records (no row header):
+  below), the live stream's level id 0x1000 at key 0x10, row flag 1 (the
+  value embeds a node). The value: 0x00 offset of the node (0x88), 0x14
+  2, 0x16 the integrity checksum kind, 0x20 number of extent records,
+  0x2c 0x28, allocated size at 0x30 and 0x48, stream size at 0x38, valid
+  length at 0x40, 0x50 1; the node (flags 0x0e) holds raw extent records
+  (no row header):
 
   | Offset | Size | Field |
   |---|---|---|
   | 0x00 | 8 | first virtual cluster |
-  | 0x08 | 2 | flags: 0x10 written, 0x20 sparse hole, 0x80 checksums follow |
+  | 0x08 | 2 | flags: 0x10 written, 0x20 sparse hole, 0x80 checksums follow (Windows writes 0x50) |
   | 0x0a | 2 | record size (24, more with checksums) |
   | 0x0c | 4 | first cluster in the file |
   | 0x14 | 4 | clusters |
 
+  The node's key index entries carry the record's first cluster in the
+  file in their upper half (directory rows carry 0xffff there), and the
+  node ends 8-aligned (4 free bytes before an odd number of entries; the
+  same holds for every embedded node). Windows splits runs at the file's
+  clusters 1, 64, 256 and multiples of 256 even where the clusters are
+  contiguous, and its write path depends on it: appending to a file
+  whose single run crossed cluster 64 made ReFS fail to find the run
+  (bug check 0x149 in `TmsTableSet<CmsStreamSetCallbacks>::PinRow`, a row
+  not found), while the same data in runs split at 64 worked
+  (**verified**, `refs create` splits the same way).
   Runs without the written bit or with the hole bit read as zeros
   (**verified**: a sparse file of 1 GiB with three written MiB); index
   nodes point at pages of the same. **Integrity streams**: with flag 0x80

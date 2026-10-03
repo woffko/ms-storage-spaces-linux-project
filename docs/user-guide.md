@@ -447,9 +447,10 @@ refs delete devdrive.img --path /notes/done.txt --yes
 `refs overwrite` replaces bytes inside a file (not beyond its end, not in
 sparse ranges, not in integrity streams) where they are, as Windows does,
 and sets the modification and change times to now. `refs create` makes a
-file of up to 1 KiB (kept in its record) with a printable ASCII name, in
-a directory small enough to fit one metadata page; it takes the
-permissions of the files beside it. `refs rename` (within the directory)
+file (up to 1 KiB kept in its record, up to 64 MiB in clusters near the
+data of the files around it) with a printable ASCII name, in a directory
+small enough to fit one metadata page; it takes the permissions of the
+files beside it. `refs rename` (within the directory)
 and `refs delete` work on files whose data is kept in their record (small
 files).
 

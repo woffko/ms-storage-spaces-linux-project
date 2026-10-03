@@ -136,7 +136,7 @@ enum Command {
         yes: bool,
     },
     /// Create a file holding the content of a local file (experimental:
-    /// writes the volume, only with --yes; up to 1 KiB, a printable ASCII
+    /// writes the volume, only with --yes; up to 64 MiB, a printable ASCII
     /// name, a directory of one page with room left).
     Create {
         /// The image, disk or partition.

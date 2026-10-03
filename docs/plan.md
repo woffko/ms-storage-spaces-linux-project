@@ -676,8 +676,16 @@ rows of thin spaces not allocated yet (M7).
   area is full. Windows refused the first deletes: it walks a page's rows
   by their sizes, so removed rows stay as tombstones (flag 4), as Windows
   leaves them; the tests now check every page that way. Limits for now:
-  directories of one page, ASCII names, data in the record. Next: data in
-  extents (allocating data clusters), directories, splitting pages.
+  directories of one page, ASCII names, data in the record. `refs create`
+  of files in extents (up to 64 MiB): data clusters from the medium
+  allocator's row that holds nearby file data, after the data already
+  there, in runs split at the file's clusters 1, 64 and multiples of 256
+  as Windows splits them; Windows read the files, appended to one and
+  deleted another. The first version wrote one run; Windows' append then
+  bug-checked the VM (0x149, the run not found; analysed with the Windows
+  debugger on the test VM): a run must not cross the file's cluster 64.
+  Next: deleting files in extents, growing files, directories, splitting
+  pages.
 
 ## Test infrastructure (continuous, feeds every stage)
 
