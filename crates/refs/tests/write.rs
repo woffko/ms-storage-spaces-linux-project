@@ -1691,16 +1691,12 @@ fn updating_files_in_place() {
     assert!(used(&vol, 1).len() < used_before);
     assert_eq!(vol.lookup("/u.bin").unwrap().size, 100_000);
     assert_eq!(vol.check(&skip).unwrap().problems, Vec::<String>::new());
-    // A large file grows where rewriting it whole would not fit: the old
-    // clusters stay in use until the commit.
+    // A large file grows without a second copy of it.
     let big: Vec<u8> = (0..200_000_000u32).map(|i| (i % 239) as u8).collect();
     vol.create_file("/big.bin", &big, now).unwrap();
     let mut more = big.clone();
     more.extend_from_slice(b"appended");
-    assert!(
-        vol.write_file("/big.bin", &more, now).is_err(),
-        "no room for a second copy"
-    );
+    let used_before = used(&vol, 1).len();
     vol.update_file(
         "/big.bin",
         &more.as_slice(),
@@ -1708,6 +1704,7 @@ fn updating_files_in_place() {
         now,
     )
     .unwrap();
+    assert!(used(&vol, 1).len() < used_before + 64, "no second copy");
     assert!(read_all(&vol, "/big.bin") == more);
     assert_eq!(vol.check(&skip).unwrap().problems, Vec::<String>::new());
     assert_allocated(&vol, &skip, "updated");

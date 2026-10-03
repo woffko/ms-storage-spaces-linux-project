@@ -763,9 +763,11 @@ rows of thin spaces not allocated yet (M7).
   node flag 8 out and put 0xffff in its key index entries (Windows drops
   the file otherwise), and data must not go into containers Windows has
   not handed out (class 0x2000: the volume then needs repair); data goes
-  into data containers, then metadata ones. Not done: handing out new
-  containers (the container tables, roots 7, 8 and 12, are not written
-  yet), extent maps of more than one page.
+  into data containers, then metadata ones. New data containers are
+  handed out as Windows does (container tables and small allocator
+  copied on write; full containers packed into uniform rows); Windows
+  read 150 MB written so and wrote on. Not done: extent maps of more
+  than one page, splitting the medium allocator's leaves.
   Volume::update_file changes a file's data in place as Windows does
   (changed bytes where they are, new runs after the file's own, a tail
   freed); the mount writes files back that way, so appending to a large

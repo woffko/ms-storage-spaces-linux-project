@@ -32,6 +32,9 @@ use crate::volume::{ROOT_DIRECTORY, ROOT_OBJECTS, Volume};
 
 const ROOT_MEDIUM_ALLOCATOR: usize = 1;
 const ROOT_CONTAINER_ALLOCATOR: usize = 2;
+/// The allocator of the tables that name physical clusters (the container
+/// tables and itself).
+const ROOT_SMALL_ALLOCATOR: usize = 12;
 const ROOT_OBJECTS_COPY: usize = 5;
 /// Allocator rows with a bitmap (u16 at 0x12; 2 marks a range without
 /// one, wholly used or wholly free).
@@ -50,9 +53,9 @@ impl Tree {
     fn allocator(self) -> Result<usize> {
         match self {
             Tree::Root(1 | 2 | 6 | 11) => Ok(ROOT_CONTAINER_ALLOCATOR),
-            Tree::Root(7 | 8 | 12) => Err(Error::Unsupported(format!(
-                "writing table {self:?} (physical clusters)"
-            ))),
+            // Physical clusters, from the small allocator (as Windows
+            // copies the container tables when it hands out a container).
+            Tree::Root(7 | 8 | 12) => Ok(ROOT_SMALL_ALLOCATOR),
             _ => Ok(ROOT_MEDIUM_ALLOCATOR),
         }
     }
@@ -97,6 +100,8 @@ pub struct Transaction<'v, D> {
     freed: std::collections::HashSet<u64>,
     /// Set while committing: allocator rows are not restructured then.
     committing: bool,
+    /// Containers this transaction handed out for data (first clusters).
+    handed_out: Vec<u64>,
 }
 
 impl<'v, D: WriteAt> Transaction<'v, D> {
@@ -121,6 +126,7 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
             roots: HashMap::new(),
             freed: Default::default(),
             committing: false,
+            handed_out: Vec::new(),
         }
     }
 
@@ -233,9 +239,9 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
             .filter_map(|r| {
                 let v = &self.pages[r.page].data[r.value..r.value + r.len];
                 let (start, count) = (le64(v, 0), le64(v, 8));
-                (le16(v, 0x12) == ALLOCATOR_BITMAP
-                    && count % 8 == 0
-                    && r.len as u64 == ALLOCATOR_HEADER as u64 + count / 8)
+                // The small allocator has a row of 12 clusters: its bitmap
+                // is padded (with set bits) to whole bytes and more.
+                (le16(v, 0x12) == ALLOCATOR_BITMAP && r.len as u64 >= ALLOCATOR_HEADER as u64 + count.div_ceil(8))
                     .then_some((start, count, r))
             })
             .collect())
@@ -250,36 +256,107 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         let mut runs = Vec::new();
         let (mut left, mut vcn) = (count, first_vcn);
         let mut tried = std::collections::HashSet::new();
-        let class = |start: u64| self.vol.container_classes.range(..=start).next_back().map(|(_, &c)| c);
         while left > 0 {
+            let (handed, vol) = (self.handed_out.clone(), self.vol);
+            let class = move |start: u64| {
+                if handed
+                    .iter()
+                    .any(|&h| h <= start && start < h + vol.clusters_per_container)
+                {
+                    return Some(0);
+                }
+                vol.container_classes.range(..=start).next_back().map(|(_, &c)| c)
+            };
             let rows = self.bitmaps(ROOT_MEDIUM_ALLOCATOR)?;
             let free = |at: &RowAt| u64::from(le16(&self.pages[at.page].data[at.value..], 0x10));
-            // Data containers (class 0) first, then metadata containers
-            // (class 1) as far as they keep room for pages; never containers
-            // not handed out yet (Windows takes data there for damage).
+            // Data containers (class 0) first, then a container handed out
+            // for data, then metadata containers (class 1) as far as they
+            // keep room for pages; never containers not handed out (Windows
+            // takes data there for damage).
             let next = if !tried.contains(&band) && rows.iter().any(|r| r.0 == band && class(r.0) == Some(0)) {
-                band
-            } else if let Some(r) = rows
-                .iter()
-                .find(|r| !tried.contains(&r.0) && class(r.0) == Some(0) && free(&r.2) > 0)
-            {
-                r.0
-            } else if let Some(r) = rows
+                Some(band)
+            } else {
+                rows.iter()
+                    .find(|r| !tried.contains(&r.0) && class(r.0) == Some(0) && free(&r.2) > 0)
+                    .map(|r| r.0)
+            };
+            let metadata = rows
                 .iter()
                 .find(|r| !tried.contains(&r.0) && class(r.0) == Some(1) && free(&r.2) > METADATA_RESERVE)
-            {
-                r.0
-            } else {
-                return Err(Error::Unsupported(
-                    "no room for the data in the volume's data containers (Windows hands out more as it needs them)"
-                        .into(),
-                ));
+                .map(|r| r.0);
+            let next = match next {
+                Some(n) => n,
+                None => match self.hand_out_container()? {
+                    Some(n) => n,
+                    None => metadata.ok_or_else(|| Error::Unsupported("the volume is full".into()))?,
+                },
             };
             tried.insert(next);
-            let keep = if class(next) == Some(1) { METADATA_RESERVE } else { 0 };
+            let is_metadata = self
+                .vol
+                .container_classes
+                .range(..=next)
+                .next_back()
+                .is_some_and(|(_, &c)| c == 1);
+            let keep = if is_metadata { METADATA_RESERVE } else { 0 };
             runs.extend(self.take_from_row(next, &mut left, &mut vcn, keep)?);
+            self.pack_if_full(next)?;
         }
         Ok(runs)
+    }
+
+    /// Hands out a container for data, as Windows does when its data
+    /// containers fill: the first one not handed out yet (class 0x2000)
+    /// after the data containers there are, whose clusters are all free,
+    /// becomes class 0 in both container tables, and its range in the
+    /// medium allocator a bitmap row; its first cluster (None: none left).
+    fn hand_out_container(&mut self) -> Result<Option<u64>> {
+        let vol = self.vol;
+        let cpc = vol.clusters_per_container;
+        let last_data = vol
+            .container_classes
+            .iter()
+            .filter(|&(_, &c)| c == 0 || c == 0x4000)
+            .map(|(&p, _)| p)
+            .chain(self.handed_out.iter().copied())
+            .max()
+            .unwrap_or(0);
+        let mut candidates: Vec<u64> = vol
+            .container_classes
+            .iter()
+            .filter(|(p, c)| **c == 0x2000 && !self.handed_out.contains(p))
+            .map(|(&p, _)| p)
+            .collect();
+        // After the data containers first, then from the start.
+        candidates.sort_by_key(|&p| (p < last_data, p));
+        for phys in candidates {
+            // Its clusters must all be free: a uniform free row covers it.
+            let at = self.find(Tree::Root(ROOT_MEDIUM_ALLOCATOR), &|k| {
+                k.len() >= 16 && le64(k, 0) <= phys && phys < le64(k, 0).saturating_add(le64(k, 8))
+            })?;
+            let v = &self.pages[at.page].data[at.value..at.value + at.len];
+            if !(v.len() == 0x18 && le16(v, 0x12) == 2 && le16(v, 0x10) == 0xffff) || !phys.is_multiple_of(cpc) {
+                continue;
+            }
+            let Some((&id, _)) = vol.containers.iter().find(|&(_, &p)| p == phys) else {
+                continue;
+            };
+            for table in [crate::volume::ROOT_CONTAINERS, crate::volume::ROOT_CONTAINERS_COPY] {
+                let row = self.find(Tree::Root(table), &|k| k.len() >= 8 && le64(k, 0) == id)?;
+                let v = self.value_mut(row);
+                if v.len() < 0x18 || le32(v, 0x14) != 0x2000 {
+                    return Err(format_err!(
+                        "container {id:#x}: class {:#x} in table {table}",
+                        le32(v, 0x14)
+                    ));
+                }
+                v[0x14..0x18].copy_from_slice(&0u32.to_le_bytes());
+            }
+            self.unpack(ROOT_MEDIUM_ALLOCATOR, phys)?;
+            self.handed_out.push(phys);
+            return Ok(Some(phys));
+        }
+        Ok(None)
     }
 
     /// Takes free clusters of the medium allocator's bitmap row at `start`
@@ -434,6 +511,54 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
             val[0x18..0x1c].copy_from_slice(&total.to_le_bytes());
         }
         self.release(ROOT_MEDIUM_ALLOCATOR, &free)
+    }
+
+    /// As Windows keeps the medium allocator small: a data container's
+    /// bitmap row with no free cluster left becomes a uniform row (kind 2,
+    /// 24 bytes, no free clusters) and the container class 0x4000 (full)
+    /// in both container tables.
+    fn pack_if_full(&mut self, start: u64) -> Result<()> {
+        let vol = self.vol;
+        let Some((_, len, at)) = self
+            .bitmaps(ROOT_MEDIUM_ALLOCATOR)?
+            .into_iter()
+            .find(|(s, _, _)| *s == start)
+        else {
+            return Ok(());
+        };
+        let v = &self.pages[at.page].data[at.value..at.value + at.len];
+        let free = le16(v, 0x10);
+        let used =
+            |j: u64| v[ALLOCATOR_HEADER + (j / 8) as usize] >> (j % 8) & 1 != 0 || self.freed.contains(&(start + j));
+        let class = vol.container_classes.get(&start).copied();
+        let handed = self.handed_out.contains(&start);
+        if free != 0 || (0..len).any(|j| !used(j)) || len != vol.clusters_per_container || !(class == Some(0) || handed)
+        {
+            return Ok(());
+        }
+        let mut uniform = vec![0u8; 0x18];
+        uniform[0..8].copy_from_slice(&start.to_le_bytes());
+        uniform[8..16].copy_from_slice(&len.to_le_bytes());
+        uniform[0x12..0x14].copy_from_slice(&2u16.to_le_bytes());
+        uniform[0x14..0x16].copy_from_slice(&0x200u16.to_le_bytes());
+        let key = [start.to_le_bytes(), len.to_le_bytes()].concat();
+        self.remove_quiet(at.page, &|k| k == key)?;
+        self.insert_sorted(
+            Tree::Root(ROOT_MEDIUM_ALLOCATOR),
+            &row(&key, &uniform, 0),
+            &u64_key_order,
+        )?;
+        let Some((&id, _)) = vol.containers.iter().find(|&(_, &p)| p == start) else {
+            return Ok(());
+        };
+        for table in [crate::volume::ROOT_CONTAINERS, crate::volume::ROOT_CONTAINERS_COPY] {
+            let row = self.find(Tree::Root(table), &|k| k.len() >= 8 && le64(k, 0) == id)?;
+            let v = self.value_mut(row);
+            if v.len() >= 0x18 {
+                v[0x14..0x18].copy_from_slice(&0x4000u32.to_le_bytes());
+            }
+        }
+        Ok(())
     }
 
     /// Turns the block of a uniform allocator row (kind 2, all used or all

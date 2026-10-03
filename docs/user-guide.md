@@ -499,10 +499,9 @@ lowers their reference counts and frees only clusters no other file
 has. `refs mkdir` creates a directory;
 `refs write` replaces a file's content (or appends to it with
 `--append`), keeping its creation time, attributes and permissions.
-New data goes into the volume's data containers and then into its
-metadata containers (keeping room there for metadata); when those are
-full, `refs` stops ("no room for the data"): Windows hands out further
-containers as it needs them, `refs` does not yet.
+New data goes into the volume's data containers; when they are full
+`refs` hands out the next free container for data, as Windows does,
+and only then uses room in the metadata containers.
 `refs move` moves a file or directory into another directory and `refs
 link` gives a file another name (a hard link); changing a hard-linked
 file through one name changes it for all of them. `refs write --stream

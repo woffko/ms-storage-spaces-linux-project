@@ -326,12 +326,25 @@ table's rows for a text diff):
 * Containers have classes (u32 at 0x14 of their row in the container
   table): 1 metadata (the B+-tree pages), 0 data, 0x4000 data and full,
   0x2000 not handed out yet, 0x4001, 0x4200, 0x2040 and 0x2440 for the
-  log and reserved areas. Windows hands out a new data container by
-  changing its class. Data `refs` writes into a container still at
-  0x2000 makes Windows report the volume as needing repair; `refs` puts
-  data into data containers, then into metadata containers (leaving
-  1024 clusters of each for pages), never elsewhere, and pages into
-  metadata containers (**verified**).
+  log and reserved areas (0x4200: the allocators' own pages). Windows
+  hands out the next data container when its data containers fill (150
+  MB on a small volume): the class becomes 0 in both container tables
+  (roots 7 and 8, whose pages it copies on write through the small
+  allocator, root 12), the container's uniform row in the medium
+  allocator a bitmap row, and a container it filled becomes class 0x4000
+  with a uniform row (kind 2, no free clusters, 0 at 0x16) in place of
+  its bitmap, which keeps the allocator's tree small. Data written into
+  a container still at 0x2000 makes Windows report the volume as needing
+  repair. `refs` does the same: data into data containers, then a
+  container it hands out, then metadata containers (leaving 1024
+  clusters of each for pages); pages into metadata containers
+  (**verified**: Windows read 150 MB written so on a small volume and
+  100 MB on an empty one, wrote 100 MB more, refsutil leak and triage as
+  for the untouched volumes). Splitting a leaf of the medium allocator
+  is avoided: Windows' index rows there hold (last cluster, 1) and took
+  `refs`' split for a damaged page.
+* The small allocator (root 12) has a row of 12 clusters (bitmap padded
+  with set bits to whole bytes) beside one of a container.
 * Allocator rows (roots 1, 2) are bitmaps of a cluster range with a count
   of free clusters; allocating a 16 KiB page sets four bits and lowers
   the count by four. Value: start, count, free (u16 at 0x10), kind (u16
