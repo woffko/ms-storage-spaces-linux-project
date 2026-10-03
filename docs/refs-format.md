@@ -250,6 +250,35 @@ table's rows for a text diff):
 * Object table rows carry, before their page reference, a counter pair
   that the checkpoint (0x70) and MLog records carry as well; it grows with
   every transaction (the log's sequence number, presumably).
+* **First write Windows accepted** (2026-10-03): on a cleanly detached
+  volume, a file's modification time changed in place in its directory
+  page, with the page's checksum stored again in the object table rows
+  of roots 0 and 5, those pages' checksums in the checkpoint's root
+  references and the checkpoint's own checksum recomputed (no copy on
+  write, no allocation, no log record). Windows attached it as healthy
+  without replaying the log, showed the new time, read every file, and
+  carried the change on through its own later transactions. In-place
+  changes are not crash safe; a real writer copies on write and switches
+  checkpoints.
+* **A copy-on-write commit Windows accepts** (2026-10-03,
+  `tools/research/refs-touch-cow.py`): the same change committed the way
+  Windows commits. Where pages go: the medium allocator (root 1) counts
+  physical clusters below the container band and serves the object
+  tables, directories and the other tables; the container allocator
+  (root 2) serves the allocator tables themselves (roots 1 and 2, also 6
+  and 11), its own page included. Each changed page gets four free
+  clusters (one bit per cluster; the u16 at 0x10 counts the free ones),
+  its old clusters are freed in the same commit, its header names its new
+  virtual clusters (0x20) and the new clock (0x10); references are
+  updated child first with their checksums, through the object table
+  rows of roots 0 and 5. The checkpoint is a single cluster: the new one
+  goes to the older slot with the next clock (0x10 and 0x60), the counter
+  at 0x68 incremented, the changed roots' references, its own cluster in
+  its self reference, and its own checksum; writing it is the commit
+  point. No log record and the same log sequence number (0x70). Windows
+  attached it as healthy, `refsutil leak` found exactly the leaks it finds
+  on the untouched volume, `refsutil triage /g` passed, and Windows
+  committed its own transactions on top (`tools/vm/Test-RefsVolume.ps1`).
 
 ## Not read yet
 

@@ -636,8 +636,23 @@ rows of thin spaces not allocated yet (M7).
   object tables, both allocators, internal objects, MLog records and both
   checkpoints (docs/refs-format.md, "Writing"). Next: the meaning of the
   allocator, object table and checkpoint fields, the MLog layout and
-  whether Windows replays it over a checkpoint written without records;
-  then a first write (a file's time) that Windows takes as clean.
+  whether Windows replays it over a checkpoint written without records.
+  First write accepted: a file's time changed in place under the current
+  checkpoint, every checksum up to the checkpoint fixed; Windows attached
+  the volume as healthy, showed the time and kept it. Then the same with
+  copy on write, as Windows commits (pages from the medium or container
+  allocator, old clusters freed, a new checkpoint in the older slot):
+  healthy, `refsutil leak` and `triage` as on the untouched volume, and
+  Windows committed on top. Design of the writer (next): a transaction
+  over the current checkpoint's trees in `refs::write` that copies every
+  changed page (rows changed in place, inserted, removed; nodes split and
+  merged), allocates and frees clusters in the allocators until nothing
+  changes any more, and commits by writing the checkpoint cluster; first
+  operations: times and attributes, data overwritten in allocated
+  clusters (integrity checksums updated), then creating, renaming and
+  deleting files and directories and growing files. Every operation is
+  checked as above on Windows, and crash states (every subset of the
+  page writes before the checkpoint) must read as the old volume.
 
 ## Test infrastructure (continuous, feeds every stage)
 
