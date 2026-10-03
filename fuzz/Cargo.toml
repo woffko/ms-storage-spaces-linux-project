@@ -12,6 +12,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 crc32fast = "1"
 storage-spaces = { path = "../crates/storage-spaces" }
+refs = { path = "../crates/refs" }
 
 # Not a member of the main workspace (the targets need nightly).
 [workspace]
@@ -93,6 +94,20 @@ bench = false
 [[bin]]
 name = "manage"
 path = "fuzz_targets/manage.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "refs_parsers"
+path = "fuzz_targets/refs_parsers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "refs_volume"
+path = "fuzz_targets/refs_volume.rs"
 test = false
 doc = false
 bench = false

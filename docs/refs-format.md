@@ -1,0 +1,187 @@
+# ReFS 3.x on-disk format (as read by `refs`)
+
+What the `refs` crate reads, with the evidence for each part. **Verified**
+marks statements backed by a test against volumes Windows created
+(`crates/refs/tests/corpus.rs` on the corpus of `tools/vm/New-RefsVolume.ps1`:
+ReFS 3.14 Dev Drives of Windows 11 Insider 26340, 4 KiB and 64 KiB
+clusters, CRC64 and SHA-256 metadata checksums, integrity streams).
+The most complete public description is
+[forefst](https://github.com/xbqt/forefst) (GPL-3.0, documentation read,
+no code taken); refsprogs (GPL-2.0+) and libfsrefs are the other prior art
+(see `docs/research.md`).
+
+All integers are little-endian. A *cluster* is 4 KiB or 64 KiB; a
+*metadata page* is 16 KiB on 4 KiB clusters (four clusters, each named
+separately) and one cluster on 64 KiB clusters.
+
+## Bootstrap
+
+```
+boot sector -> superblock (cluster 0x1e) -> checkpoint -> container table
+            -> object table -> directories and files
+```
+
+### Boot sector (sector 0 of the volume)
+
+| Offset | Size | Field |
+|---|---|---|
+| 0x03 | 8 | `"ReFS\0\0\0\0"` |
+| 0x10 | 4 | `"FSRS"` |
+| 0x16 | 2 | checksum: over bytes 3..512 without these two, `c = ror16(c, 1) + byte` |
+| 0x18 | 8 | sectors |
+| 0x20 | 4 | bytes per sector |
+| 0x24 | 4 | sectors per cluster |
+| 0x28 | 1+1 | version major, minor (3.14) |
+| 0x2a | 2 | checksum kind the volume was formatted with (2 CRC64, 4 SHA-256) |
+| 0x2c | 4 | flags |
+| 0x38 | 8 | serial number |
+| 0x40 | 8 | bytes per container (64 MiB) |
+
+(**verified**: every corpus volume; the checksum recomputed.)
+
+### Metadata pages and page references
+
+Every metadata page starts with a 0x50-byte header: signature (`SUPB`,
+`CHKP`, `MSB+`), version 2, the volume signature (XOR of the four
+32-bit words of the volume GUID), two clocks, the page's own clusters
+(0x20..0x40) and, on B+-tree pages, the owning table at 0x48.
+
+A *page reference* names a page and its checksum:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0x00 | 4 × 8 | the page's clusters (one used on 64 KiB clusters) |
+| 0x22 | 1 | checksum kind: 1 CRC32-C, 2 CRC-64/NVME, 4 SHA-256 |
+| 0x23 | 1 | offset of the checksum from 0x20 (8) |
+| 0x24 | 4 | checksum length |
+| 0x28 | | the checksum, over the whole page |
+
+References are 48 bytes with CRC64, 72 with SHA-256 (104 on volumes
+formatted before 3.10). CRC-64/NVME is the reflected polynomial
+0x9A6C9329AC4BC9B5 with initial value and final XOR all ones, not
+ECMA-182. (**verified**: every page `refs` reads is checked; a mismatch is
+an error.)
+
+### Superblock
+
+At cluster 0x1e, copies at the last cluster but 2 and 3. 0x50: volume
+GUID; 0x70/0x74: offset and count (2) of the checkpoint clusters; 0x78/
+0x7c: offset and length of the page's own reference. That reference's
+checksum covers the first cluster with the whole reference zeroed: CRC32-C
+on 4 KiB clusters (**verified**), CRC64 on 64 KiB clusters and SHA-256 on
+SHA-256 volumes (**verified**: those volumes open, which needs it).
+
+### Checkpoint
+
+Two copies; the one with the higher clock (0x60) whose own checksum holds
+is current. Its own reference is at the offset in 0x58 (same rule as the
+superblock's). 0x5c: page reference size; 0x78: flags; 0x90: number of
+roots (13); with flag 0x200 the u32 at 0x94 is the offset of an array of
+root offsets, otherwise the array is at 0x94; each offset names a page
+reference within the checkpoint. Roots used: 0 object table, 7 and 8 the
+container table and its copy (physical clusters). (**verified**)
+
+## B+-trees
+
+Every table is a B+-tree of `MSB+` pages. A node starts with a
+descriptor whose first u32 is the offset from the descriptor to the node
+header (the descriptor is at page + 0x50; nodes inside values start at
+the value). The header: level at 0x0c (0 = leaf), flags at 0x0d, the
+key index from 0x10 to 0x20 (offsets relative to the header), the row
+count at 0x14 (`(end - start) / 4 == count`, checked). A key index entry
+is a u16 row offset and a u16 marker. A row: u32 size, u16 key offset,
+u16 key length, u16 reserved, u16 value offset, u16 value length (both
+relative to the row). An index node's rows hold page references to its
+children in their values. (**verified**: all tables, including a
+directory of 5000 names spanning several pages.)
+
+### Virtual clusters and the container table
+
+Clusters named anywhere but in roots 7, 8 and 12 are virtual. The
+container table (key: container id at 0; value: clusters per container at
+0x18, the container's first physical cluster at `len − 16`) maps them:
+`physical = start[vlcn >> bits(cpc)] + (vlcn & (cpc − 1))`, where
+`bits(cpc)` is one more than log2(cpc) (15 on 4 KiB clusters, 11 on 64
+KiB): containers are twice their size apart in virtual numbers, so a run
+never crosses one. (**verified**)
+
+### Object table
+
+Key: 16 bytes, the object id in the second u64. Value: the root of the
+object's tree as a page reference at 0x20. Directories are objects; the
+root directory is 0x600; user objects start at 0x701. (**verified**)
+
+## Directories
+
+A directory's tree holds, keyed by a u16 row type at key 0:
+
+* 0x10: the directory's own attributes (its value is an attribute tree
+  like a file record, see below; a junction's reparse point is there);
+* 0x30: one row per name, the UTF-16LE name at key + 4; key flags at
+  key + 2 decide the value:
+  * **1, embedded record**: the value is the file's record (times at
+    0x28 created, 0x30 modified, 0x38 changed, 0x40 accessed; attributes
+    at 0x48; size at 0x58; allocated at 0x60; the attribute tree's node
+    header at the offset in its first u32);
+  * **2, index entry** (84 bytes): ordinal at 0, home directory at 8,
+    times at 0x10..0x30, allocated at 0x30, size at 0x38, attributes at
+    0x40. With ReFS's directory bit 0x10000000 in the attributes, the
+    home field is the subdirectory's object id; otherwise the record is
+    the type 0x40 row of the home directory whose key holds the ordinal
+    at 8 and the home directory at 0x10 (files that were moved or have
+    several names: **verified** on hard links);
+* 0x40: records of files whose name rows are index entries.
+
+Windows shows the times of the index entry for directories once the
+volume was written back (**verified** after reattaching; a listing taken
+while the volume is still attached can show older directory times,
+because ReFS updates them lazily).
+
+## File records
+
+A file record (and a directory's own row) is a node whose rows are the
+file's attributes. A row's key: 0x08 instance marker (0x80000001 single,
+0x80000002 multiple), 0x0c descriptor (low half the attribute type);
+for multi-instance $DATA a sub-stream id at 0x10 (0x1000 the live
+stream). Attributes `refs` reads (**verified**: every file of the corpus
+reads back with Windows' SHA-256):
+
+* **$DATA inline** (0x80000001, 0x80): stream size at value 0x20, the
+  bytes from value 0x3c;
+* **$DATA in extents** (0x80000002, 0x000e0080, sub-stream 0x1000):
+  stream size at value 0x38; the value is a node whose leaf entries are
+  raw extent records (no row header):
+
+  | Offset | Size | Field |
+  |---|---|---|
+  | 0x00 | 8 | first virtual cluster |
+  | 0x08 | 2 | flags: 0x10 written, 0x20 sparse hole, 0x80 per-cluster CRC32-C follows |
+  | 0x0a | 2 | record size (24, or 24 + 4 × clusters with checksums) |
+  | 0x0c | 4 | first cluster in the file |
+  | 0x14 | 4 | clusters |
+
+  Runs without the written bit or with the hole bit read as zeros
+  (**verified**: a sparse file of 1 GiB with three written MiB; the
+  integrity-stream volume, whose runs carry checksums); index nodes point
+  at pages of the same. Block-cloned copies (`Copy-Item` on a Dev Drive)
+  name the same virtual clusters as the original (**verified**);
+* **named streams** (0x80000002, 0x000500b0, the UTF-16LE name from key
+  0x10): ADS when value 0x10 is 0 (2 = a snapshot); size at 0x20; inline
+  content from 0x3c, or, with bit 0x1000 in the u16 at value 2, in
+  extents: the $DATA record of the stream-set row (key u32 at 8 = 3)
+  whose key holds the set id (value 0x3c) at 0x30 and the sub-stream id
+  (value 0x44) at 0x38 (**verified**: a 200000-byte stream; forefst
+  matched these by size);
+* **reparse point** (0x80000001, 0xc0): tag at value 0x0c, data length at
+  0x10, the REPARSE_DATA_BUFFER's data from 0x14. Symbolic links (tag
+  0xa000000c): substitute name offset/length, print name offset/length,
+  flags (1 = relative), names from data + 12; junctions (0xa0000003) the
+  same without the flags, names from data + 8 (**verified**: Windows'
+  targets of an absolute and a relative file link, a directory link and
+  a junction).
+
+## Not read yet
+
+Compression (LZ4/ZSTD), deduplication, stream snapshots, extended
+attributes, EFS, the USN journal, volumes before ReFS 3.10 (104-byte
+references are parsed but untested) and ReFS 1.x/2.x.

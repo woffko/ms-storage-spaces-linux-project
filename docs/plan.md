@@ -1,7 +1,8 @@
 # Project plan
 
-Status as of 2026-10-02: Stages 1, 2 and 3 have met their exit criteria
-(v1.0.0; tags v0.1.0, v0.2.0 and v1.0.0). The plan is
+Status as of 2026-10-03: Stages 1, 2 and 3 have met their exit criteria
+(v1.0.0; tags v0.1.0, v0.2.0 and v1.0.0); Track B (ReFS) reads ReFS 3.14
+volumes and mounts them read-only. The plan is
 split into three stages with checkable exit criteria. ReFS is a separate track (last section) that shares the test
 infrastructure but not the milestones.
 
@@ -579,6 +580,40 @@ rows of thin spaces not allocated yet (M7).
   write support), v0.2.0 (the end of Stage 2) and v1.0.0, and a GitHub
   release for v1.0.0. The crates stay off crates.io until decided
   otherwise.
+
+### Track B (from 2026-10-02)
+
+* Corpus: Windows 11 Pro formats ReFS only as a Dev Drive (at least 50 GB),
+  so `tools/vm/New-RefsVolume.ps1` makes a 52 GiB dynamic VHDX (a few
+  hundred MB on disk) with a Dev Drive of ReFS 3.14, writes a known tree
+  (names, sizes around cluster and page boundaries, fragmented, sparse and
+  64 MiB files, a directory of 5000 files, named streams, hard and symbolic
+  links, a junction, attributes, set times, block-cloned copies, deleted
+  and renamed files), flushes, reattaches and records Windows' listing
+  (`manifest.json`); `tools/fetch-refs.sh` copies it as a sparse raw image.
+  Five volumes: 4 KiB and 64 KiB clusters, SHA-256 metadata checksums,
+  integrity streams, an empty volume.
+* B1 (read-only library, `crates/refs`): boot sector, superblock and
+  checkpoint (with their own checksums), page references with CRC-64 and
+  SHA-256 checked on every page read, container table and virtual cluster
+  translation, object table, B+-trees of any depth, directories (embedded
+  records and index entries, hard links), file records, inline and extent
+  data, sparse runs, named streams (inline and in stream sets), reparse
+  points (symbolic links, junctions). Every file, directory and stream of
+  the corpus reads back as Windows listed it: kind, attributes, times,
+  sizes, link targets and the SHA-256 of every data and stream
+  (`tests/corpus.rs`). Fixtures with the metadata and small files of each
+  volume run in CI (`tests/fixtures.rs`, made by `refs fixture`); the
+  parsers are fuzzed (`refs_parsers`, `refs_volume`; fuzzing builds accept
+  every checksum so that patched pages reach the parsers). The format is in
+  `docs/refs-format.md`. Open: ReFS 3.4 to 3.13 (no images yet: they need
+  Windows 10 or Server 2016 to 2022).
+* B2 (in progress): `refs mount` (FUSE, read-only; streams as extended
+  attributes, links and junctions as symbolic links, hard links as one
+  inode); `refs --space` reads ReFS inside a space of a pool. Block-cloned
+  files read correctly (clones share extents). Open: compression, integrity
+  stream checks of file data, snapshots, ReFS inside a space checked
+  against Windows.
 
 ## Test infrastructure (continuous, feeds every stage)
 

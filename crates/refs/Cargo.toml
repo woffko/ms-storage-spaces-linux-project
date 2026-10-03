@@ -1,0 +1,20 @@
+[package]
+name = "refs"
+description = "Read Microsoft ReFS 3.x volumes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+exclude = ["tests"]
+
+[dependencies]
+storage-spaces.workspace = true
+thiserror.workspace = true
+
+[lints.rust]
+# cargo fuzz builds with --cfg fuzzing; checksums are not checked then.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
+[dev-dependencies]
+serde_json = "1"

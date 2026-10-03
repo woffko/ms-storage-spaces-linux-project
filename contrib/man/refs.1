@@ -1,0 +1,116 @@
+.TH REFS 1 "2026-10-03" "storage-spaces 1.0" "User Commands"
+.SH NAME
+refs \- read Microsoft ReFS volumes on Linux
+.SH SYNOPSIS
+.B refs info
+.I source
+.br
+.B refs ls
+.I source
+.RB [ \-\-path
+.IR dir ]
+.RB [ \-l ]
+.RB [ \-R ]
+.br
+.B refs cat
+.I source
+.B \-\-path
+.I file
+.RB [ \-\-stream
+.IR name ]
+.br
+.B refs stat
+.I source
+.B \-\-path
+.I path
+.br
+.B refs mount
+.I source mountpoint
+.RB [ \-\-allow\-other ]
+.PP
+where
+.I source
+is
+.I device
+.RB [ \-\-offset
+.IR bytes ]
+or
+.IR disk ...
+.B \-\-space
+.I name
+.SH DESCRIPTION
+.B refs
+reads volumes formatted with ReFS 3.x by Windows (Dev Drives, data
+volumes, ReFS inside a Storage Spaces space): directories, files with
+their data, sparse files, alternate data streams, hard links, symbolic
+links and junctions, attributes and times. It never writes to the volume.
+.PP
+Every metadata page is checked against the checksum its reference
+records (CRC-64 or SHA-256, and CRC32-C for the superblock on 4 KiB
+clusters); a page that fails is an error, not silently read.
+.PP
+The
+.I device
+is an image, a disk or a partition. On a disk the first ReFS partition of
+its GPT is used, unless
+.B \-\-offset
+gives the volume's byte offset. With
+.BR \-\-space ,
+the devices are the member disks of a Storage Spaces pool and the volume is
+read from the named space (the pool is read, not attached; see
+.BR spaces (8)).
+.SH COMMANDS
+.TP
+.B info
+The ReFS version, size, cluster size, serial number, metadata checksum,
+the current checkpoint and the number of objects.
+.TP
+.B ls
+List a directory (default the root):
+.B \-l
+adds attributes (d directory, l reparse point, r read-only, h hidden,
+s system, a archive, S sparse), size and modification time (UTC);
+.B \-R
+recurses (links to directories are listed, not followed).
+.TP
+.B cat
+Write a file's data, or with
+.B \-\-stream
+one of its named streams, to standard output.
+.TP
+.B stat
+Everything about one file or directory: attributes, sizes, the four
+times, where the record is, the data's extents, the named streams and a
+link's target.
+.TP
+.B mount
+Mount the volume read-only through FUSE, in the foreground (unmount with
+.BR "fusermount \-u" ).
+Named streams appear as extended attributes
+.BR user. \fIname\fR
+(up to 64 KiB, the Linux limit; larger ones are read with
+.BR "refs cat \-\-stream" );
+symbolic links with an absolute target
+.RB ( \e??\eX:\e\fIpath\fR )
+point into the mount;
+.B \-\-allow\-other
+lets other users read it (needs
+.B user_allow_other
+in
+.IR /etc/fuse.conf ).
+.SH LIMITS
+Verified against Windows on ReFS 3.14 volumes with 4 KiB and 64 KiB
+clusters, CRC-64 and SHA-256 metadata checksums and integrity streams.
+Other ReFS 3.x versions are read by the same rules but were not verified.
+Compressed files, deduplicated files, stream snapshots, encrypted files and
+ReFS 1.x and 2.x are not read yet.
+.SH EXAMPLES
+.nf
+refs ls /dev/sdb2 \-lR
+refs cat devdrive.img \-\-path /src/main.c > main.c
+refs mount /dev/sdc mnt/
+refs ls \-\-space Data /dev/sdd /dev/sde \-\-path /
+.fi
+.SH SEE ALSO
+.BR spaces (8),
+.BR fusermount (1)

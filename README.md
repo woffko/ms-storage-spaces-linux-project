@@ -15,9 +15,9 @@ against pools created by Windows.
 
 > **Status: pools created by Windows 11; reading; writing to simple, mirror
 > and single parity spaces, fixed and thin (`attach --rw`); pool management
-> (`spaces pool|space|disk`, new).** ReFS will follow (see
-> [the plan](docs/plan.md)). The pool disks are written only for spaces
-> attached read-write and by management commands given `--yes`.
+> (`spaces pool|space|disk`); reading ReFS 3.x volumes (`refs`, new).**
+> The pool disks are written only for spaces attached read-write and by
+> management commands given `--yes`; `refs` never writes.
 
 ## What works
 
@@ -42,7 +42,9 @@ against pools created by Windows.
 | Creating pools and simple, mirror and single parity spaces (fixed and thin); deleting, renaming, growing spaces | `spaces pool create`, `spaces space ...`; Windows takes the pools as healthy |
 | Adding, retiring, removing and replacing disks; repair, optimize, scrub; health in Windows' terms | `spaces disk ...`, `spaces pool ...` |
 | Creating tiered spaces (SSD mirror over HDD simple or parity) | `spaces tier`, `spaces space create --tier` |
-| Creating dual parity spaces; writing tiered spaces; ReFS | not yet |
+| Creating dual parity spaces; writing tiered spaces | not yet |
+| ReFS 3.x volumes (Dev Drives, data volumes, inside a space): files, sparse files, named streams, links, attributes | `refs` reads and mounts read-only (FUSE); verified on ReFS 3.14 |
+| ReFS compression, deduplication, snapshots, encryption; ReFS 1.x/2.x; writing ReFS | not yet |
 
 ## Quick start
 
@@ -85,6 +87,16 @@ See the [user guide](docs/user-guide.md) for details, writing, managing
 pools, degraded pools and pools after a crash, and
 `man contrib/man/spaces.8`.
 
+ReFS volumes (also on a disk image, or inside a space of a pool whose disks
+are given) are read with `refs`, see `man contrib/man/refs.1`:
+
+```sh
+refs ls /dev/sdb2 -lR
+refs cat /dev/sdb2 --path /src/main.c > main.c
+refs mount /dev/sdb2 /mnt/devdrive             # read-only, FUSE
+refs ls --space Data /dev/sdd /dev/sde --path /
+```
+
 ### Backends
 
 | Backend | Needs | Used by `--backend auto` for |
@@ -100,7 +112,8 @@ pools, degraded pools and pools after a crash, and
   the on-disk format as far as it is understood: pool and space databases,
   slab allocation, the striping of every resiliency type and their parity
   codes, the write-back cache log, the parity journal and dirty region
-  tracking. Every statement marked **verified** is backed by a test.
+  tracking. Every statement marked **verified** is backed by a test;
+  [`docs/refs-format.md`](docs/refs-format.md) does the same for ReFS 3.x.
 * Test pools are created by scripts on Windows 11 VMs (`tools/vm/`): every
   configuration above, pools with NTFS and real files, pools whose disks were
   pulled while Windows was writing. Each records Windows' own view
@@ -134,6 +147,8 @@ pools, degraded pools and pools after a crash, and
 |---|---|
 | `crates/storage-spaces` | library: metadata parsing, space layouts, reader, writer and management planners |
 | `crates/spaces-cli` | the `spaces` command and its block device backends |
+| `crates/refs` | library: reading ReFS 3.x volumes |
+| `crates/refs-cli` | the `refs` command and its FUSE driver |
 | `docs/` | format description, user guide, project plan, prior art |
 | `tools/` | test pool generators for the Windows VM, corpus and VM test scripts |
 | `fuzz/` | cargo-fuzz targets (`cargo +nightly fuzz run <target>`) |
@@ -149,8 +164,9 @@ pools, degraded pools and pools after a crash, and
 3. **Pool management**: creating, extending and repairing pools and spaces
    (done, except creating dual parity spaces).
 
-ReFS support is planned as a separate track. Details in
-[docs/plan.md](docs/plan.md).
+ReFS is a separate track: reading ReFS 3.x and mounting it read-only (done
+for ReFS 3.14), then compression, snapshots, older versions and writing.
+Details in [docs/plan.md](docs/plan.md).
 
 ## License
 

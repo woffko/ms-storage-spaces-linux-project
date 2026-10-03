@@ -884,6 +884,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "refs"
+version = "1.0.0"
+dependencies = [
+ "serde_json",
+ "storage-spaces",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "refs-cli"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fuser",
+ "refs",
+ "serde_json",
+ "storage-spaces",
+]
+
+[[package]]
 name = "regex"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

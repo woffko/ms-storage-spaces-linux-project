@@ -1,6 +1,7 @@
 #!/bin/bash
 # Build a Debian/Ubuntu package from a release build.
-# Usage: contrib/deb/build-deb.sh [output dir]   (after cargo build --release)
+# Usage: contrib/deb/build-deb.sh [output dir]
+#   (after cargo build --release -p spaces-cli -p refs-cli)
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 out=${1:-$root/target/deb}
@@ -11,6 +12,7 @@ chmod 755 "$stage"
 trap 'rm -rf "$stage"' EXIT
 
 install -D -m 755 "$root/target/release/spaces" "$stage/usr/sbin/spaces"
+install -D -m 755 "$root/target/release/refs" "$stage/usr/bin/refs"
 install -D -m 644 "$root/contrib/udev/69-storage-spaces.rules" "$stage/usr/lib/udev/rules.d/69-storage-spaces.rules"
 sed 's#/usr/local/sbin/spaces#/usr/sbin/spaces#' "$root/contrib/systemd/storage-spaces-attach.service" \
   > "$stage/storage-spaces-attach.service"
@@ -18,6 +20,8 @@ install -D -m 644 "$stage/storage-spaces-attach.service" "$stage/usr/lib/systemd
 rm "$stage/storage-spaces-attach.service"
 install -D -m 644 "$root/contrib/man/spaces.8" "$stage/usr/share/man/man8/spaces.8"
 gzip -9n "$stage/usr/share/man/man8/spaces.8"
+install -D -m 644 "$root/contrib/man/refs.1" "$stage/usr/share/man/man1/refs.1"
+gzip -9n "$stage/usr/share/man/man1/refs.1"
 install -D -m 644 /dev/stdin "$stage/usr/lib/modules-load.d/storage-spaces.conf" <<<$'ublk_drv\nnbd'
 install -D -m 644 "$root/LICENSE" "$stage/usr/share/doc/storage-spaces/copyright"
 
@@ -38,7 +42,8 @@ Description: read, write and manage Microsoft Storage Spaces pools on Linux
  exposes every virtual disk as a block device under
  /dev/mapper/ss-<pool>-<space>, attached automatically (read-only) when the
  disks appear; spaces can be attached read-write, and pools, spaces and
- disks created and changed the way Windows does.
+ disks created and changed the way Windows does. Includes refs, which reads
+ ReFS volumes (also inside a space) and mounts them read-only with FUSE.
 CONTROL
 cat > "$stage/DEBIAN/postinst" <<'POSTINST'
 #!/bin/sh
