@@ -6,7 +6,8 @@
 //! directories, also through the names those operations give) on a
 //! writable overlay. Fuzzing builds accept every checksum. Whatever
 //! the metadata says, nothing may panic and no byte may be written outside
-//! the volume.
+//! the volume; on the unpatched fixture, whatever the operations, the
+//! volume must check clean afterwards (refs check).
 #![no_main]
 
 use std::sync::LazyLock;
@@ -86,5 +87,9 @@ fuzz_target!(|data: &[u8]| {
     }
     for at in overlay.written_pages() {
         assert!(at >= OFFSET && at < end, "a write at {at:#x}, outside the volume");
+    }
+    if patch_bytes.is_empty() {
+        let report = vol.check(&[]).unwrap();
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
     }
 });
