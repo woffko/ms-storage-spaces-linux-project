@@ -431,14 +431,28 @@ fails is reported, not guessed at. The data of integrity streams
 checked on every read too: damaged data is an error (EIO in the mount),
 never returned.
 
+Changing a file's times or attributes is the first write `refs` does
+(experimental; a ReFS volume that is not attached anywhere else; only
+with `--yes`, otherwise it prints what would change):
+
+```sh
+refs set devdrive.img --path /notes.txt --modified "2024-02-29 12:00:00" --yes
+refs set /dev/sdb2 --path /notes.txt --attributes 0x21 --yes   # read-only, archive
+```
+
+It writes the way Windows does (copy on write, then a new checkpoint), so
+an interruption leaves the volume as it was before. Files whose record
+is not in their directory entry (moved files, hard links) and
+directories are refused for now.
+
 Read: files (resident, in extents, sparse, block-cloned, deduplicated),
 directories of any size, named streams, stream snapshots (`refsutil
 streamsnapshot`; `refs cat --snapshot`, not in the mount), hard links,
 symbolic links and junctions, attributes and times, volumes with 4 KiB
 and 64 KiB clusters, CRC-64 or SHA-256 metadata checksums and integrity
 streams (verified on ReFS 3.14 volumes made by Windows 11). Not read yet:
-compressed files, encrypted files, ReFS 1.x/2.x; writing ReFS is not
-supported.
+compressed files, encrypted files, ReFS 1.x/2.x; writing ReFS beyond
+times and attributes is not supported yet.
 
 ## Troubleshooting
 

@@ -58,6 +58,33 @@ impl PageRef {
     }
 }
 
+/// Points the page reference in `buf` (which keeps its checksum kind and
+/// layout) at `lcns` and stores the checksum of `page` in it.
+pub fn store_reference(buf: &mut [u8], lcns: &[u64], page: &[u8]) -> Result<()> {
+    if buf.len() < 0x28 || lcns.len() > 4 {
+        return Err(format_err!("page reference of {} bytes", buf.len()));
+    }
+    for i in 0..4 {
+        let lcn = lcns.get(i).copied().unwrap_or(0);
+        buf[8 * i..8 * i + 8].copy_from_slice(&lcn.to_le_bytes());
+    }
+    let (kind, at, len) = (buf[0x22], 0x20 + buf[0x23] as usize, le32(buf, 0x24) as usize);
+    let sum: Vec<u8> = match kind {
+        0 => return Ok(()),
+        1 => crc32c(page).to_le_bytes().to_vec(),
+        2 => crc64(page).to_le_bytes().to_vec(),
+        4 => sha256(page).to_vec(),
+        _ => return Err(format_err!("checksum kind {kind}")),
+    };
+    if sum.len() != len {
+        return Err(format_err!("checksum of {} bytes in a field of {len}", sum.len()));
+    }
+    buf.get_mut(at..at + len)
+        .ok_or_else(|| format_err!("checksum outside the page reference"))?
+        .copy_from_slice(&sum);
+    Ok(())
+}
+
 /// The common header of a metadata page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageHeader {

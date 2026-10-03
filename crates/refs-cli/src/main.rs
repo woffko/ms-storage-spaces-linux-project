@@ -88,6 +88,33 @@ enum Command {
         #[arg(long)]
         allow_other: bool,
     },
+    /// Change a file's times or attributes (experimental: writes the
+    /// volume, only with --yes; files whose record is in their directory
+    /// entry). Times are UTC, "YYYY-MM-DD hh:mm:ss" or a FILETIME number.
+    Set {
+        /// The image, disk or partition (not --space: pools are not
+        /// written by refs).
+        device: PathBuf,
+        #[arg(long)]
+        offset: Option<u64>,
+        #[arg(long)]
+        path: String,
+        #[arg(long, value_parser = parse_time)]
+        created: Option<u64>,
+        #[arg(long, value_parser = parse_time)]
+        modified: Option<u64>,
+        #[arg(long, value_parser = parse_time)]
+        changed: Option<u64>,
+        #[arg(long, value_parser = parse_time)]
+        accessed: Option<u64>,
+        /// Attribute bits (read-only 1, hidden 2, system 4, archive 0x20,
+        /// ...); the ones Windows does not let users set stay.
+        #[arg(long, value_parser = parse_number)]
+        attributes: Option<u64>,
+        /// Write (without it, only print what would change).
+        #[arg(long)]
+        yes: bool,
+    },
     /// Every cluster the volume uses, by physical cluster: superblocks,
     /// checkpoints, the pages of each tree, the data runs of each file
     /// (for format work: what changed between two images).
@@ -278,8 +305,8 @@ fn map(vol: &Volume<Device>, out: &mut impl Write) -> Result<()> {
 }
 
 /// The pages of the tree below `r`, each cluster on its own line.
-fn tree_pages(
-    vol: &Volume<Device>,
+fn tree_pages<D: ReadAt>(
+    vol: &Volume<D>,
     r: &refs::page::PageRef,
     physical: bool,
     what: &str,
@@ -302,6 +329,38 @@ fn tree_pages(
         }
     }
     Ok(())
+}
+
+/// "YYYY-MM-DD hh:mm:ss" (UTC; a "T" between, a trailing "Z" allowed) or
+/// a FILETIME number, as FILETIME.
+fn parse_time(s: &str) -> std::result::Result<u64, String> {
+    if let Ok(n) = s.parse::<u64>() {
+        return Ok(n);
+    }
+    let s = s.trim_end_matches('Z').replace('T', " ");
+    let bad = || format!("{s:?}: not YYYY-MM-DD hh:mm:ss");
+    let (date, clock) = s.split_once(' ').ok_or_else(bad)?;
+    let d: Vec<i64> = date
+        .split('-')
+        .map(|x| x.parse().map_err(|_| bad()))
+        .collect::<std::result::Result<_, _>>()?;
+    let t: Vec<i64> = clock
+        .split(':')
+        .map(|x| x.parse().map_err(|_| bad()))
+        .collect::<std::result::Result<_, _>>()?;
+    let ([y, m, d], [hh, mm, ss]) = (
+        d[..].try_into().map_err(|_| bad())?,
+        t[..].try_into().map_err(|_| bad())?,
+    );
+    // Days from civil (Howard Hinnant).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + hh * 3600 + mm * 60 + ss + 11_644_473_600;
+    u64::try_from(secs).map(|s| s * 10_000_000).map_err(|_| bad())
 }
 
 fn parse_number(s: &str) -> std::result::Result<u64, String> {
@@ -436,8 +495,12 @@ fn fixture(dir: &std::path::Path, out: &std::path::Path, data_limit: u64, exclud
         .as_u64()
         .context("manifest without partition_offset")?;
     let dev = Recording::new(File::open(dir.join("disk.img"))?);
+    let excluded;
     {
         let vol = Volume::open(&dev, offset)?;
+        // Every page of every table (writing needs the allocators and the
+        // other tables), except the trees of excluded directories.
+        let mut excluded_objects: Vec<u64> = Vec::new();
         // The superblock's copies too (opening needs only the first).
         let clusters = vol.boot.volume_size() / vol.cluster;
         let mut copy = vec![0u8; vol.cluster as usize];
@@ -451,9 +514,12 @@ fn fixture(dir: &std::path::Path, out: &std::path::Path, data_limit: u64, exclud
                 let path = format!("{prefix}{}", e.name);
                 if let Target::Directory(child) = e.target
                     && e.attributes & 0x400 == 0
-                    && !exclude.contains(&path)
                 {
-                    dirs.push((child, format!("{path}/")));
+                    if exclude.contains(&path) {
+                        excluded_objects.push(child);
+                    } else {
+                        dirs.push((child, format!("{path}/")));
+                    }
                 }
                 let file = vol.open_file(&e)?;
                 for s in file
@@ -467,6 +533,15 @@ fn fixture(dir: &std::path::Path, out: &std::path::Path, data_limit: u64, exclud
                 }
             }
         }
+        for (i, r) in vol.checkpoint.roots.iter().enumerate() {
+            tree_pages(&vol, r, matches!(i, 7 | 8 | 12), "", 0, &mut std::io::sink())?;
+        }
+        for oid in vol.object_ids().collect::<Vec<_>>() {
+            if !excluded_objects.contains(&oid) && oid != 7 && oid != 8 {
+                tree_pages(&vol, &vol.object(oid)?.clone(), false, "", 0, &mut std::io::sink())?;
+            }
+        }
+        excluded = excluded_objects;
     }
     let mut image = SparseImage::new(dev.size()?);
     for (at, len) in dev.reads() {
@@ -507,6 +582,7 @@ fn fixture(dir: &std::path::Path, out: &std::path::Path, data_limit: u64, exclud
     manifest.as_object_mut().unwrap().remove("refsinfo");
     manifest["fixture_data_limit"] = data_limit.into();
     manifest["fixture_excluded"] = exclude.into();
+    manifest["fixture_excluded_objects"] = excluded.into();
     std::fs::create_dir_all(out)?;
     image.write_to(std::io::BufWriter::new(File::create(out.join("disk.fixture"))?))?;
     std::fs::write(out.join("manifest.json"), serde_json::to_string(&manifest)? + "\n")?;
@@ -602,6 +678,60 @@ fn main() -> Result<()> {
         } => {
             let vol = open_volume(&source)?;
             fuse::serve(vol, &mountpoint, allow_other)?;
+        }
+        Command::Set {
+            device,
+            offset,
+            path,
+            created,
+            modified,
+            changed,
+            accessed,
+            attributes,
+            yes,
+        } => {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(yes)
+                .open(&device)
+                .with_context(|| format!("cannot open {}", device.display()))?;
+            let offset = match offset {
+                Some(o) => o,
+                None => *find_volumes(&file)?.first().context("no ReFS volume on the device")?,
+            };
+            let mut vol = Volume::open(file, offset)?;
+            let e = vol.lookup(&path)?;
+            let mut times = e.times;
+            for (field, value) in [
+                (&mut times.created, created),
+                (&mut times.modified, modified),
+                (&mut times.changed, changed),
+                (&mut times.accessed, accessed),
+            ] {
+                if let Some(v) = value {
+                    *field = v;
+                }
+            }
+            writeln!(
+                out,
+                "{path}: times {} -> {}",
+                time(e.times.modified),
+                time(times.modified)
+            )?;
+            if let Some(a) = attributes {
+                writeln!(out, "{path}: attributes {:#x} -> {a:#x} (settable bits)", e.attributes)?;
+            }
+            if !yes {
+                writeln!(out, "nothing written (--yes writes)")?;
+                return Ok(());
+            }
+            if times != e.times {
+                vol.set_times(&path, &times)?;
+            }
+            if let Some(a) = attributes {
+                vol.set_attributes(&path, a as u32)?;
+            }
+            writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
         }
         Command::Tree { source, root, object } => {
             let vol = open_volume(&source)?;

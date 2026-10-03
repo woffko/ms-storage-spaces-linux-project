@@ -10,6 +10,7 @@ pub mod node;
 pub mod page;
 mod util;
 pub mod volume;
+pub mod write;
 
 pub use error::{Error, Result};
 pub use file::{Content, DataChecksums, Entry, Extent, File, LinkTarget, Reparse, Stream, Target, Times};

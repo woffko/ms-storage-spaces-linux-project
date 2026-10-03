@@ -653,6 +653,17 @@ rows of thin spaces not allocated yet (M7).
   deleting files and directories and growing files. Every operation is
   checked as above on Windows, and crash states (every subset of the
   page writes before the checkpoint) must read as the old volume.
+  Done: `refs::write` (transactions, allocation to a fixed point with the
+  clusters freed by the transaction kept until the commit, references
+  child first, the checkpoint last between flushes) and `refs set` (times
+  and attributes of files whose record is in their directory entry,
+  `--yes`). Tests on the fixtures (4 KiB and 64 KiB clusters): only the
+  rows asked for change, every page the new checkpoint reaches is used in
+  its allocator (as on every Windows volume of the fixtures), nothing the
+  old checkpoint reaches is written before the new checkpoint, the
+  checkpoints alternate. On Windows: a volume changed by `refs set`
+  attached healthy with the new times and attributes, `refsutil leak` and
+  `triage /g` as on the untouched volume, no ReFS events.
 
 ## Test infrastructure (continuous, feeds every stage)
 

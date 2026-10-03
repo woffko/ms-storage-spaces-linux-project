@@ -28,6 +28,16 @@ refs \- read Microsoft ReFS volumes on Linux
 .B refs mount
 .I source mountpoint
 .RB [ \-\-allow\-other ]
+.br
+.B refs set
+.I device
+.B \-\-path
+.I file
+.RB [ \-\-created | \-\-modified | \-\-changed | \-\-accessed
+.IR time ]
+.RB [ \-\-attributes
+.IR bits ]
+.RB [ \-\-yes ]
 .PP
 where
 .I source
@@ -44,7 +54,9 @@ or
 reads volumes formatted with ReFS 3.x by Windows (Dev Drives, data
 volumes, ReFS inside a Storage Spaces space): directories, files with
 their data, sparse files, alternate data streams, hard links, symbolic
-links and junctions, attributes and times. It never writes to the volume.
+links and junctions, attributes and times. Only
+.B set
+writes to the volume.
 .PP
 Every metadata page is checked against the checksum its reference
 records (CRC-64 or SHA-256, and CRC32-C for the superblock on 4 KiB
@@ -105,6 +117,16 @@ lets other users read it (needs
 .B user_allow_other
 in
 .IR /etc/fuse.conf ).
+.TP
+.B set
+Change a file's times (UTC, "YYYY-MM-DD hh:mm:ss" or a FILETIME number)
+or attributes (the bits users can set: read-only 1, hidden 2, system 4,
+archive 0x20, ...). Experimental, and the only command that writes: only
+with
+.BR \-\-yes ,
+on a volume not attached anywhere else, for files whose record is in
+their directory entry. It writes the way Windows does (copy on write,
+then a new checkpoint), so an interruption leaves the old volume.
 .SH LIMITS
 Verified against Windows on ReFS 3.14 volumes with 4 KiB and 64 KiB
 clusters, CRC-64 and SHA-256 metadata checksums and integrity streams.

@@ -34,12 +34,14 @@ pub struct Checkpoint {
     /// Bytes of a page reference: 0x30 (CRC64), 0x48 (SHA-256), 0x68.
     pub reference_size: usize,
     pub roots: Vec<PageRef>,
+    /// Where each root's reference is in the checkpoint.
+    pub(crate) root_offsets: Vec<usize>,
 }
 
 pub struct Volume<D> {
-    dev: D,
+    pub(crate) dev: D,
     /// Byte offset of the volume on the device.
-    offset: u64,
+    pub(crate) offset: u64,
     pub boot: BootSector,
     pub cluster: u64,
     /// Bytes of a metadata page: 16 KiB on 4 KiB clusters, one cluster on
@@ -51,7 +53,7 @@ pub struct Volume<D> {
     pub checkpoint_lcns: Vec<u64>,
     /// Clusters per container, and each container's first physical cluster.
     pub clusters_per_container: u64,
-    containers: BTreeMap<u64, u64>,
+    pub(crate) containers: BTreeMap<u64, u64>,
     objects: BTreeMap<u64, PageRef>,
 }
 
@@ -88,7 +90,6 @@ impl<D: ReadAt> Volume<D> {
         let boot = BootSector::parse(&sector)?;
         let cluster = boot.cluster_size();
         let page_size = cluster.max(16384);
-        let total_clusters = boot.volume_size() / cluster;
         let mut vol = Volume {
             dev,
             offset,
@@ -104,12 +105,22 @@ impl<D: ReadAt> Volume<D> {
                 flags: 0,
                 reference_size: 0,
                 roots: Vec::new(),
+                root_offsets: Vec::new(),
             },
             clusters_per_container: 0,
             containers: BTreeMap::new(),
             objects: BTreeMap::new(),
             checkpoint_lcns: Vec::new(),
         };
+        vol.load()?;
+        Ok(vol)
+    }
+
+    /// Reads the superblock, the current checkpoint and the tables cached
+    /// from it (again after a commit).
+    pub(crate) fn load(&mut self) -> Result<()> {
+        let (cluster, page_size) = (self.cluster, self.page_size);
+        let total_clusters = self.boot.volume_size() / cluster;
         // The superblock: the primary, then the two copies at the end.
         let mut supb = None;
         for lcn in [
@@ -120,7 +131,7 @@ impl<D: ReadAt> Volume<D> {
             if lcn >= total_clusters {
                 continue;
             }
-            let page = vol.read_physical(lcn, 1)?;
+            let page = self.read_physical(lcn, 1)?;
             let (at, len) = (le32(&page, 0x78) as usize, le32(&page, 0x7c) as usize);
             if &page[0..4] == b"SUPB" && self_checksum_ok(&page, at, len, cluster as usize) {
                 supb = Some(page);
@@ -128,8 +139,9 @@ impl<D: ReadAt> Volume<D> {
             }
         }
         let supb = supb.ok_or_else(|| format_err!("no valid superblock"))?;
-        vol.volume_guid = supb[0x50..0x60].try_into().unwrap();
+        self.volume_guid = supb[0x50..0x60].try_into().unwrap();
         let (list, count) = (le32(&supb, 0x70) as usize, le32(&supb, 0x74) as usize);
+        self.checkpoint_lcns.clear();
         if count != 2 || list + 16 > supb.len() {
             return Err(format_err!("superblock lists {count} checkpoints"));
         }
@@ -137,11 +149,11 @@ impl<D: ReadAt> Volume<D> {
         let mut best: Option<(u64, u64, Vec<u8>)> = None;
         for i in 0..count {
             let lcn = le64(&supb, list + 8 * i);
-            vol.checkpoint_lcns.push(lcn);
+            self.checkpoint_lcns.push(lcn);
             if lcn >= total_clusters {
                 continue;
             }
-            let page = vol.read_physical(lcn, page_size / cluster)?;
+            let page = self.read_physical(lcn, page_size / cluster)?;
             let reference_size = le32(&page, 0x5c) as usize;
             if &page[0..4] != b"CHKP"
                 || !self_checksum_ok(&page, le32(&page, 0x58) as usize, reference_size, cluster as usize)
@@ -154,10 +166,9 @@ impl<D: ReadAt> Volume<D> {
             }
         }
         let (lcn, clock, chkp) = best.ok_or_else(|| format_err!("no valid checkpoint"))?;
-        vol.checkpoint = Self::parse_checkpoint(lcn, clock, &chkp)?;
-        vol.load_containers()?;
-        vol.load_objects()?;
-        Ok(vol)
+        self.checkpoint = Self::parse_checkpoint(lcn, clock, &chkp)?;
+        self.load_containers()?;
+        self.load_objects()
     }
 
     fn parse_checkpoint(lcn: u64, clock: u64, page: &[u8]) -> Result<Checkpoint> {
@@ -176,9 +187,11 @@ impl<D: ReadAt> Volume<D> {
         } else {
             0x94
         };
-        let roots = (0..count)
-            .map(|i| {
-                let at = le32(page, array + 4 * i) as usize;
+        let root_offsets: Vec<usize> = (0..count).map(|i| le32(page, array + 4 * i) as usize).collect();
+        let roots = root_offsets
+            .iter()
+            .enumerate()
+            .map(|(i, &at)| {
                 page.get(at..at + reference_size)
                     .ok_or_else(|| format_err!("checkpoint root {i} outside the page"))
                     .and_then(PageRef::parse)
@@ -192,6 +205,7 @@ impl<D: ReadAt> Volume<D> {
             flags,
             reference_size,
             roots,
+            root_offsets,
         })
     }
 
@@ -204,6 +218,17 @@ impl<D: ReadAt> Volume<D> {
             .ok_or_else(|| format_err!("cluster {lcn:#x} beyond any device"))?;
         self.dev.read_exact_at(&mut buf, at)?;
         Ok(buf)
+    }
+
+    /// The virtual cluster that names physical cluster `lcn`.
+    pub fn virtual_of(&self, lcn: u64) -> Result<u64> {
+        let cpc = self.clusters_per_container;
+        let shift = 64 - cpc.leading_zeros();
+        self.containers
+            .iter()
+            .find(|&(_, &start)| start <= lcn && lcn < start + cpc)
+            .map(|(&cid, &start)| (cid << shift) | (lcn - start))
+            .ok_or_else(|| format_err!("cluster {lcn:#x} in no container"))
     }
 
     /// The physical cluster of virtual cluster `vlcn`.

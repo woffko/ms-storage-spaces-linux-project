@@ -219,9 +219,11 @@ times: a 5 MiB file of zeros became 1280 one-cluster runs of one cluster.
 Nothing else is needed to read them (**verified**: identical text and
 random files deduplicated, and the zero file).
 
-## Writing (research for Track B4)
+## Writing (Track B4)
 
-Not written by `refs` yet. What Windows writes, from the write
+`refs::write` commits the way described below (`refs set` changes times
+and attributes of files whose record is in their directory entry; tests
+`tests/write.rs`). What Windows writes, from the write
 experiments (`tools/vm/Invoke-RefsSteps.ps1` changes a volume one step at
 a time and keeps an image after each; `tools/refs-diff.py` lists the
 changed clusters with what `refs map` says they are; `refs tree` prints a

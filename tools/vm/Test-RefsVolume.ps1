@@ -3,7 +3,7 @@
 What Windows makes of a ReFS volume image (write experiments, Track B4):
 attaches it, prints its health, the modification time of small.txt when
 there is one, the SHA-256 (first 16 digits) of every file outside System
-Volume Information, the summary of `refsutil leak /d /v /x` (diagnose only)
+Volume Information with its modification time and attributes, the summary of `refsutil leak /d /v /x` (diagnose only)
 and `refsutil triage /g`, and ReFS warnings and errors logged meanwhile;
 flushes and detaches. Windows writes to the volume while it is attached.
 Run on the Windows test VM only.
@@ -19,7 +19,7 @@ try {
     $v = Get-Volume -DriveLetter $d
     "health $($v.HealthStatus), $($v.OperationalStatus)"
     if (Test-Path "${d}:\small.txt") { "small.txt modified " + (Get-Item "${d}:\small.txt").LastWriteTimeUtc.ToString('o') }
-    Get-ChildItem "${d}:\" -Recurse -Force -File -ErrorAction Continue | Where-Object FullName -notmatch 'System Volume' | ForEach-Object { '{0} {1}' -f $_.FullName, (Get-FileHash $_.FullName).Hash.Substring(0, 16) }
+    Get-ChildItem "${d}:\" -Recurse -Force -File -ErrorAction Continue | Where-Object FullName -notmatch 'System Volume' | ForEach-Object { '{0} {1} {2} {3}' -f $_.FullName, (Get-FileHash $_.FullName).Hash.Substring(0, 16), $_.LastWriteTimeUtc.ToString('s'), $_.Attributes }
     '-- refsutil leak /d /v'
     refsutil leak "${d}:" /d /v /x 2>&1 | Select-Object -Last 15
     '-- refsutil triage /g'
