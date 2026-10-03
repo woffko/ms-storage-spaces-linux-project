@@ -355,7 +355,12 @@ that holds its place in the stream.
   but for the last bytes) and marks the block reference counts: the low
   14 bits of a count are the references beyond the first (what the
   row's total sums), 0x8000 marks clusters it deduplicated (0x8027: 40
-  files), 0x4000 others it went through. Changing compressed files
+  files), 0x4000 others it went through. When a flagged cluster's last
+  reference goes, Windows sets its entry to 0x4000 (0x8001 counts down
+  to 0x8000, then 0x4000), in compacted containers too, whose rows in
+  root 10 stay as they were (after Windows deleted every compressed
+  file only the u32 at 0x20 of the container's row changed, 0x25a to
+  0x175). `refs` does the same when it frees. Changing compressed files
   (steps `delete`, `write`, `append` on that volume): deleting one lowered
   the counts of its shared clusters (0x8027 to 0x8026; the compacted
   container's rows in root 10 stayed as they were), and writing into one

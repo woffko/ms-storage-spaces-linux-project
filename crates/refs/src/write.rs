@@ -565,10 +565,11 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
                 .ok_or_else(|| format_err!("reference count row without a count for cluster {v:#x}"))?;
             let i = 0x1c + 2 * (v - le64(val, 0)) as usize;
             if count == 0 {
-                // Its last reference: free, its entry (flags the dedup
-                // engine set) cleared.
-                if le16(val, i) != 0 {
-                    self.value_mut(at)[i..i + 2].fill(0);
+                // Its last reference: free; an entry the dedup engine
+                // flagged becomes 0x4000, as Windows leaves it.
+                let raw = le16(val, i);
+                if raw & !refcount::COUNT_MASK != 0 && raw != refcount::PROCESSED {
+                    self.value_mut(at)[i..i + 2].copy_from_slice(&refcount::PROCESSED.to_le_bytes());
                 }
                 free.push(c);
                 continue;

@@ -7,7 +7,8 @@
 //! 0x820 bytes): its low 14 bits the references beyond the first (the
 //! total sums those), the top two flags the dedup engine sets
 //! (`Enable-ReFSDedup`: 0x8000 on clusters it deduplicated, 0x4000 on
-//! others it went through). Kind 0: every cluster of
+//! others it went through and on those whose last reference went).
+//! Kind 0: every cluster of
 //! the range (any multiple of 0x400) has the same count, the u16 at 0x1c
 //! (again at 0x1e); the value is 0x20 bytes and the total 0. Windows packs
 //! rows whose clusters have one count into kind 0 rows, merging neighbours.
@@ -18,6 +19,9 @@ use crate::util::{le16, le32, le64};
 pub(crate) const BLOCK: u64 = 0x400;
 /// The references beyond the first in a count (the rest are flags).
 pub(crate) const COUNT_MASK: u16 = 0x3fff;
+/// What the dedup engine leaves in the count of a cluster nothing
+/// references any more (0x8000|n counts down to 0x8000, then 0x4000).
+pub(crate) const PROCESSED: u16 = 0x4000;
 /// The kinds (u32 at 0x14).
 pub(crate) const COUNTS: u32 = 1;
 pub(crate) const UNIFORM: u32 = 0;
