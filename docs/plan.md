@@ -623,7 +623,12 @@ rows of thin spaces not allocated yet (M7).
   `refsutil compression` and `Start-ReFSDedupJob -CompressionFormat` on
   Windows 11 26340 deduplicate but compress nothing (0 compressible
   clusters, also with 300 MB of text), so compressed samples need Windows
-  Server 2025. Integrity streams: the data checksums (CRC32-C per 4 KiB
+  Server 2025. Tried again on 2026-10-03: `refsutil compression /c`
+  before writing, `Enable-ReFSDedup -Type Compress` with
+  `Start-ReFSDedupJob -CompressionFormat LZ4` and various tuning, level
+  and chunk sizes (a job ran for a minute; `-FullRun` and
+  `-MinimumLastModifiedTimeHours` are refused for compression): still
+  no compressible clusters. Integrity streams: the data checksums (CRC32-C per 4 KiB
   cluster, CRC-64 per 16 KiB of 64 KiB clusters; volume `r314integ64k`)
   are checked on every read, damaged data is refused. ReFS inside a space:
   a Dev Drive in a two-way mirror space of two disks (`-PoolDisks 2
