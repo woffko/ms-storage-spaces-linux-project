@@ -12,6 +12,9 @@ pub enum Error {
     Unsupported(String),
     #[error("not found: {0}")]
     NotFound(String),
+    /// File data that fails its integrity stream checksum.
+    #[error("integrity checksum mismatch: {0}")]
+    Checksum(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

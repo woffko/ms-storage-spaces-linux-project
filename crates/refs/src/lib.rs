@@ -12,5 +12,5 @@ mod util;
 pub mod volume;
 
 pub use error::{Error, Result};
-pub use file::{Content, Entry, Extent, File, LinkTarget, Reparse, Stream, Target, Times};
+pub use file::{Content, DataChecksums, Entry, Extent, File, LinkTarget, Reparse, Stream, Target, Times};
 pub use volume::Volume;

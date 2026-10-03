@@ -43,7 +43,7 @@ against pools created by Windows.
 | Adding, retiring, removing and replacing disks; repair, optimize, scrub; health in Windows' terms | `spaces disk ...`, `spaces pool ...` |
 | Creating tiered spaces (SSD mirror over HDD simple or parity) | `spaces tier`, `spaces space create --tier` |
 | Creating dual parity spaces; writing tiered spaces | not yet |
-| ReFS 3.x volumes (Dev Drives, data volumes, inside a space): files, sparse, block-cloned and deduplicated files, named streams, stream snapshots, links, attributes | `refs` reads and mounts read-only (FUSE); verified on ReFS 3.14 |
+| ReFS 3.x volumes (Dev Drives, data volumes, inside a space): files, sparse, block-cloned and deduplicated files, named streams, stream snapshots, links, attributes; integrity streams checked on every read | `refs` reads and mounts read-only (FUSE); verified on ReFS 3.14 |
 | ReFS compression, encryption; ReFS 1.x/2.x; writing ReFS | not yet |
 
 ## Quick start

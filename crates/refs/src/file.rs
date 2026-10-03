@@ -18,6 +18,7 @@
 
 use storage_spaces::io::ReadAt;
 
+use crate::checksum::{crc32c, crc64};
 use crate::error::{Error, Result, format_err};
 use crate::node::{Node, Row};
 use crate::util::{le16, le32, le64, utf16};
@@ -146,7 +147,7 @@ impl Entry {
 }
 
 /// One run of a stream's extent map, in clusters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Extent {
     pub vcn: u64,
     pub vlcn: u64,
@@ -154,6 +155,19 @@ pub struct Extent {
     /// Holds data (written); otherwise it reads as zeros (a sparse hole,
     /// or allocated and not written yet).
     pub written: bool,
+    /// Integrity stream checksums of the run's clusters.
+    pub checksums: Option<DataChecksums>,
+}
+
+/// The checksums of an integrity stream's run: `per_cluster` values for
+/// each cluster, each over an equal part of it (one per 4 KiB cluster
+/// with CRC32-C, one per 16 KiB of 64 KiB clusters with CRC-64).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataChecksums {
+    /// 1 CRC32-C, 2 CRC-64/NVME (the codes of page references).
+    pub kind: u16,
+    pub per_cluster: usize,
+    pub values: std::sync::Arc<[u64]>,
 }
 
 /// Where a stream's bytes are.
@@ -413,17 +427,52 @@ impl<D: ReadAt> Volume<D> {
         Ok(out)
     }
 
+    fn data_checksums(&self, kind: u16, clusters: u64, bytes: &[u8]) -> Result<DataChecksums> {
+        let values: std::sync::Arc<[u64]> = match kind {
+            1 => bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_le_bytes(*c) as u64)
+                .collect(),
+            2 => bytes
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| u64::from_le_bytes(*c))
+                .collect(),
+            _ => return Err(Error::Unsupported(format!("integrity checksums of kind {kind}"))),
+        };
+        let per_cluster = values.len().checked_div(clusters as usize).unwrap_or(0);
+        if per_cluster == 0
+            || values.len() as u64 != per_cluster as u64 * clusters
+            || !self.cluster.is_multiple_of(per_cluster as u64)
+        {
+            return Err(format_err!(
+                "{} checksums for a run of {clusters} clusters",
+                values.len()
+            ));
+        }
+        Ok(DataChecksums {
+            kind,
+            per_cluster,
+            values,
+        })
+    }
+
     /// The extent map of a $DATA value: a node at the value's start whose
     /// leaf rows are 24-byte extent records (more with per-cluster
     /// checksums); index rows point at pages of the same.
     fn extents(&self, value: &[u8]) -> Result<Vec<Extent>> {
         let mut out = Vec::new();
-        self.extent_node(&Node::at(value, 0)?, 0, &mut out)?;
+        // The checksum of integrity streams' data.
+        let kind = le16(value, 0x16);
+        self.extent_node(&Node::at(value, 0)?, 0, kind, &mut out)?;
         out.sort_by_key(|e| e.vcn);
         Ok(out)
     }
 
-    fn extent_node(&self, node: &Node<'_>, depth: usize, out: &mut Vec<Extent>) -> Result<()> {
+    fn extent_node(&self, node: &Node<'_>, depth: usize, kind: u16, out: &mut Vec<Extent>) -> Result<()> {
         if depth > 16 {
             return Err(format_err!("extent map deeper than 16 levels"));
         }
@@ -431,18 +480,26 @@ impl<D: ReadAt> Volume<D> {
             for record in node.records(|r| (le16(r, 0x0a) as usize).max(24)) {
                 let r = record?;
                 let flags = le16(r, 8);
+                let clusters = le32(r, 0x14) as u64;
+                // Integrity streams: the checksums follow the record.
+                let checksums = if flags & 0x80 != 0 {
+                    Some(self.data_checksums(kind, clusters, &r[24..])?)
+                } else {
+                    None
+                };
                 out.push(Extent {
                     vcn: le32(r, 0x0c) as u64,
                     vlcn: le64(r, 0),
-                    clusters: le32(r, 0x14) as u64,
+                    clusters,
                     written: flags & 0x10 != 0 && flags & 0x20 == 0,
+                    checksums,
                 });
             }
         } else {
             for row in node.rows() {
                 let child = crate::page::PageRef::parse(row?.value)?;
                 let page = self.read_page(&child, false)?;
-                self.extent_node(&Node::at(&page, crate::page::PAGE_HEADER_SIZE)?, depth + 1, out)?;
+                self.extent_node(&Node::at(&page, crate::page::PAGE_HEADER_SIZE)?, depth + 1, kind, out)?;
             }
         }
         Ok(())
@@ -482,11 +539,37 @@ impl<D: ReadAt> Volume<D> {
                         .vlcn
                         .checked_add(skip / cluster)
                         .ok_or_else(|| format_err!("extent at cluster {:#x} beyond any device", e.vlcn))?;
-                    self.read_virtual(
-                        vlcn,
-                        skip % cluster,
-                        &mut buf[(from - offset) as usize..(to - offset) as usize],
-                    )?;
+                    let out = &mut buf[(from - offset) as usize..(to - offset) as usize];
+                    match &e.checksums {
+                        None => self.read_virtual(vlcn, skip % cluster, out)?,
+                        Some(sums) => {
+                            // The checked parts the read touches, each
+                            // checked before use.
+                            let part = cluster / sums.per_cluster as u64;
+                            let first = skip / part;
+                            let count = (skip % part + out.len() as u64).div_ceil(part);
+                            let mut parts = vec![0u8; (count * part) as usize];
+                            let at = first * part;
+                            self.read_virtual(e.vlcn + at / cluster, at % cluster, &mut parts)?;
+                            for (i, c) in parts.chunks(part as usize).enumerate() {
+                                let sum = match sums.kind {
+                                    1 => crc32c(c) as u64,
+                                    _ => crc64(c),
+                                };
+                                if sum != sums.values[first as usize + i] {
+                                    let at = (first + i as u64) * part;
+                                    return Err(Error::Checksum(format!(
+                                        "bytes {:#x}..{:#x} of the stream (virtual cluster {:#x})",
+                                        start + at,
+                                        start + at + part,
+                                        e.vlcn + at / cluster
+                                    )));
+                                }
+                            }
+                            let skip = (skip % part) as usize;
+                            out.copy_from_slice(&parts[skip..skip + out.len()]);
+                        }
+                    }
                 }
             }
         }
@@ -547,11 +630,16 @@ fn overlay(base: Vec<Extent>, top: Vec<Extent>) -> Vec<Extent> {
 
 /// The clusters `from..to` of extent `e`.
 fn part(e: &Extent, from: u64, to: u64) -> Extent {
+    let (a, b) = ((from - e.vcn) as usize, (to - e.vcn) as usize);
     Extent {
         vcn: from,
         vlcn: e.vlcn.wrapping_add(from - e.vcn),
         clusters: to - from,
         written: e.written,
+        checksums: e.checksums.as_ref().map(|c| DataChecksums {
+            values: c.values[a * c.per_cluster..b * c.per_cluster].into(),
+            ..c.clone()
+        }),
     }
 }
 
@@ -565,6 +653,7 @@ mod tests {
             vlcn,
             clusters,
             written: true,
+            checksums: None,
         }
     }
 
@@ -590,7 +679,22 @@ mod tests {
             written: false,
             ..x(2, 0, 2)
         };
-        assert_eq!(overlay(vec![x(0, 10, 8)], vec![hole]), [x(0, 10, 2), hole, x(4, 14, 4)]);
+        assert_eq!(
+            overlay(vec![x(0, 10, 8)], vec![hole.clone()]),
+            [x(0, 10, 2), hole, x(4, 14, 4)]
+        );
+        // Checksums follow their clusters.
+        let sums = |s: &[u64]| Extent {
+            checksums: Some(DataChecksums {
+                kind: 2,
+                per_cluster: 2,
+                values: s.into(),
+            }),
+            ..x(0, 10, s.len() as u64 / 2)
+        };
+        let cut = overlay(vec![sums(&[1, 2, 3, 4, 5, 6, 7, 8])], vec![x(1, 50, 2)]);
+        assert_eq!(cut[0].checksums.as_ref().map(|c| &c.values[..]), Some(&[1, 2][..]));
+        assert_eq!(cut[2].checksums.as_ref().map(|c| &c.values[..]), Some(&[7, 8][..]));
         assert_eq!(overlay(Vec::new(), vec![x(5, 1, 1)]), [x(5, 1, 1)]);
     }
 }

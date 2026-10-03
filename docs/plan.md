@@ -591,8 +591,9 @@ rows of thin spaces not allocated yet (M7).
   links, a junction, attributes, set times, block-cloned copies, deleted
   and renamed files), flushes, reattaches and records Windows' listing
   (`manifest.json`); `tools/fetch-refs.sh` copies it as a sparse raw image.
-  Six volumes: 4 KiB and 64 KiB clusters, SHA-256 metadata checksums,
-  integrity streams, an empty volume, and the scenario `features` (stream
+  Eight volumes: 4 KiB and 64 KiB clusters, SHA-256 metadata checksums,
+  integrity streams on 4 KiB and 64 KiB clusters, an empty volume, a
+  volume inside a mirror space, and the scenario `features` (stream
   snapshots, deduplicated files, compressible files).
 * B1 (read-only library, `crates/refs`): boot sector, superblock and
   checkpoint (with their own checksums), page references with CRC-64 and
@@ -622,8 +623,13 @@ rows of thin spaces not allocated yet (M7).
   `refsutil compression` and `Start-ReFSDedupJob -CompressionFormat` on
   Windows 11 26340 deduplicate but compress nothing (0 compressible
   clusters, also with 300 MB of text), so compressed samples need Windows
-  Server 2025. Open: compression, checking integrity stream checksums of
-  file data, ReFS inside a space checked against Windows.
+  Server 2025. Integrity streams: the data checksums (CRC32-C per 4 KiB
+  cluster, CRC-64 per 16 KiB of 64 KiB clusters; volume `r314integ64k`)
+  are checked on every read, damaged data is refused. ReFS inside a space:
+  a Dev Drive in a two-way mirror space of two disks (`-PoolDisks 2
+  -Resiliency Mirror`, volume `r314mirror`) reads back as Windows listed
+  it, through the library and the mount (`refs --space`). Open:
+  compression.
 
 ## Test infrastructure (continuous, feeds every stage)
 

@@ -416,6 +416,7 @@ refs stat /dev/sdb2 --path /src/main.c    # times, extents, streams, snapshots, 
 refs cat /dev/sdb2 --path /notes.txt --stream summary
 refs cat /dev/sdb2 --path /db.mdf --snapshot nightly > db-nightly.mdf
 refs ls --space Data /dev/sdd /dev/sde    # ReFS inside a space
+refs mount --space Data /dev/sdd /dev/sde mnt    # options before the disks
 mkdir -p mnt && refs mount /dev/sdb2 mnt  # read-only FUSE mount, foreground
 fusermount -u mnt
 ```
@@ -425,7 +426,10 @@ The mount shows named streams as extended attributes `user.<name>`
 `refs cat --stream`), symbolic links and junctions as symbolic links (an
 absolute target `C:\path` points into the mount) and hard links with one
 inode. Every metadata page is checked against its checksum; a volume that
-fails is reported, not guessed at.
+fails is reported, not guessed at. The data of integrity streams
+(`Set-FileIntegrity`, or volumes formatted with integrity streams) is
+checked on every read too: damaged data is an error (EIO in the mount),
+never returned.
 
 Read: files (resident, in extents, sparse, block-cloned, deduplicated),
 directories of any size, named streams, stream snapshots (`refsutil

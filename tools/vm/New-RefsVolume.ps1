@@ -24,6 +24,11 @@ Scenarios:
           compressed by refsutil (-Compression LZ4 or ZSTD, with
           -CompressionLevel and -ChunkSize; NONE leaves it uncompressed)
   empty   the freshly formatted volume only
+
+With -PoolDisks N the volume is made inside a space instead: N dynamic
+VHDX files of 40 GiB (disk0.vhdx ...) form the pool "ss-<Name>" with the
+thin space <Name> of 53 GiB (-Resiliency Simple or Mirror), which holds
+the GPT and the Dev Drive; the manifest's "pool" names them.
 #>
 param(
     [Parameter(Mandatory)] [string] $Name,
@@ -34,6 +39,8 @@ param(
     [ValidateSet(4096, 65536)] [int] $ClusterSize = 4096,
     [switch] $Sha256Checksums,
     [switch] $IntegrityStreams,
+    [int] $PoolDisks = 0,
+    [ValidateSet('Simple', 'Mirror')] [string] $Resiliency = 'Simple',
     [string] $Root = 'C:\sstest\refs'
 )
 $ErrorActionPreference = 'Stop'
@@ -43,12 +50,45 @@ if ($env:COMPUTERNAME -notin 'DESKTOP-BQ2J4NS', 'DESKTOP-ELS4LDK') { throw 'Unex
 $dir = Join-Path $Root $Name
 if (Test-Path $dir) { throw "exists: $dir" }
 New-Item -ItemType Directory -Force $dir | Out-Null
-$vhdx = Join-Path $dir 'disk.vhdx'
-"create vdisk file=`"$vhdx`" maximum=53248 type=expandable" | Set-Content -Encoding ASCII (Join-Path $dir 'diskpart.txt')
-diskpart /s (Join-Path $dir 'diskpart.txt') | Out-Null
-Mount-DiskImage -ImagePath $vhdx | Out-Null
+if ($PoolDisks -gt 0) {
+    $images = @(0..($PoolDisks - 1) | ForEach-Object { Join-Path $dir "disk$_.vhdx" })
+    $maxMB = 40960
+} else {
+    $images = @(Join-Path $dir 'disk.vhdx')
+    $maxMB = 53248
+}
+foreach ($f in $images) {
+    "create vdisk file=`"$f`" maximum=$maxMB type=expandable" | Set-Content -Encoding ASCII (Join-Path $dir 'diskpart.txt')
+    diskpart /s (Join-Path $dir 'diskpart.txt') | Out-Null
+}
+$poolName = "ss-$Name"
+# Attaches the images and returns the disk that holds the volume (the
+# space's, once the pool exists).
+function Mount-Images {
+    foreach ($f in $images) { Mount-DiskImage -ImagePath $f | Out-Null }
+    if ($PoolDisks -gt 0) {
+        $vd = Get-VirtualDisk -FriendlyName $Name
+        if ($vd.OperationalStatus -eq 'Detached') { $vd | Connect-VirtualDisk }
+        $d = Get-VirtualDisk -FriendlyName $Name | Get-Disk
+    } else {
+        $d = Get-DiskImage -ImagePath $images[0] | Get-Disk
+    }
+    if ($d.IsOffline) { $d | Set-Disk -IsOffline $false }
+    if ($d.IsReadOnly) { $d | Set-Disk -IsReadOnly $false }
+    Get-Disk -Number $d.Number
+}
 try {
-    $disk = Get-DiskImage -ImagePath $vhdx | Get-Disk
+    if ($PoolDisks -gt 0) {
+        foreach ($f in $images) { Mount-DiskImage -ImagePath $f | Out-Null }
+        $numbers = @($images | ForEach-Object { (Get-DiskImage -ImagePath $_ | Get-Disk).Number })
+        $members = @(Get-PhysicalDisk -CanPool $true | Where-Object { [int]$_.DeviceId -in $numbers })
+        if ($members.Count -ne $PoolDisks) { throw "found $($members.Count) of $PoolDisks pool disks" }
+        New-StoragePool -FriendlyName $poolName -StorageSubSystemFriendlyName 'Windows Storage*' -PhysicalDisks $members | Out-Null
+        New-VirtualDisk -StoragePoolFriendlyName $poolName -FriendlyName $Name -ResiliencySettingName $Resiliency -ProvisioningType Thin -Size 53GB | Out-Null
+        $disk = Get-VirtualDisk -FriendlyName $Name | Get-Disk
+    } else {
+        $disk = Mount-Images
+    }
     Initialize-Disk -Number $disk.Number -PartitionStyle GPT
     $part = New-Partition -DiskNumber $disk.Number -UseMaximumSize -AssignDriveLetter
     $format = @{ Partition = $part; DevDrive = $true; NewFileSystemLabel = $Name; AllocationUnitSize = $ClusterSize; Force = $true; Confirm = $false }
@@ -232,9 +272,8 @@ public static class RefsGen {
     # attaching the volume again. Detaching the image does not wait for
     # ReFS's cache (the last writes went missing): flush it first.
     Write-VolumeCache -DriveLetter $part.DriveLetter
-    Dismount-DiskImage -ImagePath $vhdx | Out-Null
-    Mount-DiskImage -ImagePath $vhdx | Out-Null
-    $disk = Get-DiskImage -ImagePath $vhdx | Get-Disk
+    foreach ($f in $images) { Dismount-DiskImage -ImagePath $f | Out-Null }
+    $disk = Mount-Images
     $part = Get-Partition -DiskNumber $disk.Number | Where-Object Type -eq 'Basic'
     if (-not $part.DriveLetter) { $part | Add-PartitionAccessPath -AssignDriveLetter; $part = Get-Partition -DiskNumber $disk.Number -PartitionNumber $part.PartitionNumber }
     $drive = "$($part.DriveLetter):\"
@@ -300,11 +339,12 @@ public static class RefsGen {
         label = $vol.FileSystemLabel; volume_size = $vol.Size; free = $vol.SizeRemaining
         serial = (($info | Select-String 'Volume Serial Number') -replace '.*:\s*', '')
         partition_offset = $part.Offset
+        pool = if ($PoolDisks -gt 0) { [ordered]@{ name = $poolName; space = $Name; disks = $PoolDisks; resiliency = $Resiliency } } else { $null }
         refsinfo = ($info -join "`n")
         entries = $entries
     }
     $manifest | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $dir 'manifest.json')
     "$Name`: $($entries.Count) entries, ReFS $($manifest.refs_version), $ClusterSize-byte clusters"
 } finally {
-    Dismount-DiskImage -ImagePath $vhdx | Out-Null
+    foreach ($f in $images) { Dismount-DiskImage -ImagePath $f -ErrorAction SilentlyContinue | Out-Null }
 }

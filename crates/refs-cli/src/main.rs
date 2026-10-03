@@ -276,11 +276,12 @@ fn stat(vol: &Volume<Device>, e: &Entry, out: &mut impl Write) -> Result<()> {
                 for x in extents {
                     writeln!(
                         out,
-                        "  vcn {:>10} +{:<8} {} {:#x}",
+                        "  vcn {:>10} +{:<8} {} {:#x}{}",
                         x.vcn,
                         x.clusters,
                         if x.written { "at" } else { "(zeros)" },
-                        x.vlcn
+                        x.vlcn,
+                        if x.checksums.is_some() { " (checksums)" } else { "" }
                     )?;
                 }
             }

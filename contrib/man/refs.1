@@ -32,13 +32,13 @@ refs \- read Microsoft ReFS volumes on Linux
 where
 .I source
 is
-.I device
 .RB [ \-\-offset
 .IR bytes ]
+.I device
 or
-.IR disk ...
 .B \-\-space
-.I name
+.I name disk ...
+(options before the devices).
 .SH DESCRIPTION
 .B refs
 reads volumes formatted with ReFS 3.x by Windows (Dev Drives, data
@@ -48,7 +48,9 @@ links and junctions, attributes and times. It never writes to the volume.
 .PP
 Every metadata page is checked against the checksum its reference
 records (CRC-64 or SHA-256, and CRC32-C for the superblock on 4 KiB
-clusters); a page that fails is an error, not silently read.
+clusters); a page that fails is an error, not silently read. The data of
+integrity streams is checked against its CRC32-C or CRC-64 on every read;
+damaged data is an error (EIO in the mount).
 .PP
 The
 .I device
@@ -117,6 +119,7 @@ refs ls /dev/sdb2 \-lR
 refs cat devdrive.img \-\-path /src/main.c > main.c
 refs mount /dev/sdc mnt/
 refs ls \-\-space Data /dev/sdd /dev/sde \-\-path /
+refs mount \-\-space Data /dev/sdd /dev/sde mnt/
 .fi
 .SH SEE ALSO
 .BR spaces (8),

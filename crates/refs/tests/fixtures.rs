@@ -94,3 +94,34 @@ fn a_damaged_boot_sector_is_refused() {
     let err = Volume::open(&image, offset).err().unwrap().to_string();
     assert!(err.contains("checksum"), "{err}");
 }
+
+#[test]
+fn integrity_streams_refuse_damaged_data() {
+    // CRC32-C per 4 KiB cluster; CRC-64 per 16 KiB of 64 KiB clusters.
+    for (name, path, sums) in [
+        ("r314integ", "/sizes/size_16385.bin", 5),
+        ("r314integ64k", "/sizes/size_65537.bin", 8),
+    ] {
+        let (mut image, offset) = load(name);
+        let vol = Volume::open(&image, offset).unwrap();
+        let file = vol.open_file(&vol.lookup(path).unwrap()).unwrap();
+        let data = file.data.unwrap();
+        let refs::Content::Extents(extents) = &data.content else {
+            panic!("{name}: inline data")
+        };
+        let checksums = extents[0].checksums.as_ref().unwrap();
+        assert_eq!(checksums.values.len(), sums, "{name}");
+        // Damage the second checked part of the run.
+        let part = vol.cluster / checksums.per_cluster as u64;
+        let at = offset + vol.translate(extents[0].vlcn).unwrap() * vol.cluster + part + 7;
+        drop(vol);
+        damage(&mut image, at, 0x40);
+        let vol = Volume::open(&image, offset).unwrap();
+        let mut buf = vec![0u8; 100];
+        if part > 100 {
+            assert_eq!(vol.read_stream(&data, 0, &mut buf).unwrap(), 100, "{name}");
+        }
+        let err = vol.read_stream(&data, part + 10, &mut buf).unwrap_err();
+        assert!(matches!(err, refs::Error::Checksum(_)), "{name}: {err}");
+    }
+}

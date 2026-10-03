@@ -18,8 +18,16 @@ trap 'exit 130' INT TERM
 failed=0
 for name in "${names[@]}"; do
   dir=testdata/refs/$name
-  [[ -f $dir/disk.img && -f $dir/manifest.json ]] || continue
-  target/release/refs mount "$dir/disk.img" "$mnt" &
+  [[ -f $dir/manifest.json ]] || continue
+  # A volume inside a space: the pool's disks and the space's name.
+  space=$(python3 -c 'import json, sys; p = json.load(open(sys.argv[1], encoding="utf-8-sig")).get("pool"); print(p["space"] if p else "")' "$dir/manifest.json")
+  if [[ -n $space ]]; then
+    source=(--space "$space" "$dir"/disk[0-9]*.img)
+  else
+    source=("$dir/disk.img")
+  fi
+  [[ -f ${source[-1]} ]] || continue
+  target/release/refs mount "${source[@]}" "$mnt" &
   pid=$!
   for _ in $(seq 100); do mountpoint -q "$mnt" && break; sleep 0.1; done
   python3 - "$dir/manifest.json" "$mnt" <<'EOF' || failed=1

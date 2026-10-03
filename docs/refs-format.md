@@ -5,7 +5,8 @@ marks statements backed by a test against volumes Windows created
 (`crates/refs/tests/corpus.rs` on the corpus of `tools/vm/New-RefsVolume.ps1`:
 ReFS 3.14 Dev Drives of Windows 11 Insider 26340, 4 KiB and 64 KiB
 clusters, CRC64 and SHA-256 metadata checksums, integrity streams, stream
-snapshots and deduplicated files).
+snapshots and deduplicated files, a volume inside a two-way mirror space
+read through `storage-spaces`).
 The most complete public description is
 [forefst](https://github.com/xbqt/forefst) (GPL-3.0, documentation read,
 no code taken); refsprogs (GPL-2.0+) and libfsrefs are the other prior art
@@ -157,15 +158,21 @@ reads back with Windows' SHA-256):
   | Offset | Size | Field |
   |---|---|---|
   | 0x00 | 8 | first virtual cluster |
-  | 0x08 | 2 | flags: 0x10 written, 0x20 sparse hole, 0x80 per-cluster CRC32-C follows |
-  | 0x0a | 2 | record size (24, or 24 + 4 × clusters with checksums) |
+  | 0x08 | 2 | flags: 0x10 written, 0x20 sparse hole, 0x80 checksums follow |
+  | 0x0a | 2 | record size (24, more with checksums) |
   | 0x0c | 4 | first cluster in the file |
   | 0x14 | 4 | clusters |
 
   Runs without the written bit or with the hole bit read as zeros
-  (**verified**: a sparse file of 1 GiB with three written MiB; the
-  integrity-stream volume, whose runs carry checksums); index nodes point
-  at pages of the same. Block-cloned copies (`Copy-Item` on a Dev Drive)
+  (**verified**: a sparse file of 1 GiB with three written MiB); index
+  nodes point at pages of the same. **Integrity streams**: with flag 0x80
+  the record is followed by checksums of the run's data, of the kind in
+  the u16 at value 0x16 of the $DATA row (1 CRC32-C, 2 CRC-64/NVME, 0
+  without integrity; the codes of page references), each over an equal
+  part of a cluster: one CRC32-C per 4 KiB cluster, four CRC-64 per 64 KiB
+  cluster (one per 16 KiB), as many as the record size leaves room for.
+  `refs` checks every part it reads (**verified**: every file of both
+  integrity-stream volumes; damaged data is refused). Block-cloned copies (`Copy-Item` on a Dev Drive)
   name the same virtual clusters as the original (**verified**);
 * **named streams** (0x80000002, 0x000500b0, the UTF-16LE name from key
   0x10): ADS when value 0x10 is 0 (2 = a snapshot); size at 0x20; inline
