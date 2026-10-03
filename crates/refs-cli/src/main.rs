@@ -151,9 +151,9 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Delete a file (experimental: writes the volume, only with --yes;
-    /// not hard links; with data clusters, not on volumes with shared
-    /// clusters).
+    /// Delete a file, or one name of a hard-linked file (experimental:
+    /// writes the volume, only with --yes; with data clusters, not on
+    /// volumes with shared clusters).
     Delete {
         /// The image, disk or partition.
         device: PathBuf,
@@ -165,7 +165,7 @@ enum Command {
         yes: bool,
     },
     /// Rename a file within its directory (experimental: writes the
-    /// volume, only with --yes; not hard links; a printable ASCII name).
+    /// volume, only with --yes; a printable ASCII name).
     Rename {
         /// The image, disk or partition.
         device: PathBuf,
@@ -210,7 +210,7 @@ enum Command {
         yes: bool,
     },
     /// Move a file into another directory (experimental: writes the volume,
-    /// only with --yes; files with a single name).
+    /// only with --yes).
     Move {
         /// The image, disk or partition.
         device: PathBuf,
@@ -224,8 +224,8 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Give a file a second name, a hard link (experimental: writes the
-    /// volume, only with --yes; files with a single name).
+    /// Give a file another name, a hard link (experimental: writes the
+    /// volume, only with --yes).
     Link {
         /// The image, disk or partition.
         device: PathBuf,

@@ -448,11 +448,11 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
     }
 
     /// Adds to the table's count of pages below its root (0x18).
-    fn count_pages(&mut self, tree: Tree, by: u64) {
+    fn count_pages(&mut self, tree: Tree, by: i64) {
         let root = self.roots[&tree];
         self.mark(root);
         let d = &mut self.pages[root].data;
-        let pages = le64(d, PAGE_HEADER_SIZE + 0x18) + by;
+        let pages = le64(d, PAGE_HEADER_SIZE + 0x18).wrapping_add_signed(by);
         d[PAGE_HEADER_SIZE + 0x18..PAGE_HEADER_SIZE + 0x20].copy_from_slice(&pages.to_le_bytes());
     }
 
@@ -718,9 +718,12 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
     fn remove(&mut self, page: usize, this: &dyn Fn(&[u8]) -> bool) -> Result<()> {
         let node = Node::at(&self.pages[page].data, PAGE_HEADER_SIZE)?;
         if node.len() == 1 && self.pages[page].parent.is_some() {
-            return Err(Error::Unsupported(
-                "emptying a page of a table (merging pages is not done yet)".into(),
-            ));
+            // Its last row: the page leaves the table.
+            if !node.rows().any(|r| r.is_ok_and(|r| this(r.key))) {
+                return Err(Error::NotFound("row to remove".into()));
+            }
+            self.count_rows(page, -1);
+            return self.drop_page(page);
         }
         let pos = node
             .rows()
@@ -754,7 +757,132 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         let d = &mut self.pages[root].data;
         let rows = le64(d, PAGE_HEADER_SIZE + 0x20) - 1;
         d[PAGE_HEADER_SIZE + 0x20..PAGE_HEADER_SIZE + 0x28].copy_from_slice(&rows.to_le_bytes());
+        if self.pages[page].parent.is_some() {
+            self.merge(page)?;
+        }
         Ok(())
+    }
+
+    /// Merges a page holding less than a quarter of its room with a
+    /// sibling (the next one, the one before for the last) when their rows
+    /// fill at most three quarters of a page: the later page takes the rows
+    /// of both, the earlier one leaves the table.
+    fn merge(&mut self, page: usize) -> Result<()> {
+        let size = |rows: &[(Vec<u8>, Vec<u8>)]| 0x28 + rows.iter().map(|(_, r)| r.len() + 4).sum::<usize>();
+        let area = {
+            let d = &self.pages[page].data;
+            d.len() - PAGE_HEADER_SIZE - le32(d, PAGE_HEADER_SIZE) as usize
+        };
+        let rows = self.node_rows(page)?;
+        if size(&rows) >= area / 4 {
+            return Ok(());
+        }
+        let tree = self.pages[page].tree;
+        let (parent, key) = self.pages[page].parent.clone().unwrap();
+        let siblings = self.node_rows(parent)?;
+        let pos = siblings
+            .iter()
+            .position(|(k, _)| *k == key)
+            .ok_or_else(|| format_err!("no index row for a page"))?;
+        let (first, second) = if pos + 1 < siblings.len() {
+            let (k, r) = &siblings[pos + 1];
+            (page, self.child(tree, parent, k.clone(), row_value(r))?)
+        } else if pos > 0 {
+            let (k, r) = &siblings[pos - 1];
+            (self.child(tree, parent, k.clone(), row_value(r))?, page)
+        } else {
+            return Ok(());
+        };
+        let mut both = self.node_rows(first)?;
+        both.extend(self.node_rows(second)?);
+        if size(&both) > area * 3 / 4 {
+            return Ok(());
+        }
+        let (level, flags) = self.node_level(second);
+        self.write_node(second, level, flags, &both)?;
+        for p in &mut self.pages {
+            if let Some((q, _)) = &mut p.parent
+                && *q == first
+            {
+                *q = second;
+            }
+        }
+        self.drop_page(first)
+    }
+
+    /// Takes a page whose rows are gone out of its table: its parent loses
+    /// the row naming it (when that was the parent's last row, the row
+    /// before takes its place, without a key), a parent left without rows
+    /// goes too, its clusters become free, and a root left with one child
+    /// takes that child's rows when they fit (the table loses a level).
+    fn drop_page(&mut self, page: usize) -> Result<()> {
+        let tree = self.pages[page].tree;
+        let (parent, key) = self.pages[page]
+            .parent
+            .take()
+            .ok_or_else(|| format_err!("dropping the root of table {tree:?}"))?;
+        self.forget(page)?;
+        let mut rows = self.node_rows(parent)?;
+        let pos = rows
+            .iter()
+            .position(|(k, _)| *k == key)
+            .ok_or_else(|| format_err!("no index row for a page"))?;
+        rows.remove(pos);
+        if rows.is_empty() {
+            if self.pages[parent].parent.is_some() {
+                return self.drop_page(parent);
+            }
+            return self.write_node(parent, 0, NODE_ROOT, &[]);
+        }
+        if key.is_empty() {
+            let (k, r) = rows.pop().unwrap();
+            rows.push((Vec::new(), row(&[], row_value(&r), ROW_LAST)));
+            for p in &mut self.pages {
+                if p.parent.as_ref() == Some(&(parent, k.clone())) {
+                    p.parent = Some((parent, Vec::new()));
+                }
+            }
+        }
+        let (level, flags) = self.node_level(parent);
+        self.write_node(parent, level, flags, &rows)?;
+        if self.pages[parent].parent.is_none() && rows.len() == 1 {
+            let (k, r) = rows.pop().unwrap();
+            let child = self.child(tree, parent, k, row_value(&r))?;
+            let child_rows = self.node_rows(child)?;
+            let (level, flags) = self.node_level(child);
+            if self.write_node(parent, level, flags | NODE_ROOT, &child_rows).is_ok() {
+                self.pages[child].parent = None;
+                self.forget(child)?;
+                for p in &mut self.pages {
+                    if let Some((q, _)) = &mut p.parent
+                        && *q == child
+                    {
+                        *q = parent;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A page left out of its table: not written, its clusters free, one
+    /// page fewer below the root.
+    fn forget(&mut self, page: usize) -> Result<()> {
+        let tree = self.pages[page].tree;
+        self.pages[page].dirty = false;
+        let old = std::mem::take(&mut self.pages[page].old);
+        if !old.is_empty() {
+            self.release(tree.allocator()?, &old)?;
+        }
+        self.count_pages(tree, -1);
+        Ok(())
+    }
+
+    /// A node's level and flags.
+    fn node_level(&self, page: usize) -> (u8, u8) {
+        let d = &self.pages[page].data;
+        let h = PAGE_HEADER_SIZE + le32(d, PAGE_HEADER_SIZE) as usize;
+        (d[h + 0x0c], d[h + 0x0d])
     }
 
     /// Where, in an index page, the reference of the row with `key` is.
@@ -1114,12 +1242,13 @@ impl<D: WriteAt> Volume<D> {
         if data.len() as u64 > MAX_CREATED {
             return Err(Error::Unsupported(format!("files of more than {MAX_CREATED} bytes")));
         }
-        let EmbeddedFile {
+        let FileAt {
             parent,
             name,
             dir,
             record: old,
             runs,
+            ..
         } = self.embedded_file(path)?;
         let entry = self.lookup(path)?;
         let file = self.open_file(&entry)?;
@@ -1201,17 +1330,23 @@ impl<D: WriteAt> Volume<D> {
         Err(Error::Unsupported("no file to share a security descriptor with".into()))
     }
 
-    /// Deletes a file whose record is in its directory entry: its name row
-    /// and file id row, and its data clusters (refused on volumes with
-    /// shared clusters).
+    /// Deletes a name of a file: for a file whose record is in its
+    /// directory entry its name row and file id row, and its data clusters
+    /// (refused on volumes with shared clusters); for a moved or linked
+    /// file see `unlink`.
     pub fn delete_file(&mut self, path: &str, now: u64) -> Result<()> {
-        let EmbeddedFile {
+        let file = self.file_at(path)?;
+        if let Some(home) = file.home {
+            return self.unlink(file, home, now);
+        }
+        let FileAt {
             parent,
             name,
             dir,
             record,
             runs,
-        } = self.embedded_file(path)?;
+            ..
+        } = file;
         let id = le64(&record, 0x80);
         if !runs.is_empty() && self.has_shared_clusters()? {
             return Err(Error::Unsupported(format!(
@@ -1233,23 +1368,27 @@ impl<D: WriteAt> Volume<D> {
         self.load()
     }
 
-    /// Renames a file whose record is in its directory entry, within its
-    /// directory.
+    /// Renames a file within its directory.
     pub fn rename(&mut self, path: &str, new_name: &str, now: u64) -> Result<()> {
-        let EmbeddedFile {
-            parent,
-            name,
-            dir,
-            mut record,
-            ..
-        } = self.embedded_file(path)?;
+        let file = self.file_at(path)?;
         check_name(new_name)?;
-        let target = format!("{}/{new_name}", parent.trim_end_matches('/'));
+        let target = format!("{}/{new_name}", file.parent.trim_end_matches('/'));
         match self.lookup(&target) {
             Err(Error::NotFound(_)) => {}
             Ok(_) => return Err(Error::Unsupported(format!("{target} exists"))),
             Err(e) => return Err(e),
         }
+        if let Some(home) = file.home {
+            let parent = file.parent.clone();
+            return self.move_name(file, home, &parent, new_name, now);
+        }
+        let FileAt {
+            parent,
+            name,
+            dir,
+            mut record,
+            ..
+        } = file;
         let id = le64(&record, 0x80);
         record[0x38..0x40].copy_from_slice(&now.to_le_bytes());
         let utf16: Vec<u8> = new_name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
@@ -1303,13 +1442,7 @@ impl<D: WriteAt> Volume<D> {
     }
 
     fn split_file(&mut self, path: &str, to: &str, keep: bool, now: u64) -> Result<()> {
-        let EmbeddedFile {
-            parent,
-            name,
-            dir: home,
-            mut record,
-            ..
-        } = self.embedded_file(path)?;
+        let file = self.file_at(path)?;
         let to = to.trim_end_matches('/');
         let (to_parent, to_name) = to.rsplit_once('/').unwrap_or(("", to));
         check_name(to_name)?;
@@ -1318,6 +1451,20 @@ impl<D: WriteAt> Volume<D> {
             Ok(_) => return Err(Error::Unsupported(format!("{to} exists"))),
             Err(e) => return Err(e),
         }
+        if let Some(home) = file.home {
+            return if keep {
+                self.add_name(file, home, to_parent, to_name, now)
+            } else {
+                self.move_name(file, home, to_parent, to_name, now)
+            };
+        }
+        let FileAt {
+            parent,
+            name,
+            dir: home,
+            mut record,
+            ..
+        } = file;
         let target = self.directory_of(to_parent)?;
         if !keep && target == home {
             return self.rename(path, to_name, now);
@@ -1369,18 +1516,145 @@ impl<D: WriteAt> Volume<D> {
         self.load()
     }
 
-    /// For a file whose record is in its directory entry (no named streams
-    /// or snapshots in clusters, no reparse point): its directory's path,
-    /// its name, the directory's object id, the record and the physical
-    /// runs of its data.
-    fn embedded_file(&self, path: &str) -> Result<EmbeddedFile> {
-        let trimmed = path.trim_end_matches('/');
-        let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
-        let entry = self.lookup(trimmed)?;
-        let Target::Embedded(record) = &entry.target else {
+    /// Gives one name of a file whose record is a row of type 0x40 of
+    /// directory `home` a new directory and name, as Windows does: its
+    /// index entry moves and its link row changes.
+    fn move_name(&mut self, file: FileAt, home: u64, to_parent: &str, to_name: &str, now: u64) -> Result<()> {
+        let FileAt {
+            parent,
+            name,
+            dir,
+            mut record,
+            ..
+        } = file;
+        let target = self.directory_of(to_parent)?;
+        let id = le64(&record, 0x80);
+        let (mut names, rows) = record_names(&record)?;
+        let old = (dir, utf16_bytes(&name));
+        let at = names
+            .iter()
+            .position(|n| *n == old)
+            .ok_or_else(|| format_err!("{parent}/{name}: no link row for the name"))?;
+        names[at] = (target, utf16_bytes(to_name));
+        record[0x38..0x40].copy_from_slice(&now.to_le_bytes());
+        let record = record_with_names(&record, names, rows)?;
+        {
+            let mut tx = Transaction::begin(&*self)?;
+            tx.remove_row(Tree::Object(dir), &|k| is_entry_row(k, &name))?;
+            put_record(&mut tx, home, id, &record)?;
+            let mut key = vec![ROW_NAME as u8, 0, 2, 0];
+            key.extend(utf16_bytes(to_name));
+            tx.insert_sorted(
+                Tree::Object(target),
+                &row(&key, &index_entry(id, home, &record), 0),
+                &directory_key_order,
+            )?;
+            self.touch_directory(&mut tx, &parent, dir, now)?;
+            if target != dir {
+                self.touch_directory(&mut tx, to_parent, target, now)?;
+            }
+            tx.commit()?;
+        }
+        self.load()
+    }
+
+    /// Gives a file whose record is a row of type 0x40 of directory `home`
+    /// another name: a link row and an index entry.
+    fn add_name(&mut self, file: FileAt, home: u64, to_parent: &str, to_name: &str, now: u64) -> Result<()> {
+        let mut record = file.record;
+        let target = self.directory_of(to_parent)?;
+        let id = le64(&record, 0x80);
+        let (mut names, rows) = record_names(&record)?;
+        names.push((target, utf16_bytes(to_name)));
+        record[0x38..0x40].copy_from_slice(&now.to_le_bytes());
+        let record = record_with_names(&record, names, rows)?;
+        {
+            let mut tx = Transaction::begin(&*self)?;
+            put_record(&mut tx, home, id, &record)?;
+            let mut key = vec![ROW_NAME as u8, 0, 2, 0];
+            key.extend(utf16_bytes(to_name));
+            tx.insert_sorted(
+                Tree::Object(target),
+                &row(&key, &index_entry(id, home, &record), 0),
+                &directory_key_order,
+            )?;
+            self.touch_directory(&mut tx, to_parent, target, now)?;
+            tx.commit()?;
+        }
+        self.load()
+    }
+
+    /// Removes one name of a file whose record is a row of type 0x40 of
+    /// directory `home`: its index entry and link row; with its last name
+    /// the record, its file id row and its data clusters go too (refused
+    /// on volumes with shared clusters).
+    fn unlink(&mut self, file: FileAt, home: u64, now: u64) -> Result<()> {
+        let FileAt {
+            parent,
+            name,
+            dir,
+            mut record,
+            runs,
+            ..
+        } = file;
+        let id = le64(&record, 0x80);
+        let (mut names, rows) = record_names(&record)?;
+        let old = (dir, utf16_bytes(&name));
+        let at = names
+            .iter()
+            .position(|n| *n == old)
+            .ok_or_else(|| format_err!("{parent}/{name}: no link row for the name"))?;
+        names.remove(at);
+        let last = names.is_empty();
+        if last && !runs.is_empty() && self.has_shared_clusters()? {
+            return Err(Error::Unsupported(format!(
+                "{parent}/{name}: the volume has shared (cloned or deduplicated) clusters"
+            )));
+        }
+        {
+            let mut tx = Transaction::begin(&*self)?;
+            tx.remove_row(Tree::Object(dir), &|k| is_entry_row(k, &name))?;
+            let key = record_key(id, home);
+            if last {
+                let clusters: Vec<u64> = runs.iter().flat_map(|&(lcn, n)| lcn..lcn + n).collect();
+                tx.release(ROOT_MEDIUM_ALLOCATOR, &clusters)?;
+                tx.remove_row(Tree::Object(home), &|k| k == key)?;
+                tx.remove_row(Tree::Object(home), &|k| {
+                    k.len() >= 16 && le16(k, 0) == ROW_FILE_ID && le64(k, 8) == id
+                })?;
+            } else {
+                record[0x38..0x40].copy_from_slice(&now.to_le_bytes());
+                put_record(&mut tx, home, id, &record_with_names(&record, names, rows)?)?;
+            }
+            self.touch_directory(&mut tx, &parent, dir, now)?;
+            tx.commit()?;
+        }
+        self.load()
+    }
+
+    /// A file whose record is in its directory entry (see `file_at`).
+    fn embedded_file(&self, path: &str) -> Result<FileAt> {
+        let file = self.file_at(path)?;
+        if file.home.is_some() {
             return Err(Error::Unsupported(format!(
                 "{path}: only files whose record is in their directory entry"
             )));
+        }
+        Ok(file)
+    }
+
+    /// For a file (no named streams or snapshots in clusters, no reparse
+    /// point): its directory's path, its name, the directory's object id,
+    /// the record, the physical runs of its data and its home directory
+    /// when its record is kept apart from its names.
+    fn file_at(&self, path: &str) -> Result<FileAt> {
+        let trimmed = path.trim_end_matches('/');
+        let parent = trimmed.rsplit_once('/').map_or("", |(p, _)| p);
+        let entry = self.lookup(trimmed)?;
+        let (record, home) = match &entry.target {
+            Target::Embedded(record) => (record.clone(), None),
+            Target::Split { home, .. } => (self.record(&entry)?, Some(*home)),
+            Target::Directory(_) => return Err(Error::Unsupported(format!("{path} is a directory"))),
         };
         let file = self.open_file(&entry)?;
         let other = file
@@ -1404,12 +1678,13 @@ impl<D: WriteAt> Volume<D> {
                 runs.push((self.translate(x.vlcn)?, x.clusters));
             }
         }
-        Ok(EmbeddedFile {
+        Ok(FileAt {
             parent: parent.to_owned(),
-            name: name.to_owned(),
+            name: entry.name.clone(),
             dir: self.directory_of(parent)?,
-            record: record.clone(),
+            record,
             runs,
+            home,
         })
     }
 
@@ -1772,15 +2047,16 @@ fn upcased(name: &[u8]) -> Vec<u16> {
         .collect()
 }
 
-/// A file whose record is in its directory entry: the directory's path,
-/// the name, the directory's object id, the record, the physical runs of
-/// its data.
-struct EmbeddedFile {
+/// A file by path: the directory's path, the name, the directory's object
+/// id, the record, the physical runs of its data, and for a file whose
+/// record is a row of type 0x40 (moved or linked), its home directory.
+struct FileAt {
     parent: String,
     name: String,
     dir: u64,
     record: Vec<u8>,
     runs: Vec<(u64, u64)>,
+    home: Option<u64>,
 }
 
 /// Names `refs` creates for now: printable ASCII, no characters Windows
@@ -2023,6 +2299,11 @@ fn row_key(row: &[u8]) -> &[u8] {
     row.get(at..at + len).unwrap_or(&[])
 }
 
+fn row_value(row: &[u8]) -> &[u8] {
+    let (at, len) = (le16(row, 0x0a) as usize, le16(row, 0x0c) as usize);
+    row.get(at..at + len).unwrap_or(&[])
+}
+
 /// A link row of a record: the directory and the name of one of its names
 /// (descriptor 0x000d0039; the value is the key without its length, and
 /// the row lets them overlap, as Windows writes it).
@@ -2099,6 +2380,64 @@ fn index_entry(id: u64, home: u64, record: &[u8]) -> Vec<u8> {
     v[0x38..0x40].copy_from_slice(&record[0x58..0x60]);
     v[0x40..0x44].copy_from_slice(&record[0x48..0x4c]);
     v
+}
+
+/// The key of the record of file `id` kept apart in directory `home`.
+fn record_key(id: u64, home: u64) -> Vec<u8> {
+    let mut key = vec![0u8; 24];
+    key[0..4].copy_from_slice(&[ROW_RECORD as u8, 0, 0, 0x80]);
+    key[8..16].copy_from_slice(&id.to_le_bytes());
+    key[16..24].copy_from_slice(&home.to_le_bytes());
+    key
+}
+
+/// Replaces the record of file `id` kept apart in directory `home`.
+fn put_record<D: WriteAt>(tx: &mut Transaction<'_, D>, home: u64, id: u64, record: &[u8]) -> Result<()> {
+    let key = record_key(id, home);
+    tx.remove_row(Tree::Object(home), &|k| k == key)?;
+    tx.insert_sorted(
+        Tree::Object(home),
+        &row(&key, record, ROW_EMBEDS_NODE),
+        &directory_key_order,
+    )
+}
+
+/// A file's names: (directory, UTF-16 name).
+type Names = Vec<(u64, Vec<u8>)>;
+
+/// A record's names, from its link rows, and its other rows as stored.
+fn record_names(record: &[u8]) -> Result<(Names, Vec<Vec<u8>>)> {
+    let (mut names, mut rows) = (Vec::new(), Vec::new());
+    for r in embedded_rows(record)? {
+        let (ko, kl) = (le16(&r, 4) as usize, le16(&r, 6) as usize);
+        let key = r
+            .get(ko..ko + kl)
+            .ok_or_else(|| format_err!("record row key outside the row"))?;
+        if kl >= 0x20 && le32(key, 8) == 0x8000_0002 && le32(key, 12) == 0x000d_0039 {
+            names.push((le64(key, 0x10), key[0x20..].to_vec()));
+        } else {
+            rows.push(r);
+        }
+    }
+    Ok((names, rows))
+}
+
+/// A record with `names` (sorted by directory, then name without case)
+/// as its link rows before its other rows.
+fn record_with_names(record: &[u8], mut names: Names, rows: Vec<Vec<u8>>) -> Result<Vec<u8>> {
+    names.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| upcased(&a.1).cmp(&upcased(&b.1))));
+    let mut all: Vec<Vec<u8>> = names.iter().map(|(d, n)| link_row(*d, n)).collect();
+    all.extend(rows);
+    record_with_rows(record, &all, names.len() as u64)
+}
+
+fn utf16_bytes(name: &str) -> Vec<u8> {
+    name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect()
+}
+
+/// Whether a directory row is the index entry (key flags 2) of `name`.
+fn is_entry_row(key: &[u8], name: &str) -> bool {
+    key.len() > 4 && le16(key, 0) == ROW_NAME && le16(key, 2) == 2 && utf16(&key[4..]) == name
 }
 
 /// The file id row of a file whose record is a row of type 0x40: 2, the id

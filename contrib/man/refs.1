@@ -219,9 +219,9 @@ beside it. Experimental; only with
 .BR \-\-yes .
 .TP
 .BR rename ", " delete
-Rename a file within its directory, or delete it (not hard links;
-deleting a file with data clusters is refused on volumes with cloned or
-deduplicated clusters). Experimental; only with
+Rename a file within its directory, or delete it (one name of a hard
+link; deleting the last name of a file with data clusters is refused on
+volumes with cloned or deduplicated clusters). Experimental; only with
 .BR \-\-yes .
 .TP
 .B mkdir
@@ -229,11 +229,8 @@ Create a directory. Experimental; only with
 .BR \-\-yes .
 .TP
 .BR move ", " link
-Move a file into another directory, or give it a second name (a hard
-link). Files moved or linked so (by Windows too) cannot be renamed,
-moved again or deleted by
-.B refs
-yet. Experimental; only with
+Move a file into another directory, or give it another name (a hard
+link). Experimental; only with
 .BR \-\-yes .
 .TP
 .B write

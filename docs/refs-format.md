@@ -177,6 +177,13 @@ and whose value is the child's page reference; the last row has no key
 table descriptor (the u32 8 at 0x50, the node header at 0x58); the root's
 descriptor counts the table's rows (0x20) and the pages below the root
 (0x18) (**verified**: directories `refs` grew this way read on Windows).
+`refs` shrinks tables too: a page below the root left with less than a
+quarter of its room filled merges with a sibling when both fit in three
+quarters of a page (the later page takes the rows, the earlier one
+leaves its parent), a page whose last row goes leaves its parent (when it
+was the parent's last child, the row before loses its key and becomes
+the last), and a root left with one child takes that child's rows when
+they fit (the table loses a level). Windows' own policy is not known.
 
 A directory's rows sort by type, then: file id rows (0x20) by id, name
 rows (0x30) by name compared without case (NTFS-like: upcased UTF-16
@@ -331,6 +338,15 @@ table's rows for a text diff):
   writes these rows as Windows does (**verified**: equal rows; on
   Windows both names have one file id, writes through one show through
   the other).
+* Renaming or moving one name of such a file (steps `rename`, `move`)
+  replaces its index entry (in the new directory for a move) and its
+  link row; the record stays in its home, also when the last name moves
+  back there, and its change time is updated. Deleting one name removes
+  its index entry and its link row and lowers the link count; with the
+  last name the record row and the file id row leave the home. Windows
+  removes a link row by moving the record's later rows down and puts a
+  new one at the end of the row area (the key index stays sorted); `refs`
+  writes the rows in key order (**verified**: otherwise equal rows).
 * Renaming a file within its directory (step `rename`): its name row is
   replaced by one with the new name and the same record (change time
   updated), its file id row gets the new name, and the directory gets new

@@ -758,6 +758,27 @@ fn filling_directories_splits_their_pages() {
     assert_pages_valid(&vol, &skip, "split");
     let fresh = Volume::open(&overlay, offset).unwrap();
     assert_eq!(read_all(&fresh, &names[1]), vec![1u8; 900]);
+    // All go: emptied pages leave the tree, its root takes the rows of its
+    // last child, and their clusters are free again.
+    let pages_before = used(&vol, 1).len();
+    for path in names.iter().enumerate().filter(|(i, _)| i % 7 != 0).map(|(_, p)| p) {
+        vol.delete_file(path, now).unwrap();
+    }
+    assert_eq!(vol.read_dir(dir).unwrap().len(), 1, "leaf.bin");
+    let root = vol.read_page(vol.object(dir).unwrap(), false).unwrap();
+    assert!(Node::at(&root, PAGE_HEADER_SIZE).unwrap().is_leaf(), "one page again");
+    let below = u64::from_le_bytes(
+        root[PAGE_HEADER_SIZE + 0x18..PAGE_HEADER_SIZE + 0x20]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(below, 0, "no pages below the root");
+    assert!(used(&vol, 1).len() < pages_before, "pages freed");
+    assert_allocated(&vol, &skip, "merged");
+    assert_pages_valid(&vol, &skip, "merged");
+    vol.create_file("/deep/a/b/c/d/e/f/g/h/again.txt", b"again", now)
+        .unwrap();
+    assert_eq!(read_all(&vol, "/deep/a/b/c/d/e/f/g/h/again.txt"), b"again");
 }
 
 #[test]
@@ -795,14 +816,70 @@ fn moving_and_linking_files() {
         vol.lookup("/dir/last link.txt").unwrap().target,
     );
     assert!(matches!(a, refs::Target::Split { .. }) && a == b, "{a:?} {b:?}");
-    // The moved name and the linked ones have records apart: renaming,
-    // deleting and moving them again is not done yet.
-    for err in [
-        vol.rename("/dir/small moved.txt", "x", now).unwrap_err(),
-        vol.delete_file("/last.txt", now).unwrap_err(),
-        vol.move_file("/dir/last link.txt", "/x", now).unwrap_err(),
+    // Their names renamed, moved, added and deleted (the record stays in
+    // its home, its link rows follow).
+    vol.rename("/dir/small moved.txt", "small renamed.txt", now).unwrap();
+    vol.move_file("/dir/small renamed.txt", "/small back.txt", now).unwrap();
+    vol.rename("/dir/LAST LINK.TXT", "last renamed.txt", now).unwrap();
+    vol.link_file("/dir/last renamed.txt", "/third.txt", now).unwrap();
+    vol.delete_file("/last.txt", now).unwrap();
+    assert_eq!(read_all(&vol, "/small back.txt"), small);
+    for path in ["/dir/last renamed.txt", "/third.txt"] {
+        assert_eq!(read_all(&vol, path), last, "{path}");
+    }
+    let names = |vol: &Volume<_>, path: &str| {
+        let record = vol.record(&vol.lookup(path).unwrap()).unwrap();
+        u64::from_le_bytes(record[0x98..0xa0].try_into().unwrap())
+    };
+    assert_eq!(names(&vol, "/third.txt"), 2);
+    for gone in [
+        "/last.txt",
+        "/dir/small moved.txt",
+        "/dir/small renamed.txt",
+        "/dir/last link.txt",
     ] {
-        assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
+        assert!(matches!(vol.lookup(gone), Err(refs::Error::NotFound(_))), "{gone}");
+    }
+    // A file in clusters linked, then both names deleted: its record and
+    // file id row go, its clusters become free.
+    let clusters = {
+        let file = vol.open_file(&vol.lookup("/mid.bin").unwrap()).unwrap();
+        let refs::Content::Extents(x) = file.data.unwrap().content else {
+            panic!("mid.bin: inline")
+        };
+        x.iter()
+            .flat_map(|x| {
+                let lcn = vol.translate(x.vlcn).unwrap();
+                lcn..lcn + x.clusters
+            })
+            .collect::<Vec<_>>()
+    };
+    vol.link_file("/mid.bin", "/dir/mid link.bin", now).unwrap();
+    vol.delete_file("/mid.bin", now).unwrap();
+    assert_eq!(names(&vol, "/dir/mid link.bin"), 1);
+    assert!(clusters.iter().all(|c| used(&vol, 1).contains(c)), "kept while named");
+    vol.delete_file("/dir/mid link.bin", now).unwrap();
+    assert!(
+        clusters.iter().all(|c| !used(&vol, 1).contains(c)),
+        "freed with the last name"
+    );
+    // The root keeps the records of small.txt and last.txt (their home).
+    let fresh = Volume::open(&overlay, offset).unwrap();
+    let refs::Target::Directory(dir) = fresh.lookup("/dir").unwrap().target else {
+        panic!("/dir")
+    };
+    for (oid, expected) in [(ROOT_DIRECTORY, 2), (dir, 0)] {
+        let rows = fresh.object_rows(oid).unwrap();
+        let records = rows.iter().filter(|(k, _)| k[0] == 0x40).count();
+        let split_ids = rows
+            .iter()
+            .filter(|(k, v)| k[0] == 0x20 && v.len() == 24 && v[0] == 2)
+            .count();
+        assert_eq!(
+            (records, split_ids),
+            (expected, expected),
+            "{oid:#x}: records apart, their id rows"
+        );
     }
     assert_allocated(&vol, &skip, "moved");
     assert_pages_valid(&vol, &skip, "moved");

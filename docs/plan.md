@@ -716,9 +716,13 @@ rows of thin spaces not allocated yet (M7).
   a file moved to another directory or given a second name keeps its
   record in its home directory as a row of type 0x40 with a link row per
   name, every name an index entry; the rows equal Windows' for the same
-  operations, and on Windows both names were one file. Next: renaming,
-  deleting and moving such files again, merging pages, splitting full
-  index pages, named streams, integrity streams.
+  operations, and on Windows both names were one file. Renaming, moving
+  and deleting one name of such a file (the last one with its record and
+  clusters) give Windows' rows for the same steps but for the order of
+  the record's rows. Deleting rows merges underfull pages and removes
+  emptied ones (a directory of 150 files emptied again is one page).
+  Next: splitting full index pages, named streams, integrity streams,
+  directories (rename, move, delete).
 
 ## Test infrastructure (continuous, feeds every stage)
 

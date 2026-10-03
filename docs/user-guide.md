@@ -461,20 +461,19 @@ and sets the modification and change times to now. `refs create` makes a
 file (up to 1 KiB kept in its record, up to 64 MiB in clusters near the
 data of the files around it) with a printable ASCII name, in a directory
 small enough to fit one metadata page; it takes the permissions of the
-files beside it. `refs rename` (within the directory)
-and `refs delete` work on files whose record is in their directory entry
-(most files; not hard links); deleting a file with data clusters is
-refused on volumes with block-cloned or deduplicated clusters. `refs
-mkdir` creates a directory; `refs write` replaces a file's content (or
-appends to it with `--append`), keeping its creation time, attributes and
-permissions. `refs move` moves a file into another directory and `refs
-link` gives it a second name (a hard link); files moved or linked this way
-(by Windows too) cannot be renamed, moved or deleted by `refs` yet.
+files beside it. `refs rename` renames a file within its directory and
+`refs delete` deletes it (for a hard-linked file: the one name);
+deleting a file's last name with data clusters is refused on volumes
+with block-cloned or deduplicated clusters. `refs mkdir` creates a
+directory; `refs write` replaces a file's content (or appends to it with
+`--append`), keeping its creation time, attributes and permissions.
+`refs move` moves a file into another directory and `refs link` gives it
+another name (a hard link). `refs set`, `refs overwrite` and `refs
+write` refuse files that were moved or linked for now.
 
 It writes the way Windows does (copy on write, then a new checkpoint), so
-an interruption leaves the volume as it was before. Files whose record
-is not in their directory entry (moved files, hard links) and
-directories are refused for now.
+an interruption leaves the volume as it was before. Renaming, moving and
+deleting directories are refused for now.
 
 Read: files (resident, in extents, sparse, block-cloned, deduplicated),
 directories of any size, named streams, stream snapshots (`refsutil
