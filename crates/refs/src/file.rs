@@ -10,6 +10,11 @@
 //!
 //! A file record is a small B+-tree of attributes: the default data stream
 //! ($DATA, inline or as an extent map), named streams, the reparse point.
+//!
+//! A stream in extents is a chain of levels: each level maps the clusters
+//! written while it was the live one and names its parent level; a stream
+//! snapshot freezes the live level and starts a new one on top of it. The
+//! stream reads as its levels laid over each other, the newest on top.
 
 use storage_spaces::io::ReadAt;
 
@@ -35,9 +40,14 @@ const NAMED: u32 = 0xb0;
 const REPARSE: u32 = 0xc0;
 /// Rows of a stream set (the data of named streams in extents).
 const STREAM_SET: u32 = 3;
-/// The sub-stream id of the live default data stream (snapshots count up
-/// from it).
+/// The level id of a live stream; levels kept by snapshots count up from
+/// it, smaller ids name the header of the level set.
 const LIVE_STREAM: u64 = 0x1000;
+/// Named stream rows: an alternate data stream, a snapshot.
+const NAMED_STREAM: u16 = 0;
+const NAMED_SNAPSHOT: u16 = 2;
+/// Levels a stream may stack (deeper chains are refused).
+const MAX_LEVELS: usize = 1024;
 
 /// Times as FILETIME (100 ns since 1601).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -165,6 +175,9 @@ pub struct File {
     pub data: Option<Stream>,
     /// Named (alternate) streams.
     pub streams: Vec<(String, Stream)>,
+    /// Stream snapshots (`refsutil streamsnapshot`) of the default stream:
+    /// the data at the time each was taken.
+    pub snapshots: Vec<(String, Stream)>,
     /// The reparse point (symbolic links, junctions).
     pub reparse: Option<Reparse>,
 }
@@ -268,6 +281,18 @@ impl<D: ReadAt> Volume<D> {
     /// Decodes an entry's attributes: a file's record, or a directory's
     /// own row (type 0x10, where a junction keeps its reparse point).
     pub fn open_file(&self, entry: &Entry) -> Result<File> {
+        let rows = self.attribute_rows(entry)?;
+        let levels = Levels::of(&rows);
+        let mut file = File::default();
+        for (k, v) in &rows {
+            self.attribute(&mut file, k, v, &levels)?;
+        }
+        Ok(file)
+    }
+
+    /// The raw attribute rows (key, value) of an entry's record, or of a
+    /// directory's own row.
+    pub fn attribute_rows(&self, entry: &Entry) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let record = match entry.target {
             Target::Directory(oid) => self.own_row(oid)?,
             _ => self.record(entry)?,
@@ -278,11 +303,7 @@ impl<D: ReadAt> Volume<D> {
             rows.push((row.key.to_vec(), row.value.to_vec()));
             Ok(())
         })?;
-        let mut file = File::default();
-        for (k, v) in &rows {
-            self.attribute(&mut file, k, v, &rows)?;
-        }
-        Ok(file)
+        Ok(rows)
     }
 
     /// A directory's own row. Rows sort by their type, and the own row's
@@ -309,7 +330,7 @@ impl<D: ReadAt> Volume<D> {
         }
     }
 
-    fn attribute(&self, file: &mut File, k: &[u8], v: &[u8], rows: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
+    fn attribute(&self, file: &mut File, k: &[u8], v: &[u8], levels: &Levels<'_>) -> Result<()> {
         let (marker, descriptor) = (le32(k, 8), le32(k, 12));
         match (marker, descriptor & 0xffff) {
             (SINGLE, DATA) => {
@@ -325,22 +346,21 @@ impl<D: ReadAt> Volume<D> {
             (MULTI, DATA) if le64(k, 0x10) == LIVE_STREAM => {
                 file.data = Some(Stream {
                     size: le64(v, 0x38),
-                    content: Content::Extents(self.extents(v)?),
+                    content: Content::Extents(self.level_extents(levels, OWN_SET, LIVE_STREAM)?),
                 });
             }
-            (MULTI, NAMED) if le16(v, 0x10) == 0 => {
+            (MULTI, NAMED) if matches!(le16(v, 0x10), NAMED_STREAM | NAMED_SNAPSHOT) => {
                 let name = utf16(&k[0x10..]);
                 let size = le64(v, 0x20);
                 let content = if le16(v, 2) & 0x1000 != 0 {
-                    // In extents: the $DATA record of a stream set row
-                    // (type 3) with the set id and sub-stream id the
-                    // stream's value names.
-                    let (set, sub) = (le64(v, 0x3c), le64(v, 0x44));
-                    let data = rows
-                        .iter()
-                        .find(|(rk, _)| le32(rk, 8) == STREAM_SET && le64(rk, 0x30) == set && le64(rk, 0x38) == sub)
-                        .ok_or_else(|| format_err!("stream {name:?}: no data record {set:#x}/{sub:#x}"))?;
-                    Content::Extents(self.extents(&data.1)?)
+                    // In extents: the level the value names, in the
+                    // file's own $DATA levels (set 0: snapshots of the
+                    // default stream) or in a stream set.
+                    let (set, id) = (le64(v, 0x3c), le64(v, 0x44));
+                    Content::Extents(
+                        self.level_extents(levels, set, id)
+                            .map_err(|e| format_err!("stream {name:?}: {e}"))?,
+                    )
                 } else {
                     Content::Inline(
                         v.get(0x3c..0x3c + size as usize)
@@ -348,7 +368,12 @@ impl<D: ReadAt> Volume<D> {
                             .to_vec(),
                     )
                 };
-                file.streams.push((name, Stream { size, content }));
+                let stream = (name, Stream { size, content });
+                if le16(v, 0x10) == NAMED_SNAPSHOT {
+                    file.snapshots.push(stream);
+                } else {
+                    file.streams.push(stream);
+                }
             }
             (SINGLE, REPARSE) => {
                 let len = le16(v, 0x10) as usize;
@@ -363,6 +388,29 @@ impl<D: ReadAt> Volume<D> {
             _ => {}
         }
         Ok(())
+    }
+
+    /// The extents of level `id` of a level set: its chain of levels
+    /// down to the set's header, the older ones overlaid by the newer.
+    fn level_extents(&self, levels: &Levels<'_>, set: u64, id: u64) -> Result<Vec<Extent>> {
+        let mut chain = Vec::new();
+        let mut at = id;
+        while at >= LIVE_STREAM {
+            let &(parent, value) = levels
+                .0
+                .get(&(set, at))
+                .ok_or_else(|| format_err!("no data level {set:#x}/{at:#x}"))?;
+            if chain.len() == MAX_LEVELS {
+                return Err(format_err!("more than {MAX_LEVELS} data levels"));
+            }
+            chain.push(value);
+            at = parent;
+        }
+        let mut out = Vec::new();
+        for value in chain.iter().rev() {
+            out = overlay(out, self.extents(value)?);
+        }
+        Ok(out)
     }
 
     /// The extent map of a $DATA value: a node at the value's start whose
@@ -418,15 +466,24 @@ impl<D: ReadAt> Volume<D> {
             Content::Extents(extents) => {
                 buf.fill(0);
                 let cluster = self.cluster;
-                for e in extents.iter().filter(|e| e.written) {
+                // Extents are sorted and do not overlap.
+                let first = extents.partition_point(|e| (e.vcn + e.clusters) * cluster <= offset);
+                for e in extents[first..]
+                    .iter()
+                    .take_while(|e| e.vcn * cluster < offset + n as u64)
+                {
                     let (start, end) = (e.vcn * cluster, (e.vcn + e.clusters) * cluster);
                     let (from, to) = (offset.max(start), (offset + n as u64).min(end));
-                    if from >= to {
+                    if !e.written || from >= to {
                         continue;
                     }
                     let skip = from - start;
+                    let vlcn = e
+                        .vlcn
+                        .checked_add(skip / cluster)
+                        .ok_or_else(|| format_err!("extent at cluster {:#x} beyond any device", e.vlcn))?;
                     self.read_virtual(
-                        e.vlcn + skip / cluster,
+                        vlcn,
                         skip % cluster,
                         &mut buf[(from - offset) as usize..(to - offset) as usize],
                     )?;
@@ -434,5 +491,106 @@ impl<D: ReadAt> Volume<D> {
             }
         }
         Ok(n)
+    }
+}
+
+/// The default stream's levels are set 0 (the $DATA rows of the record).
+const OWN_SET: u64 = 0;
+
+/// The data levels of a record by (set, id): the parent level's id and
+/// the level's value. $DATA rows (set 0) have the id at key 0x10 and the
+/// parent at 0x18; stream set rows the set at 0x30, the id at 0x38 and the
+/// parent at 0x40.
+struct Levels<'a>(std::collections::HashMap<(u64, u64), (u64, &'a [u8])>);
+
+impl<'a> Levels<'a> {
+    fn of(rows: &'a [(Vec<u8>, Vec<u8>)]) -> Self {
+        let mut levels = std::collections::HashMap::new();
+        for (k, v) in rows {
+            let (marker, descriptor) = (le32(k, 8), le32(k, 12));
+            if (marker, descriptor & 0xffff) == (MULTI, DATA) {
+                levels.insert((OWN_SET, le64(k, 0x10)), (le64(k, 0x18), v.as_slice()));
+            } else if marker == STREAM_SET {
+                levels.insert((le64(k, 0x30), le64(k, 0x38)), (le64(k, 0x40), v.as_slice()));
+            }
+        }
+        Levels(levels)
+    }
+}
+
+/// `base` with `top` laid over it: where a run of `top` lies, its clusters
+/// (or its zeros) replace those of `base`. Both are sorted by vcn, without
+/// overlaps; so is the result.
+fn overlay(base: Vec<Extent>, top: Vec<Extent>) -> Vec<Extent> {
+    if base.is_empty() {
+        return top;
+    }
+    let mut out = Vec::with_capacity(base.len() + top.len());
+    for b in base {
+        let end = b.vcn + b.clusters;
+        let mut at = b.vcn;
+        let first = top.partition_point(|t| t.vcn + t.clusters <= b.vcn);
+        for t in top[first..].iter().take_while(|t| t.vcn < end) {
+            if t.vcn > at {
+                out.push(part(&b, at, t.vcn));
+            }
+            at = at.max(t.vcn + t.clusters);
+        }
+        if at < end {
+            out.push(part(&b, at, end));
+        }
+    }
+    out.extend(top);
+    out.sort_by_key(|e| e.vcn);
+    out
+}
+
+/// The clusters `from..to` of extent `e`.
+fn part(e: &Extent, from: u64, to: u64) -> Extent {
+    Extent {
+        vcn: from,
+        vlcn: e.vlcn.wrapping_add(from - e.vcn),
+        clusters: to - from,
+        written: e.written,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn x(vcn: u64, vlcn: u64, clusters: u64) -> Extent {
+        Extent {
+            vcn,
+            vlcn,
+            clusters,
+            written: true,
+        }
+    }
+
+    #[test]
+    fn newer_levels_replace_the_clusters_they_cover() {
+        // A snapshot's whole file, then runs written after it.
+        let base = vec![x(0, 100, 256)];
+        let top = vec![x(32, 500, 16), x(256, 600, 16)];
+        assert_eq!(
+            overlay(base, top),
+            [x(0, 100, 32), x(32, 500, 16), x(48, 148, 208), x(256, 600, 16)]
+        );
+        // A run covering several base runs and their gaps, and one at the
+        // very start.
+        let base = vec![x(0, 10, 4), x(6, 20, 4), x(12, 30, 4)];
+        let top = vec![x(0, 90, 1), x(3, 70, 11)];
+        assert_eq!(
+            overlay(base, top),
+            [x(0, 90, 1), x(1, 11, 2), x(3, 70, 11), x(14, 32, 2)]
+        );
+        // Zeros written over data hide it.
+        let hole = Extent {
+            written: false,
+            ..x(2, 0, 2)
+        };
+        assert_eq!(overlay(vec![x(0, 10, 8)], vec![hole]), [x(0, 10, 2), hole, x(4, 14, 4)]);
+        assert_eq!(overlay(Vec::new(), vec![x(5, 1, 1)]), [x(5, 1, 1)]);
     }
 }

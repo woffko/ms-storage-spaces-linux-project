@@ -1,8 +1,9 @@
 //! A ReFS volume read end to end: the partition table, boot sector,
 //! superblock, checkpoint, container and object tables, directories,
 //! file records, extents, streams and reparse points. The base is one of
-//! two fixtures of crates/refs/tests (64 KiB clusters; 4 KiB clusters
-//! with integrity streams), chosen by the first byte; the rest of the
+//! three fixtures of crates/refs/tests (64 KiB clusters; 4 KiB clusters
+//! with integrity streams; stream snapshots and deduplicated files),
+//! chosen by the first byte; the rest of the
 //! input patches their stored bytes: a u32 position (modulo the stored
 //! bytes), a length byte (1 to 16) and the bytes. Fuzzing builds of the
 //! `refs` crate accept every checksum, so patched pages reach the parsers.
@@ -14,10 +15,11 @@ use libfuzzer_sys::fuzz_target;
 use refs::{Target, Volume};
 use storage_spaces::io::{ReadAt, SparseImage};
 
-static BASES: LazyLock<[SparseImage; 2]> = LazyLock::new(|| {
+static BASES: LazyLock<[SparseImage; 3]> = LazyLock::new(|| {
     [
         &include_bytes!("../../crates/refs/tests/fixtures/r314basic64k/disk.fixture")[..],
         &include_bytes!("../../crates/refs/tests/fixtures/r314integ/disk.fixture")[..],
+        &include_bytes!("../../crates/refs/tests/fixtures/r314feat/disk.fixture")[..],
     ]
     .map(|b| SparseImage::read_from(b).unwrap())
 });
@@ -42,7 +44,7 @@ fuzz_target!(|data: &[u8]| {
     let Some((&which, mut patches)) = data.split_first() else {
         return;
     };
-    let mut image = BASES[usize::from(which & 1)].clone();
+    let mut image = BASES[usize::from(which) % BASES.len()].clone();
     let ranges = image.ranges();
     let stored: u64 = ranges.iter().map(|r| r.1 as u64).sum();
     while patches.len() >= 6 {
@@ -85,7 +87,8 @@ fuzz_target!(|data: &[u8]| {
                 let Ok(file) = vol.open_file(&e) else {
                     continue;
                 };
-                for s in file.data.iter().chain(file.streams.iter().map(|(_, s)| s)) {
+                let named = file.streams.iter().chain(&file.snapshots).map(|(_, s)| s);
+                for s in file.data.iter().chain(named) {
                     let _ = vol.read_stream(s, 0, &mut buf);
                     let _ = vol.read_stream(s, s.size.saturating_sub(100), &mut buf);
                     let _ = vol.read_stream(s, s.size / 2, &mut buf[..1]);
@@ -95,7 +98,7 @@ fuzz_target!(|data: &[u8]| {
                 }
             }
         }
-        for path in ["/deep/a/b/c", "/links/sym_dir", "/names/plain.txt", "/nothing/at/all"] {
+        for path in ["/deep/a/b/c", "/links/sym_dir", "/snap/file.txt", "/nothing/at/all"] {
             let _ = vol.lookup(path);
         }
     }

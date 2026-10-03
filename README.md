@@ -43,8 +43,8 @@ against pools created by Windows.
 | Adding, retiring, removing and replacing disks; repair, optimize, scrub; health in Windows' terms | `spaces disk ...`, `spaces pool ...` |
 | Creating tiered spaces (SSD mirror over HDD simple or parity) | `spaces tier`, `spaces space create --tier` |
 | Creating dual parity spaces; writing tiered spaces | not yet |
-| ReFS 3.x volumes (Dev Drives, data volumes, inside a space): files, sparse files, named streams, links, attributes | `refs` reads and mounts read-only (FUSE); verified on ReFS 3.14 |
-| ReFS compression, deduplication, snapshots, encryption; ReFS 1.x/2.x; writing ReFS | not yet |
+| ReFS 3.x volumes (Dev Drives, data volumes, inside a space): files, sparse, block-cloned and deduplicated files, named streams, stream snapshots, links, attributes | `refs` reads and mounts read-only (FUSE); verified on ReFS 3.14 |
+| ReFS compression, encryption; ReFS 1.x/2.x; writing ReFS | not yet |
 
 ## Quick start
 
@@ -165,7 +165,8 @@ refs ls --space Data /dev/sdd /dev/sde --path /
    (done, except creating dual parity spaces).
 
 ReFS is a separate track: reading ReFS 3.x and mounting it read-only (done
-for ReFS 3.14), then compression, snapshots, older versions and writing.
+for ReFS 3.14, with snapshots and deduplicated files), then compression,
+older versions and writing.
 Details in [docs/plan.md](docs/plan.md).
 
 ## License

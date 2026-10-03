@@ -591,8 +591,9 @@ rows of thin spaces not allocated yet (M7).
   links, a junction, attributes, set times, block-cloned copies, deleted
   and renamed files), flushes, reattaches and records Windows' listing
   (`manifest.json`); `tools/fetch-refs.sh` copies it as a sparse raw image.
-  Five volumes: 4 KiB and 64 KiB clusters, SHA-256 metadata checksums,
-  integrity streams, an empty volume.
+  Six volumes: 4 KiB and 64 KiB clusters, SHA-256 metadata checksums,
+  integrity streams, an empty volume, and the scenario `features` (stream
+  snapshots, deduplicated files, compressible files).
 * B1 (read-only library, `crates/refs`): boot sector, superblock and
   checkpoint (with their own checksums), page references with CRC-64 and
   SHA-256 checked on every page read, container table and virtual cluster
@@ -610,10 +611,19 @@ rows of thin spaces not allocated yet (M7).
   Windows 10 or Server 2016 to 2022).
 * B2 (in progress): `refs mount` (FUSE, read-only; streams as extended
   attributes, links and junctions as symbolic links, hard links as one
-  inode); `refs --space` reads ReFS inside a space of a pool. Block-cloned
-  files read correctly (clones share extents). Open: compression, integrity
-  stream checks of file data, snapshots, ReFS inside a space checked
-  against Windows.
+  inode, directory listings cached), checked against Windows' listing of
+  every corpus volume by `tools/refs-mount-check.sh`; `refs --space` reads
+  ReFS inside a space of a pool. Block-cloned and deduplicated files
+  (`refsutil dedup`) read correctly: their extents name shared clusters.
+  Stream snapshots (`refsutil streamsnapshot`): a stream is a chain of
+  data levels, each mapping what was written while it was live; the live
+  data and every snapshot read back with Windows' hashes (scenario
+  `features`, volume `r314feat`); `refs cat --snapshot`. Compression:
+  `refsutil compression` and `Start-ReFSDedupJob -CompressionFormat` on
+  Windows 11 26340 deduplicate but compress nothing (0 compressible
+  clusters, also with 300 MB of text), so compressed samples need Windows
+  Server 2025. Open: compression, checking integrity stream checksums of
+  file data, ReFS inside a space checked against Windows.
 
 ## Test infrastructure (continuous, feeds every stage)
 

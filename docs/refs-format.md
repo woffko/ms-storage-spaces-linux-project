@@ -4,7 +4,8 @@ What the `refs` crate reads, with the evidence for each part. **Verified**
 marks statements backed by a test against volumes Windows created
 (`crates/refs/tests/corpus.rs` on the corpus of `tools/vm/New-RefsVolume.ps1`:
 ReFS 3.14 Dev Drives of Windows 11 Insider 26340, 4 KiB and 64 KiB
-clusters, CRC64 and SHA-256 metadata checksums, integrity streams).
+clusters, CRC64 and SHA-256 metadata checksums, integrity streams, stream
+snapshots and deduplicated files).
 The most complete public description is
 [forefst](https://github.com/xbqt/forefst) (GPL-3.0, documentation read,
 no code taken); refsprogs (GPL-2.0+) and libfsrefs are the other prior art
@@ -148,9 +149,10 @@ reads back with Windows' SHA-256):
 
 * **$DATA inline** (0x80000001, 0x80): stream size at value 0x20, the
   bytes from value 0x3c;
-* **$DATA in extents** (0x80000002, 0x000e0080, sub-stream 0x1000):
-  stream size at value 0x38; the value is a node whose leaf entries are
-  raw extent records (no row header):
+* **$DATA in extents** (0x80000002, 0x000e0080): one row per *level* (see
+  below), the live stream's level id 0x1000 at key 0x10; stream size at
+  value 0x38; the value is a node whose leaf entries are raw extent
+  records (no row header):
 
   | Offset | Size | Field |
   |---|---|---|
@@ -180,8 +182,41 @@ reads back with Windows' SHA-256):
   targets of an absolute and a relative file link, a directory link and
   a junction).
 
+### Data levels and stream snapshots
+
+A stream in extents is a chain of *levels*. Each level is a $DATA row
+(key: level id at 0x10, parent level id at 0x18) or, for named streams, a
+stream set row (key u32 at 8 = 3: set id at 0x30, level id at 0x38,
+parent at 0x40). The set's header row has id 8 (value: the next free
+level id at 0, the number of levels at 8); live streams have level id
+0x1000, and on a file without snapshots its parent is the header.
+
+`refsutil streamsnapshot /c NAME FILE` freezes the live level under a
+new id (0x1001, 0x1002, ...) and starts an empty live level on top of
+it: from then on each level maps only the clusters written while it was
+live (value 0x48: its bytes; `refsutil streamsnapshot /l` shows them as
+"snapshot size"). A level reads as the extents of its chain from the
+header up, each level's runs replacing what the older ones map there.
+Snapshots are named stream rows with value 0x10 = 2 (an alternate stream
+has 0): size at 0x20, the level id at 0x44 and the set at 0x3c (0: the
+file's own $DATA levels), bit 0x1000 of the u16 at 2 set. Windows lists
+them as streams `NAME:$SNAPSHOT`. (**verified**: a file with two
+snapshots between overwrites and an append; the live data and both
+snapshots read back with Windows' SHA-256.)
+
+### Deduplication and block cloning
+
+`refsutil dedup` and `Copy-Item` (block cloning) leave plain extent maps
+whose runs name the clusters of other files, or the same cluster many
+times: a 5 MiB file of zeros became 1280 one-cluster runs of one cluster.
+Nothing else is needed to read them (**verified**: identical text and
+random files deduplicated, and the zero file).
+
 ## Not read yet
 
-Compression (LZ4/ZSTD), deduplication, stream snapshots, extended
-attributes, EFS, the USN journal, volumes before ReFS 3.10 (104-byte
-references are parsed but untested) and ReFS 1.x/2.x.
+Compression (LZ4/ZSTD: `refsutil compression` and the ReFS dedup jobs of
+Windows 11 26340 deduplicate but do not compress, so there are no samples
+yet; Microsoft documents compression for Windows Server 2025), extended attributes, EFS, the USN
+journal, snapshots of named streams (read by the same rules, no sample),
+volumes before ReFS 3.10 (104-byte references are parsed but untested)
+and ReFS 1.x/2.x.

@@ -17,6 +17,7 @@ refs \- read Microsoft ReFS volumes on Linux
 .B \-\-path
 .I file
 .RB [ \-\-stream
+.IR name " | " \-\-snapshot
 .IR name ]
 .br
 .B refs stat
@@ -76,12 +77,16 @@ recurses (links to directories are listed, not followed).
 .B cat
 Write a file's data, or with
 .B \-\-stream
-one of its named streams, to standard output.
+one of its named streams, or with
+.B \-\-snapshot
+one of its stream snapshots (made by
+.BR "refsutil streamsnapshot" ),
+to standard output.
 .TP
 .B stat
 Everything about one file or directory: attributes, sizes, the four
-times, where the record is, the data's extents, the named streams and a
-link's target.
+times, where the record is, the data's extents, the named streams, the
+stream snapshots and a link's target.
 .TP
 .B mount
 Mount the volume read-only through FUSE, in the foreground (unmount with
@@ -102,8 +107,10 @@ in
 Verified against Windows on ReFS 3.14 volumes with 4 KiB and 64 KiB
 clusters, CRC-64 and SHA-256 metadata checksums and integrity streams.
 Other ReFS 3.x versions are read by the same rules but were not verified.
-Compressed files, deduplicated files, stream snapshots, encrypted files and
-ReFS 1.x and 2.x are not read yet.
+Compressed files, encrypted files and ReFS 1.x and 2.x are not read yet;
+stream snapshots are read by
+.B cat
+but not shown in the mount.
 .SH EXAMPLES
 .nf
 refs ls /dev/sdb2 \-lR

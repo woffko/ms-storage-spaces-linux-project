@@ -125,7 +125,12 @@ pub fn compare<D: ReadAt>(vol: &Volume<D>, manifest: &Value) -> Vec<String> {
         }
         for s in m["streams"].as_array().into_iter().flatten() {
             let sname = s["name"].as_str().unwrap();
-            let Some((_, stream)) = file.streams.iter().find(|(n, _)| n == sname) else {
+            // Windows lists stream snapshots as "<name>:$SNAPSHOT".
+            let found = match sname.strip_suffix(":$SNAPSHOT") {
+                Some(snapshot) => file.snapshots.iter().find(|(n, _)| n == snapshot),
+                None => file.streams.iter().find(|(n, _)| n == sname),
+            };
+            let Some((_, stream)) = found else {
                 problems.push(format!("{path}:{sname}: missing"));
                 continue;
             };

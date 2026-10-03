@@ -66,6 +66,9 @@ enum Command {
         /// A named (alternate) data stream.
         #[arg(long)]
         stream: Option<String>,
+        /// A stream snapshot of the file's data (`refs stat` lists them).
+        #[arg(long, conflicts_with = "stream")]
+        snapshot: Option<String>,
     },
     /// Everything about a file or directory.
     Stat {
@@ -84,6 +87,17 @@ enum Command {
         /// Allow other users to read the mount (needs user_allow_other).
         #[arg(long)]
         allow_other: bool,
+    },
+    /// The raw attribute rows of a file's record, in hex (for format work).
+    #[command(hide = true)]
+    Rows {
+        #[command(flatten)]
+        source: Source,
+        #[arg(long)]
+        path: String,
+        /// Bytes of each value shown (default 256).
+        #[arg(long, default_value_t = 256)]
+        bytes: usize,
     },
     /// Capture what reading a corpus volume needs into a small fixture:
     /// the metadata of every file and the data of the small ones.
@@ -183,6 +197,10 @@ fn time(filetime: u64) -> String {
     )
 }
 
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ")
+}
+
 fn attributes(a: u32) -> String {
     [
         (0x10, 'd'),
@@ -271,6 +289,9 @@ fn stat(vol: &Volume<Device>, e: &Entry, out: &mut impl Write) -> Result<()> {
     for (name, s) in &file.streams {
         writeln!(out, "stream      {name}: {} bytes", s.size)?;
     }
+    for (name, s) in &file.snapshots {
+        writeln!(out, "snapshot    {name}: {} bytes", s.size)?;
+    }
     if let Some(r) = &file.reparse {
         match r.link_target() {
             Some(t) => writeln!(
@@ -319,7 +340,11 @@ fn fixture(dir: &std::path::Path, out: &std::path::Path, data_limit: u64, exclud
                     dirs.push((child, format!("{path}/")));
                 }
                 let file = vol.open_file(&e)?;
-                for s in file.data.iter().chain(file.streams.iter().map(|(_, s)| s)) {
+                for s in file
+                    .data
+                    .iter()
+                    .chain(file.streams.iter().chain(&file.snapshots).map(|(_, s)| s))
+                {
                     if s.size <= data_limit {
                         vol.read_stream(s, 0, &mut buf[..s.size as usize])?;
                     }
@@ -416,21 +441,27 @@ fn main() -> Result<()> {
             let oid = directory_of(&vol, &path)?;
             ls(&vol, oid, "", long, recursive, &mut out)?;
         }
-        Command::Cat { source, path, stream } => {
+        Command::Cat {
+            source,
+            path,
+            stream,
+            snapshot,
+        } => {
             let vol = open_volume(&source)?;
             let e = vol.lookup(&path)?;
             let file = vol.open_file(&e)?;
-            let s = match &stream {
-                None => file.data.as_ref().context("the file has no data stream")?,
-                Some(name) => {
-                    &file
-                        .streams
-                        .iter()
-                        .find(|(n, _)| n == name)
-                        .with_context(|| format!("no stream {name:?}"))?
-                        .1
-                }
+            let named = |list: &[(String, refs::Stream)], name: &str, what: &str| {
+                list.iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, s)| s.clone())
+                    .with_context(|| format!("no {what} {name:?}"))
             };
+            let s = match (&stream, &snapshot) {
+                (Some(name), _) => named(&file.streams, name, "stream")?,
+                (_, Some(name)) => named(&file.snapshots, name, "snapshot")?,
+                _ => file.data.clone().context("the file has no data stream")?,
+            };
+            let s = &s;
             let mut buf = vec![0u8; 1 << 20];
             let mut at = 0;
             loop {
@@ -455,6 +486,19 @@ fn main() -> Result<()> {
         } => {
             let vol = open_volume(&source)?;
             fuse::serve(vol, &mountpoint, allow_other)?;
+        }
+        Command::Rows { source, path, bytes } => {
+            let vol = open_volume(&source)?;
+            let e = vol.lookup(&path)?;
+            for (k, v) in vol.attribute_rows(&e)? {
+                writeln!(out, "key {}", hex(&k))?;
+                for (i, line) in v[..v.len().min(bytes)].chunks(32).enumerate() {
+                    writeln!(out, "  {:04x} {}", i * 32, hex(line))?;
+                }
+                if v.len() > bytes {
+                    writeln!(out, "  ... {} bytes", v.len())?;
+                }
+            }
         }
         Command::Fixture {
             volume_dir,

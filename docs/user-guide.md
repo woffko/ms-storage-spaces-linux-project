@@ -412,8 +412,9 @@ with `--space NAME`, the member disks of a pool:
 refs info /dev/sdb2                       # version, clusters, checksums
 refs ls /dev/sdb2 --path /src -l          # attributes, size, modified (UTC)
 refs ls /dev/sdb2 -R                      # the whole tree
-refs stat /dev/sdb2 --path /src/main.c    # times, extents, streams, link target
+refs stat /dev/sdb2 --path /src/main.c    # times, extents, streams, snapshots, link target
 refs cat /dev/sdb2 --path /notes.txt --stream summary
+refs cat /dev/sdb2 --path /db.mdf --snapshot nightly > db-nightly.mdf
 refs ls --space Data /dev/sdd /dev/sde    # ReFS inside a space
 mkdir -p mnt && refs mount /dev/sdb2 mnt  # read-only FUSE mount, foreground
 fusermount -u mnt
@@ -426,12 +427,14 @@ absolute target `C:\path` points into the mount) and hard links with one
 inode. Every metadata page is checked against its checksum; a volume that
 fails is reported, not guessed at.
 
-Read: files (resident, in extents, sparse), directories of any size, named
-streams, hard links, symbolic links and junctions, attributes and times,
-volumes with 4 KiB and 64 KiB clusters, CRC-64 or SHA-256 metadata
-checksums and integrity streams (verified on ReFS 3.14 volumes made by
-Windows 11). Not read yet: compressed and deduplicated files, stream
-snapshots, encrypted files, ReFS 1.x/2.x; writing ReFS is not supported.
+Read: files (resident, in extents, sparse, block-cloned, deduplicated),
+directories of any size, named streams, stream snapshots (`refsutil
+streamsnapshot`; `refs cat --snapshot`, not in the mount), hard links,
+symbolic links and junctions, attributes and times, volumes with 4 KiB
+and 64 KiB clusters, CRC-64 or SHA-256 metadata checksums and integrity
+streams (verified on ReFS 3.14 volumes made by Windows 11). Not read yet:
+compressed files, encrypted files, ReFS 1.x/2.x; writing ReFS is not
+supported.
 
 ## Troubleshooting
 

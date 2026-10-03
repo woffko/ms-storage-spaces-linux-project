@@ -3,7 +3,8 @@
 # with `refs mount` and compare what Linux sees with Windows' listing
 # (manifest.json): every path and nothing else, kinds, sizes, modification
 # times, the SHA-256 of every file and of every named stream up to 64 KiB
-# (extended attributes user.<name>), link targets, and one inode for all
+# (extended attributes user.<name>; stream snapshots are not mounted),
+# link targets, and one inode for all
 # names of a hard-linked file. Needs FUSE; nothing is written to the images.
 # Usage: tools/refs-mount-check.sh [NAME...]
 set -uo pipefail
@@ -65,7 +66,8 @@ for path, e in listed.items():
     if h.hexdigest() != e["sha256"]:
         problems.append(f"{path}: data differs")
     for s in e.get("streams", []):
-        if s["size"] > 65536:
+        # Snapshots are not in the mount; Linux takes 64 KiB attributes.
+        if s["name"].endswith(":$SNAPSHOT") or s["size"] > 65536:
             continue
         try:
             value = os.getxattr(full, "user." + s["name"], follow_symlinks=False)
