@@ -712,9 +712,13 @@ rows of thin spaces not allocated yet (M7).
   new directories, files in them, an appended and a shrunk file and 150
   new files in one directory (its page split) read back with their
   hashes, `refsutil leak` and `triage` as on the untouched volume, and
-  Windows then wrote in those directories. Next: merging pages, splitting
-  full index pages, hard links and moves between directories, named
-  streams, integrity streams.
+  Windows then wrote in those directories. `refs move` and `refs link`:
+  a file moved to another directory or given a second name keeps its
+  record in its home directory as a row of type 0x40 with a link row per
+  name, every name an index entry; the rows equal Windows' for the same
+  operations, and on Windows both names were one file. Next: renaming,
+  deleting and moving such files again, merging pages, splitting full
+  index pages, named streams, integrity streams.
 
 ## Test infrastructure (continuous, feeds every stage)
 

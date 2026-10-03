@@ -16,6 +16,8 @@ volume before the first step: step-0-base.vhdx).
   mkdir|PATH
   delete|PATH
   rename|PATH|NEWNAME
+  move|PATH|NEWPATH     move to another directory
+  link|PATH|NEWPATH     a hard link to PATH
   attrib|PATH|ATTRS     set the attributes ([IO.FileAttributes] names)
 Run on the Windows test VM only.
 #>
@@ -61,6 +63,8 @@ foreach ($step in ($Steps.Split(';') | Where-Object { $_ })) {
             'mkdir' { [IO.Directory]::CreateDirectory($p) | Out-Null }
             'delete' { Remove-Item -LiteralPath $p -Recurse -Force }
             'rename' { Rename-Item -LiteralPath $p $a[2] }
+            'move' { Move-Item -LiteralPath $p (Join-Path $drive $a[2]) }
+            'link' { New-Item -ItemType HardLink -Path (Join-Path $drive $a[2]) -Target $p | Out-Null }
             'attrib' { [IO.File]::SetAttributes($p, [IO.FileAttributes]$a[2]) }
             default { throw "unknown step $step" }
         }

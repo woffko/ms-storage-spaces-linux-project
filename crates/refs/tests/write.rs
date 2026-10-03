@@ -774,3 +774,36 @@ fn writes_wait_for_windows_to_replay_its_log() {
     assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
     assert!(overlay.written_pages().is_empty());
 }
+
+#[test]
+fn moving_and_linking_files() {
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 133_800_000_000_000_000;
+    let (small, last) = (read_all(&vol, "/small.txt"), read_all(&vol, "/last.txt"));
+    vol.move_file("/small.txt", "/dir/small moved.txt", now).unwrap();
+    vol.link_file("/last.txt", "/dir/last link.txt", now).unwrap();
+    assert!(matches!(vol.lookup("/small.txt"), Err(refs::Error::NotFound(_))));
+    assert_eq!(read_all(&vol, "/dir/small moved.txt"), small);
+    assert_eq!(read_all(&vol, "/last.txt"), last);
+    assert_eq!(read_all(&vol, "/dir/last link.txt"), last);
+    // Both names lead to one record (the home directory's row 0x40).
+    let (a, b) = (
+        vol.lookup("/last.txt").unwrap().target,
+        vol.lookup("/dir/last link.txt").unwrap().target,
+    );
+    assert!(matches!(a, refs::Target::Split { .. }) && a == b, "{a:?} {b:?}");
+    // The moved name and the linked ones have records apart: renaming,
+    // deleting and moving them again is not done yet.
+    for err in [
+        vol.rename("/dir/small moved.txt", "x", now).unwrap_err(),
+        vol.delete_file("/last.txt", now).unwrap_err(),
+        vol.move_file("/dir/last link.txt", "/x", now).unwrap_err(),
+    ] {
+        assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
+    }
+    assert_allocated(&vol, &skip, "moved");
+    assert_pages_valid(&vol, &skip, "moved");
+}

@@ -2,7 +2,8 @@
 //! crates/refs/tests (a clean log, no shared clusters), its stored bytes
 //! patched by the start of the input (as in refs_volume), then the
 //! operations the rest of the input picks (times, attributes, overwriting,
-//! creating, writing, renaming and deleting files, creating directories)
+//! creating, writing, renaming, moving, linking and deleting files,
+//! creating directories)
 //! on a writable overlay. Fuzzing builds accept every checksum. Whatever
 //! the metadata says, nothing may panic and no byte may be written outside
 //! the volume.
@@ -73,7 +74,9 @@ fuzz_target!(|data: &[u8]| {
             2 => vol.overwrite(path, (n % 4096) as u64, &arg[..arg.len().min(3)], now),
             3 => vol.create_file(path, &vec![0x5a; n % 6000], now),
             4 => vol.write_file(path, &vec![0xa5; n % 9000], now),
-            5 => vol.rename(path, "renamed", now),
+            5 if n % 2 == 0 => vol.rename(path, "renamed", now),
+            5 => vol.move_file(path, "/dir/moved", now),
+            6 if n % 3 == 0 => vol.link_file(path, "/linked", now),
             6 => vol.delete_file(path, now),
             _ => vol.create_directory(path, now),
         };

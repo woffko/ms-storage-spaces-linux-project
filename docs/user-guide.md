@@ -451,6 +451,8 @@ refs rename devdrive.img --path /notes/todo.txt --to done.txt --yes
 refs delete devdrive.img --path /notes/done.txt --yes
 refs mkdir devdrive.img --path /notes/archive --yes
 refs write devdrive.img --path /notes/log.txt --from more.txt --append --yes
+refs move devdrive.img --path /notes/log.txt --to /archive/log.txt --yes
+refs link devdrive.img --path /archive/log.txt --to /notes/log.txt --yes
 ```
 
 `refs overwrite` replaces bytes inside a file (not beyond its end, not in
@@ -465,7 +467,9 @@ and `refs delete` work on files whose record is in their directory entry
 refused on volumes with block-cloned or deduplicated clusters. `refs
 mkdir` creates a directory; `refs write` replaces a file's content (or
 appends to it with `--append`), keeping its creation time, attributes and
-permissions.
+permissions. `refs move` moves a file into another directory and `refs
+link` gives it a second name (a hard link); files moved or linked this way
+(by Windows too) cannot be renamed, moved or deleted by `refs` yet.
 
 It writes the way Windows does (copy on write, then a new checkpoint), so
 an interruption leaves the volume as it was before. Files whose record

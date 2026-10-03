@@ -77,6 +77,22 @@ refs \- read Microsoft ReFS volumes on Linux
 .I directory
 .RB [ \-\-yes ]
 .br
+.B refs move
+.I device
+.B \-\-path
+.I file
+.B \-\-to
+.I path
+.RB [ \-\-yes ]
+.br
+.B refs link
+.I device
+.B \-\-path
+.I file
+.B \-\-to
+.I path
+.RB [ \-\-yes ]
+.br
 .B refs write
 .I device
 .B \-\-path
@@ -107,6 +123,8 @@ links and junctions, attributes and times. Only
 .BR write ,
 .BR create ,
 .BR rename ,
+.BR move ,
+.BR link ,
 .B delete
 and
 .B mkdir
@@ -208,6 +226,14 @@ deduplicated clusters). Experimental; only with
 .TP
 .B mkdir
 Create a directory. Experimental; only with
+.BR \-\-yes .
+.TP
+.BR move ", " link
+Move a file into another directory, or give it a second name (a hard
+link). Files moved or linked so (by Windows too) cannot be renamed,
+moved again or deleted by
+.B refs
+yet. Experimental; only with
 .BR \-\-yes .
 .TP
 .B write

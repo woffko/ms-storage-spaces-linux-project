@@ -319,6 +319,18 @@ table's rows for a text diff):
   clusters (first, count) whose values count references per cluster
   (u16 each, 2 for a cluster two files share); empty on volumes without
   block clones or deduplication.
+* Moving a file to another directory, or giving it a second name (steps
+  `move`, `link`): its record leaves its name row and becomes a row of
+  type 0x40 of the directory it was made in (its home; key 0x40, 0x8000,
+  the file id at 8, the home at 0x10; row flag 1), with a link row per
+  name (descriptor 0x000d0039: the directory at key 0x10, the name from
+  0x20; the value is the key without its length, overlapping it) before
+  its other rows, and its link count at record 0x98; the file id row
+  becomes 2, the id, the home; each name is an index entry (key flags 2:
+  the id, the home, the record's times, sizes and attributes). `refs`
+  writes these rows as Windows does (**verified**: equal rows; on
+  Windows both names have one file id, writes through one show through
+  the other).
 * Renaming a file within its directory (step `rename`): its name row is
   replaced by one with the new name and the same record (change time
   updated), its file id row gets the new name, and the directory gets new

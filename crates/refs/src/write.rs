@@ -1285,6 +1285,90 @@ impl<D: WriteAt> Volume<D> {
         Ok(any)
     }
 
+    /// Moves a file whose record is in its directory entry into another
+    /// directory, as Windows does: the record stays in the directory it was
+    /// made in (its home) as a row of type 0x40, now with a link row naming
+    /// its new directory and name, its file id row there names the home,
+    /// and the new directory gets an index entry pointing at the home.
+    pub fn move_file(&mut self, path: &str, to: &str, now: u64) -> Result<()> {
+        self.split_file(path, to, false, now)
+    }
+
+    /// Gives a file whose record is in its directory entry a second name
+    /// (a hard link), as Windows does: the record moves into a row of type
+    /// 0x40 of its home directory with a link row for each name, and both
+    /// names become index entries pointing at the home.
+    pub fn link_file(&mut self, path: &str, new_path: &str, now: u64) -> Result<()> {
+        self.split_file(path, new_path, true, now)
+    }
+
+    fn split_file(&mut self, path: &str, to: &str, keep: bool, now: u64) -> Result<()> {
+        let EmbeddedFile {
+            parent,
+            name,
+            dir: home,
+            mut record,
+            ..
+        } = self.embedded_file(path)?;
+        let to = to.trim_end_matches('/');
+        let (to_parent, to_name) = to.rsplit_once('/').unwrap_or(("", to));
+        check_name(to_name)?;
+        match self.lookup(to) {
+            Err(Error::NotFound(_)) => {}
+            Ok(_) => return Err(Error::Unsupported(format!("{to} exists"))),
+            Err(e) => return Err(e),
+        }
+        let target = self.directory_of(to_parent)?;
+        if !keep && target == home {
+            return self.rename(path, to_name, now);
+        }
+        let utf16 = |n: &str| -> Vec<u8> { n.encode_utf16().flat_map(|c| c.to_le_bytes()).collect() };
+        let id = le64(&record, 0x80);
+        // The names: (directory, name), the record's link rows in order.
+        let mut names = vec![(target, utf16(to_name))];
+        if keep {
+            names.push((home, utf16(&name)));
+        }
+        names.sort();
+        record[0x38..0x40].copy_from_slice(&now.to_le_bytes());
+        let mut rows: Vec<Vec<u8>> = names.iter().map(|(d, n)| link_row(*d, n)).collect();
+        rows.extend(embedded_rows(&record)?);
+        let record = record_with_rows(&record, &rows, names.len() as u64)?;
+        {
+            let mut tx = Transaction::begin(&*self)?;
+            tx.remove_row(Tree::Object(home), &|k| is_name_row(k, &name))?;
+            tx.remove_row(Tree::Object(home), &|k| {
+                k.len() >= 16 && le16(k, 0) == ROW_FILE_ID && le64(k, 8) == id
+            })?;
+            let (key, value) = split_id_row(id, home);
+            tx.insert_sorted(Tree::Object(home), &row(&key, &value, 0), &directory_key_order)?;
+            let mut key = vec![0u8; 24];
+            key[0..4].copy_from_slice(&[ROW_RECORD as u8, 0, 0, 0x80]);
+            key[8..16].copy_from_slice(&id.to_le_bytes());
+            key[16..24].copy_from_slice(&home.to_le_bytes());
+            tx.insert_sorted(
+                Tree::Object(home),
+                &row(&key, &record, ROW_EMBEDS_NODE),
+                &directory_key_order,
+            )?;
+            for (dir, n) in &names {
+                let mut key = vec![ROW_NAME as u8, 0, 2, 0];
+                key.extend(n);
+                tx.insert_sorted(
+                    Tree::Object(*dir),
+                    &row(&key, &index_entry(id, home, &record), 0),
+                    &directory_key_order,
+                )?;
+            }
+            self.touch_directory(&mut tx, &parent, home, now)?;
+            if target != home {
+                self.touch_directory(&mut tx, to_parent, target, now)?;
+            }
+            tx.commit()?;
+        }
+        self.load()
+    }
+
     /// For a file whose record is in its directory entry (no named streams
     /// or snapshots in clusters, no reparse point): its directory's path,
     /// its name, the directory's object id, the record and the physical
@@ -1563,6 +1647,8 @@ fn inline_data(record: &[u8]) -> Option<usize> {
 }
 
 const ROW_OWN: u16 = 0x10;
+/// Rows of records kept apart from the names (files moved or linked).
+const ROW_RECORD: u16 = 0x40;
 /// The sparse file attribute.
 const SPARSE: u32 = 0x200;
 const ROOT_PARENT_CHILD: usize = 4;
@@ -1935,4 +2021,95 @@ fn directory_page(template: &[u8], oid: u64, record: &[u8]) -> Result<Vec<u8>> {
 fn row_key(row: &[u8]) -> &[u8] {
     let (at, len) = (le16(row, 4) as usize, le16(row, 6) as usize);
     row.get(at..at + len).unwrap_or(&[])
+}
+
+/// A link row of a record: the directory and the name of one of its names
+/// (descriptor 0x000d0039; the value is the key without its length, and
+/// the row lets them overlap, as Windows writes it).
+fn link_row(parent: u64, name_utf16: &[u8]) -> Vec<u8> {
+    let klen = 0x20 + name_utf16.len();
+    let size = (0x10 + klen).next_multiple_of(8);
+    let mut r = vec![0u8; size];
+    r[0..4].copy_from_slice(&(size as u32).to_le_bytes());
+    r[4..6].copy_from_slice(&0x10u16.to_le_bytes());
+    r[6..8].copy_from_slice(&(klen as u16).to_le_bytes());
+    r[0x0a..0x0c].copy_from_slice(&0x18u16.to_le_bytes());
+    r[0x0c..0x0e].copy_from_slice(&((klen - 8) as u16).to_le_bytes());
+    r[0x10..0x18].copy_from_slice(&((klen - 8) as u64).to_le_bytes());
+    r[0x18..0x1c].copy_from_slice(&0x8000_0002u32.to_le_bytes());
+    r[0x1c..0x20].copy_from_slice(&0x000d_0039u32.to_le_bytes());
+    r[0x20..0x28].copy_from_slice(&parent.to_le_bytes());
+    r[0x30..0x30 + name_utf16.len()].copy_from_slice(name_utf16);
+    r
+}
+
+/// The rows of a record's attribute node, as stored.
+fn embedded_rows(record: &[u8]) -> Result<Vec<Vec<u8>>> {
+    let h = le32(record, 0) as usize;
+    let (index, count) = (le32(record, h + 0x10) as usize, le32(record, h + 0x14) as usize);
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let at = h + (le32(record, h + index + 4 * i) & 0xffff) as usize;
+        let size = le32(record, at) as usize;
+        out.push(
+            record
+                .get(at..at + size)
+                .ok_or_else(|| format_err!("record row outside the record"))?
+                .to_vec(),
+        );
+    }
+    Ok(out)
+}
+
+/// A record with `rows` (in order) as its attribute node and `links` names.
+fn record_with_rows(record: &[u8], rows: &[Vec<u8>], links: u64) -> Result<Vec<u8>> {
+    let h = le32(record, 0) as usize;
+    let used: usize = rows.iter().map(Vec::len).sum();
+    let free = 4 * rows.len() % 8;
+    let index = 0x28 + used + free;
+    let mut r = record.get(..h).ok_or_else(|| format_err!("record header"))?.to_vec();
+    r.resize(h + index + 4 * rows.len(), 0);
+    r[0x20..0x28].copy_from_slice(&(rows.len() as u64).to_le_bytes());
+    r[0x98..0xa0].copy_from_slice(&links.to_le_bytes());
+    let put = |r: &mut Vec<u8>, at: usize, v: u32| r[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    put(&mut r, h, 0x28);
+    put(&mut r, h + 4, (0x28 + used) as u32);
+    put(&mut r, h + 8, free as u32);
+    r[h + 0x0c..h + 0x10].copy_from_slice(&[0, 2, 0, 0]);
+    put(&mut r, h + 0x10, index as u32);
+    put(&mut r, h + 0x14, rows.len() as u32);
+    put(&mut r, h + 0x20, (index + 4 * rows.len()) as u32);
+    let mut at = 0x28;
+    for (i, row) in rows.iter().enumerate() {
+        r[h + at..h + at + row.len()].copy_from_slice(row);
+        put(&mut r, h + index + 4 * i, 0xffff_0000 | at as u32);
+        at += row.len();
+    }
+    Ok(r)
+}
+
+/// A name's index entry: the file id (its ordinal in its home), the home
+/// directory, the times, sizes and attributes of its record.
+fn index_entry(id: u64, home: u64, record: &[u8]) -> Vec<u8> {
+    let mut v = vec![0u8; 0x54];
+    v[0..8].copy_from_slice(&id.to_le_bytes());
+    v[8..16].copy_from_slice(&home.to_le_bytes());
+    v[0x10..0x30].copy_from_slice(&record[0x28..0x48]);
+    v[0x30..0x38].copy_from_slice(&record[0x60..0x68]);
+    v[0x38..0x40].copy_from_slice(&record[0x58..0x60]);
+    v[0x40..0x44].copy_from_slice(&record[0x48..0x4c]);
+    v
+}
+
+/// The file id row of a file whose record is a row of type 0x40: 2, the id
+/// and the home directory.
+fn split_id_row(id: u64, home: u64) -> (Vec<u8>, Vec<u8>) {
+    let mut key = vec![0u8; 24];
+    key[0..4].copy_from_slice(&[0x20, 0, 0, 0x80]);
+    key[8..16].copy_from_slice(&id.to_le_bytes());
+    let mut value = vec![0u8; 24];
+    value[0..8].copy_from_slice(&2u64.to_le_bytes());
+    value[8..16].copy_from_slice(&id.to_le_bytes());
+    value[16..24].copy_from_slice(&home.to_le_bytes());
+    (key, value)
 }

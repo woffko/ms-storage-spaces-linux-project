@@ -209,6 +209,37 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Move a file into another directory (experimental: writes the volume,
+    /// only with --yes; files with a single name).
+    Move {
+        /// The image, disk or partition.
+        device: PathBuf,
+        #[arg(long)]
+        offset: Option<u64>,
+        #[arg(long)]
+        path: String,
+        /// The new path (directory and name).
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Give a file a second name, a hard link (experimental: writes the
+    /// volume, only with --yes; files with a single name).
+    Link {
+        /// The image, disk or partition.
+        device: PathBuf,
+        #[arg(long)]
+        offset: Option<u64>,
+        /// The file.
+        #[arg(long)]
+        path: String,
+        /// The new name's path.
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Every cluster the volume uses, by physical cluster: superblocks,
     /// checkpoints, the pages of each tree, the data runs of each file
     /// (for format work: what changed between two images).
@@ -1005,6 +1036,38 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             vol.write_file(&path, &data, now())?;
+            writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
+        }
+        Command::Move {
+            device,
+            offset,
+            path,
+            to,
+            yes,
+        } => {
+            let mut vol = open_writable(&device, offset, yes)?;
+            writeln!(out, "{path}: move to {to}")?;
+            if !yes {
+                writeln!(out, "nothing written (--yes writes)")?;
+                return Ok(());
+            }
+            vol.move_file(&path, &to, now())?;
+            writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
+        }
+        Command::Link {
+            device,
+            offset,
+            path,
+            to,
+            yes,
+        } => {
+            let mut vol = open_writable(&device, offset, yes)?;
+            writeln!(out, "{path}: link as {to}")?;
+            if !yes {
+                writeln!(out, "nothing written (--yes writes)")?;
+                return Ok(());
+            }
+            vol.link_file(&path, &to, now())?;
             writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
         }
         Command::Tree { source, root, object } => {
