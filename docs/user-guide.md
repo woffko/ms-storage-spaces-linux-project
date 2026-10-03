@@ -468,8 +468,8 @@ with block-cloned or deduplicated clusters. `refs mkdir` creates a
 directory; `refs write` replaces a file's content (or appends to it with
 `--append`), keeping its creation time, attributes and permissions.
 `refs move` moves a file into another directory and `refs link` gives it
-another name (a hard link). `refs set`, `refs overwrite` and `refs
-write` refuse files that were moved or linked for now.
+another name (a hard link); changing a hard-linked file through one name
+changes it for all of them.
 
 It writes the way Windows does (copy on write, then a new checkpoint), so
 an interruption leaves the volume as it was before. Renaming, moving and

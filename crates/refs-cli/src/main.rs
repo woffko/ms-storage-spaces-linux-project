@@ -89,8 +89,8 @@ enum Command {
         allow_other: bool,
     },
     /// Change a file's times or attributes (experimental: writes the
-    /// volume, only with --yes; files whose record is in their directory
-    /// entry). Times are UTC, "YYYY-MM-DD hh:mm:ss" or a FILETIME number.
+    /// volume, only with --yes). Times are UTC, "YYYY-MM-DD hh:mm:ss" or a
+    /// FILETIME number.
     Set {
         /// The image, disk or partition (not --space: pools are not
         /// written by refs).

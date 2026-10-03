@@ -1271,8 +1271,8 @@ impl<D: WriteAt> Volume<D> {
             dir,
             record: old,
             runs,
-            ..
-        } = self.embedded_file(path)?;
+            home,
+        } = self.file_at(path)?;
         let entry = self.lookup(path)?;
         let file = self.open_file(&entry)?;
         if !file.streams.is_empty() || !file.snapshots.is_empty() {
@@ -1311,6 +1311,17 @@ impl<D: WriteAt> Volume<D> {
             record[0x40..0x48].copy_from_slice(&old[0x40..0x48]);
             let attributes = (le32(&old, 0x48) & !SPARSE) | (le32(&record, 0x48) & SPARSE);
             record[0x48..0x4c].copy_from_slice(&attributes.to_le_bytes());
+            if let Some(home) = home {
+                // A moved or linked file: the new record keeps the names,
+                // the name written through gets a fresh index entry.
+                let (names, _) = record_names(&old)?;
+                let (_, rows) = record_names(&record)?;
+                let record = record_with_names(&record, names, rows)?;
+                put_record(&mut tx, home, id, &record)?;
+                refresh_entry(&mut tx, dir, &name, &record)?;
+                tx.commit()?;
+                return self.load();
+            }
             tx.remove_row(Tree::Object(dir), &|k| is_name_row(k, &name))?;
             let utf16: Vec<u8> = name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
             let mut key = vec![ROW_NAME as u8, 0, 1, 0];
@@ -1655,17 +1666,6 @@ impl<D: WriteAt> Volume<D> {
         self.load()
     }
 
-    /// A file whose record is in its directory entry (see `file_at`).
-    fn embedded_file(&self, path: &str) -> Result<FileAt> {
-        let file = self.file_at(path)?;
-        if file.home.is_some() {
-            return Err(Error::Unsupported(format!(
-                "{path}: only files whose record is in their directory entry"
-            )));
-        }
-        Ok(file)
-    }
-
     /// For a file (no named streams or snapshots in clusters, no reparse
     /// point): its directory's path, its name, the directory's object id,
     /// the record, the physical runs of its data and its home directory
@@ -1894,34 +1894,38 @@ impl<D: WriteAt> Volume<D> {
         }
     }
 
-    /// Changes the record of a file whose record is embedded in its
-    /// directory entry, in one transaction.
+    /// Changes a file's record, in one transaction.
     fn change_record(&mut self, path: &str, change: impl FnOnce(&mut [u8])) -> Result<()> {
         let trimmed = path.trim_end_matches('/');
-        let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
-        let dir = if parent.trim_matches('/').is_empty() {
-            ROOT_DIRECTORY
-        } else {
-            match self.lookup(parent)?.target {
-                Target::Directory(oid) => oid,
-                _ => return Err(Error::NotFound(format!("directory {parent}"))),
-            }
-        };
+        let parent = trimmed.rsplit_once('/').map_or("", |(p, _)| p);
+        let dir = self.directory_of(parent)?;
         let entry = self.lookup(trimmed)?;
-        if !matches!(entry.target, Target::Embedded(_)) {
-            return Err(Error::Unsupported(format!(
-                "{path}: only files whose record is in their directory entry"
-            )));
-        }
+        let name = entry.name.as_str();
         {
             let mut tx = Transaction::begin(&*self)?;
-            let at = tx.find(Tree::Object(dir), &|k| {
-                k.len() > 4 && le16(k, 0) == 0x30 && le16(k, 2) == 1 && utf16(&k[4..]) == name
-            })?;
-            if at.len < 0x68 {
-                return Err(format_err!("{path}: record of {} bytes", at.len));
+            match entry.target {
+                Target::Embedded(_) => {
+                    let at = tx.find(Tree::Object(dir), &|k| is_name_row(k, name))?;
+                    if at.len < 0x68 {
+                        return Err(format_err!("{path}: record of {} bytes", at.len));
+                    }
+                    change(tx.value_mut(at));
+                }
+                // A moved or linked file: its record in its home, and the
+                // index entry of the name it was changed through (Windows
+                // leaves the other names' entries as they were).
+                Target::Split { home, ordinal } => {
+                    let key = record_key(ordinal, home);
+                    let at = tx.find(Tree::Object(home), &|k| k == key)?;
+                    if at.len < 0x68 {
+                        return Err(format_err!("{path}: record of {} bytes", at.len));
+                    }
+                    change(tx.value_mut(at));
+                    let record = tx.pages[at.page].data[at.value..at.value + at.len].to_vec();
+                    refresh_entry(&mut tx, dir, name, &record)?;
+                }
+                Target::Directory(_) => return Err(Error::Unsupported(format!("{path} is a directory"))),
             }
-            change(tx.value_mut(at));
             tx.commit()?;
         }
         self.load()
@@ -2454,6 +2458,21 @@ fn record_with_names(record: &[u8], mut names: Names, rows: Vec<Vec<u8>>) -> Res
 
 fn utf16_bytes(name: &str) -> Vec<u8> {
     name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect()
+}
+
+/// Copies a record's times, sizes and attributes into the index entry of
+/// one of its names in directory `dir`.
+fn refresh_entry<D: WriteAt>(tx: &mut Transaction<'_, D>, dir: u64, name: &str, record: &[u8]) -> Result<()> {
+    let at = tx.find(Tree::Object(dir), &|k| is_entry_row(k, name))?;
+    let v = tx.value_mut(at);
+    if v.len() < 0x44 {
+        return Err(format_err!("{name}: index entry of {} bytes", v.len()));
+    }
+    v[0x10..0x30].copy_from_slice(&record[0x28..0x48]);
+    v[0x30..0x38].copy_from_slice(&record[0x60..0x68]);
+    v[0x38..0x40].copy_from_slice(&record[0x58..0x60]);
+    v[0x40..0x44].copy_from_slice(&record[0x48..0x4c]);
+    Ok(())
 }
 
 /// Whether a directory row is the index entry (key flags 2) of `name`.

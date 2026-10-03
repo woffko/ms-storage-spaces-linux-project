@@ -842,6 +842,21 @@ fn moving_and_linking_files() {
         u64::from_le_bytes(record[0x98..0xa0].try_into().unwrap())
     };
     assert_eq!(names(&vol, "/third.txt"), 2);
+    // Attributes and data through one name change the record both names
+    // share (and the index entry of the name used).
+    vol.set_attributes("/third.txt", 0x21).unwrap();
+    assert_eq!(vol.lookup("/third.txt").unwrap().attributes & 1, 1);
+    let record = vol.record(&vol.lookup("/dir/last renamed.txt").unwrap()).unwrap();
+    assert_eq!(record[0x48] & 1, 1, "read-only in the record");
+    vol.overwrite("/dir/last renamed.txt", 0, b"XY", now).unwrap();
+    assert_eq!(&read_all(&vol, "/third.txt")[..2], b"XY");
+    let big: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+    vol.write_file("/third.txt", &big, now).unwrap();
+    assert_eq!(read_all(&vol, "/dir/last renamed.txt"), big);
+    assert_eq!(vol.lookup("/third.txt").unwrap().size, 5000);
+    assert_eq!(names(&vol, "/third.txt"), 2);
+    vol.write_file("/dir/last renamed.txt", &last, now).unwrap();
+    assert_eq!(read_all(&vol, "/third.txt"), last);
     for gone in [
         "/last.txt",
         "/dir/small moved.txt",

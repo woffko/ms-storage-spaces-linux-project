@@ -193,12 +193,11 @@ in
 .B set
 Change a file's times (UTC, "YYYY-MM-DD hh:mm:ss" or a FILETIME number)
 or attributes (the bits users can set: read-only 1, hidden 2, system 4,
-archive 0x20, ...). Experimental, and the only command that writes: only
-with
+archive 0x20, ...). Experimental: only with
 .BR \-\-yes ,
-on a volume not attached anywhere else, for files whose record is in
-their directory entry. It writes the way Windows does (copy on write,
-then a new checkpoint), so an interruption leaves the old volume.
+on a volume not attached anywhere else. Like every command that writes,
+it writes the way Windows does (copy on write, then a new checkpoint),
+so an interruption leaves the old volume.
 .TP
 .B overwrite
 Replace bytes of a file with the content of

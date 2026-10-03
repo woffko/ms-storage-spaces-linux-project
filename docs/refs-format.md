@@ -293,8 +293,8 @@ random files deduplicated, and the zero file).
 
 ## Writing (Track B4)
 
-`refs::write` commits the way described below (`refs set` changes times
-and attributes of files whose record is in their directory entry; tests
+`refs::write` commits the way described below (`refs set`, `overwrite`,
+`write`, `create`, `delete`, `rename`, `move`, `link`, `mkdir`; tests
 `tests/write.rs`). What Windows writes, from the write
 experiments (`tools/vm/Invoke-RefsSteps.ps1` changes a volume one step at
 a time and keeps an image after each; `tools/refs-diff.py` lists the
@@ -352,6 +352,11 @@ table's rows for a text diff):
   removes a link row by moving the record's later rows down and puts a
   new one at the end of the row area (the key index stays sorted); `refs`
   writes the rows in key order (**verified**: otherwise equal rows).
+  Changing times, attributes or data through one name (steps `touch`,
+  `attrib`, `write`, `append`) changes the record in the home and copies
+  its times, sizes and attributes into the index entry of that name only;
+  the other names' entries keep the old values (**verified**: `refs set`
+  and `refs overwrite` give Windows' rows).
 * Renaming a file within its directory (step `rename`): its name row is
   replaced by one with the new name and the same record (change time
   updated), its file id row gets the new name, and the directory gets new

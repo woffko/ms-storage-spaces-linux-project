@@ -723,8 +723,10 @@ rows of thin spaces not allocated yet (M7).
   emptied ones (a directory of 150 files emptied again is one page).
   Full index pages split too (a directory of 500 files with long names
   grew to three levels; Windows read it, added 300 files and deleted 267
-  there). Next: named streams, integrity streams, directories (rename,
-  move, delete), moved or linked files' times and data.
+  there). Times, attributes and data of moved or linked files change in
+  their record and in the index entry of the name used, as on Windows.
+  Next: named streams, integrity streams, directories (rename, move,
+  delete).
 
 ## Test infrastructure (continuous, feeds every stage)
 
