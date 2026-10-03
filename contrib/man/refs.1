@@ -56,6 +56,20 @@ refs \- read Microsoft ReFS volumes on Linux
 .RB [ \-\-from
 .IR local-file ]
 .RB [ \-\-yes ]
+.br
+.B refs rename
+.I device
+.B \-\-path
+.I file
+.B \-\-to
+.I name
+.RB [ \-\-yes ]
+.br
+.B refs delete
+.I device
+.B \-\-path
+.I file
+.RB [ \-\-yes ]
 .PP
 where
 .I source
@@ -74,9 +88,11 @@ volumes, ReFS inside a Storage Spaces space): directories, files with
 their data, sparse files, alternate data streams, hard links, symbolic
 links and junctions, attributes and times. Only
 .BR set ,
-.B overwrite
+.BR overwrite ,
+.BR create ,
+.B rename
 and
-.B create
+.B delete
 write to the volume.
 .PP
 Every metadata page is checked against the checksum its reference
@@ -165,6 +181,11 @@ Create a file with the content of
 (empty without), up to 1 KiB, named in printable ASCII, in a directory
 that fits one metadata page. It takes the permissions of the files
 beside it. Experimental; only with
+.BR \-\-yes .
+.TP
+.BR rename ", " delete
+Rename a file within its directory, or delete it; for files whose data is
+kept in their record (small files). Experimental; only with
 .BR \-\-yes .
 .SH LIMITS
 Verified against Windows on ReFS 3.14 volumes with 4 KiB and 64 KiB

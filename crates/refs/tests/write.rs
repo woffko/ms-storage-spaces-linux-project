@@ -76,6 +76,76 @@ fn pages<D: ReadAt>(vol: &Volume<D>, skip: &[u64]) -> Vec<(u64, Option<usize>)> 
     out
 }
 
+/// Checks every page the checkpoint reaches the way Windows does: the row
+/// area parses row by row (8-aligned sizes, removed rows included) up to
+/// its end, every key index entry names a live row, the count matches,
+/// and the free bytes are the area less the live rows.
+fn assert_pages_valid<D: ReadAt>(vol: &Volume<D>, skip: &[u64], what: &str) {
+    fn check(page: &[u8], at: &str) {
+        let u32_at = |o: usize| u32::from_le_bytes(page[o..o + 4].try_into().unwrap()) as usize;
+        let h = PAGE_HEADER_SIZE + u32_at(PAGE_HEADER_SIZE);
+        let (start, end, free, index, count) = (
+            u32_at(h),
+            u32_at(h + 4),
+            u32_at(h + 8),
+            u32_at(h + 0x10),
+            u32_at(h + 0x14),
+        );
+        let mut rows = std::collections::BTreeMap::new();
+        let mut o = start;
+        while o < end {
+            let size = u32_at(h + o);
+            assert!(
+                size >= 0x10 && size % 8 == 0 && o + size <= end,
+                "{at}: row at {o:#x} of {size:#x} bytes"
+            );
+            rows.insert(
+                o,
+                (
+                    size,
+                    u16::from_le_bytes(page[h + o + 8..h + o + 10].try_into().unwrap()),
+                ),
+            );
+            o += size;
+        }
+        assert_eq!(o, end, "{at}: rows end at {o:#x}, the header says {end:#x}");
+        let mut live = 0;
+        for i in 0..count {
+            let e = u32_at(h + index + 4 * i) & 0xffff;
+            let (size, flags) = rows
+                .get(&e)
+                .copied()
+                .unwrap_or_else(|| panic!("{at}: entry {i} names no row ({e:#x})"));
+            assert_eq!(flags & 4, 0, "{at}: entry {i} names a removed row");
+            live += size;
+        }
+        assert_eq!(free, index - start - live, "{at}: free bytes");
+    }
+    fn walk<D: ReadAt>(vol: &Volume<D>, r: &PageRef, physical: bool, at: &str) {
+        let page = vol.read_page(r, physical).unwrap();
+        check(&page, at);
+        let node = Node::at(&page, PAGE_HEADER_SIZE).unwrap();
+        if !node.is_leaf() {
+            for row in node.rows() {
+                walk(vol, &PageRef::parse(row.unwrap().value).unwrap(), physical, at);
+            }
+        }
+    }
+    for (i, r) in vol.checkpoint.roots.iter().enumerate() {
+        walk(vol, r, matches!(i, 7 | 8 | 12), &format!("{what}: root {i}"));
+    }
+    for oid in vol.object_ids().collect::<Vec<_>>() {
+        if oid != 7 && oid != 8 && !skip.contains(&oid) {
+            walk(
+                vol,
+                &vol.object(oid).unwrap().clone(),
+                false,
+                &format!("{what}: object {oid:#x}"),
+            );
+        }
+    }
+}
+
 /// The clusters an allocator marks used.
 fn used<D: ReadAt>(vol: &Volume<D>, allocator: usize) -> BTreeSet<u64> {
     let mut out = BTreeSet::new();
@@ -161,6 +231,7 @@ fn windows_volumes_mark_every_page_used() {
         let (image, manifest, skip) = load(name);
         let vol = Volume::open(&image, manifest["partition_offset"].as_u64().unwrap()).unwrap();
         assert_allocated(&vol, &skip, name);
+        assert_pages_valid(&vol, &skip, name);
     }
 }
 
@@ -231,6 +302,7 @@ fn setting_times_and_attributes_commits_copy_on_write() {
         assert_eq!(vol.checkpoint.clock, clock + 1);
         assert_eq!(vol.lookup(path).unwrap().times, times, "{name}");
         assert_allocated(&vol, &skip, name);
+        assert_pages_valid(&vol, &skip, name);
         let fresh = Volume::open(&overlay, offset).unwrap();
         let listed = path.trim_start_matches('/');
         for e in manifest["entries"].as_array_mut().unwrap() {
@@ -294,6 +366,7 @@ fn overwriting_data_in_place() {
         }
     }
     assert_allocated(&vol, &skip, "r314basic4k");
+    assert_pages_valid(&vol, &skip, "overwritten");
     let fresh = Volume::open(&overlay, offset).unwrap();
     assert!(
         common::compare(&fresh, &manifest).is_empty(),
@@ -349,13 +422,9 @@ fn creating_files() {
     let mut changed = manifest.clone();
     changed["entries"] = listed.into();
     assert_allocated(&vol, &skip, "created");
+    assert_pages_valid(&vol, &skip, "created");
     let fresh = Volume::open(&overlay, offset).unwrap();
-    let problems: Vec<String> = common::compare(&fresh, &changed)
-        .into_iter()
-        // Windows shows a directory's times from its entry in the parent,
-        // which ReFS updates lazily; only the directory's own row is set.
-        .filter(|p| !(p.starts_with("names: written") || p.starts_with("deep/a/b: written")))
-        .collect();
+    let problems = common::compare(&fresh, &changed);
     assert!(problems.is_empty(), "{problems:?}");
     // Refused before anything is written.
     let written = overlay.written_pages().len();
@@ -368,4 +437,52 @@ fn creating_files() {
         assert!(matches!(err, refs::Error::Unsupported(_)), "{why}: {err}");
     }
     assert_eq!(overlay.written_pages().len(), written);
+}
+
+#[test]
+fn deleting_and_renaming_files() {
+    let (image, manifest, skip) = load("r314basic4k");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 133_200_000_000_000_000;
+    vol.delete_file("/sizes/size_1.bin", now).unwrap();
+    vol.rename("/sizes/size_100.bin", "renamed (100).bin", now).unwrap();
+    // Many rounds in one directory: the holes rows leave are reused.
+    for i in 0..40 {
+        let path = format!("/sizes/round {i}.txt");
+        vol.create_file(&path, &vec![i as u8; 900], now).unwrap();
+        vol.rename(&path, &format!("round {i} renamed.txt"), now).unwrap();
+        vol.delete_file(&format!("/sizes/round {i} renamed.txt"), now).unwrap();
+    }
+    let mut entries: Vec<serde_json::Value> = manifest["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["path"] != "sizes/size_1.bin")
+        .cloned()
+        .collect();
+    for e in entries.iter_mut() {
+        if e["path"] == "sizes/size_100.bin" {
+            e["path"] = "sizes/renamed (100).bin".into();
+        }
+        if e["path"] == "sizes" {
+            e["written"] = now.into();
+        }
+    }
+    let mut changed = manifest.clone();
+    changed["entries"] = entries.into();
+    let fresh = Volume::open(&overlay, offset).unwrap();
+    let problems = common::compare(&fresh, &changed);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(fresh.lookup("/sizes/renamed (100).bin").unwrap().times.changed, now);
+    assert_allocated(&fresh, &skip, "deleted and renamed");
+    assert_pages_valid(&fresh, &skip, "deleted and renamed");
+    // Refused: data in extents, an existing target name.
+    for err in [
+        vol.delete_file("/sizes/size_65537.bin", now).unwrap_err(),
+        vol.rename("/sizes/size_0.bin", "size_1000.bin", now).unwrap_err(),
+    ] {
+        assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
+    }
 }

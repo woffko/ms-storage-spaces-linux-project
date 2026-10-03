@@ -156,9 +156,16 @@ the row area, unordered; the key index (u32 entries: the row's offset |
 0xffff0000) sits at the end of the page, in key order, and grows down. A
 table's descriptor (page + 0x50, or a record's start) counts the table's
 rows at 0x20. A row: u32 size (8-aligned), u16 key offset (0x10), u16
-key length, u16 flags (1 on name rows whose value embeds a record), u16
-value offset (8-aligned), u16 value length. (**verified**: rows `refs`
-inserts this way are found by Windows.)
+key length, u16 flags (1 on name rows whose value embeds a record, 4 on
+removed rows), u16 value offset (8-aligned), u16 value length.
+(**verified**: rows `refs` inserts this way are found by Windows.)
+
+Removing a row leaves it in place with flag 4 and drops its key index
+entry; the free bytes (0x08) are the row area (start to key index) less
+the live rows. Windows walks a page's row area row by row by their sizes
+and refuses a page where that breaks: a zeroed hole made it report "an
+invalid metadata page" and refuse to mount the volume (**verified**; the
+tests check every page this way, Windows' pages included).
 
 A directory's rows sort by type, then: file id rows (0x20) by id, name
 rows (0x30) by name compared without case (NTFS-like: upcased UTF-16
@@ -284,6 +291,11 @@ table's rows for a text diff):
 * Overwriting data (`Invoke-RefsSteps.ps1` step `write`): Windows
   writes a stream without integrity checksums where it is (the extents
   stay) and commits the new times with copy on write.
+* Renaming a file within its directory (step `rename`): its name row is
+  replaced by one with the new name and the same record (change time
+  updated), its file id row gets the new name, and the directory gets new
+  times in its own row and in its entry in the parent. Deleting (step
+  `delete`): both rows are removed, the directory gets new times.
 * Creating a file (step `create`) adds two rows to its directory: the
   name row (type 0x30) with the embedded record, and a row of type 0x20
   (key: 0x20, flags 0x8000, the file id as u64 at 8; value: the name's

@@ -671,9 +671,13 @@ rows of thin spaces not allocated yet (M7).
   record inserted in key order, the directory's own times; the security
   descriptor reference of a neighbouring file); Windows read the files,
   showed the inherited permissions, appended to one, deleted another.
-  Limits for now: directories of one page with room at its end, ASCII
-  names. Next: deleting and renaming, then data in extents (allocating
-  data clusters), directories, compacting and splitting pages.
+  `refs delete` and `refs rename` (within a directory) for files whose
+  data is in their record; pages are compacted when the end of the row
+  area is full. Windows refused the first deletes: it walks a page's rows
+  by their sizes, so removed rows stay as tombstones (flag 4), as Windows
+  leaves them; the tests now check every page that way. Limits for now:
+  directories of one page, ASCII names, data in the record. Next: data in
+  extents (allocating data clusters), directories, splitting pages.
 
 ## Test infrastructure (continuous, feeds every stage)
 

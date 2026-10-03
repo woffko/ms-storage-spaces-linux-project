@@ -277,6 +277,16 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         Ok(())
     }
 
+    /// The root page of a directory that is one page (leaf) only.
+    fn single_page(&mut self, dir: u64) -> Result<usize> {
+        let root = self.root(Tree::Object(dir))?;
+        let d = &self.pages[root].data;
+        if d[PAGE_HEADER_SIZE + le32(d, PAGE_HEADER_SIZE) as usize + 0x0c] != 0 {
+            return Err(Error::Unsupported("directories of more than one page".into()));
+        }
+        Ok(root)
+    }
+
     /// The keys of a page's rows.
     fn keys(&self, page: usize) -> Result<Vec<Vec<u8>>> {
         Node::at(&self.pages[page].data, PAGE_HEADER_SIZE)?
@@ -302,10 +312,14 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
             return Err(Error::Unsupported("inserting into an index node".into()));
         }
         let size = row.len().next_multiple_of(8);
-        if h + end + size + 4 > h + index || free < size + 4 {
+        if free < size + 4 {
             return Err(Error::Unsupported(
-                "no room at the end of the page (compacting it is not done yet)".into(),
+                "the page is full (splitting it is not done yet)".into(),
             ));
+        }
+        if end + size + 4 > index {
+            self.compact(page)?;
+            return self.insert(page, row, before);
         }
         // Where in the key index the row goes.
         let node = Node::at(d, PAGE_HEADER_SIZE)?;
@@ -316,11 +330,7 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
                 break;
             }
         }
-        let mut i = Some(page);
-        while let Some(j) = i {
-            self.pages[j].dirty = true;
-            i = self.pages[j].parent.map(|p| p.0);
-        }
+        self.mark(page);
         let d = &mut self.pages[page].data;
         d[h + end..h + end + row.len()].copy_from_slice(row);
         d[h + end + row.len()..h + end + size].fill(0);
@@ -338,6 +348,88 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         let rows = le64(d, PAGE_HEADER_SIZE + 0x20) + 1;
         d[PAGE_HEADER_SIZE + 0x20..PAGE_HEADER_SIZE + 0x28].copy_from_slice(&rows.to_le_bytes());
         Ok(())
+    }
+
+    /// Moves a leaf page's rows together (in key order) so that its free
+    /// space is all at the end of the row area.
+    fn compact(&mut self, page: usize) -> Result<()> {
+        self.mark(page);
+        let d = &mut self.pages[page].data;
+        let h = PAGE_HEADER_SIZE + le32(d, PAGE_HEADER_SIZE) as usize;
+        let (start, index, count) = (
+            le32(d, h) as usize,
+            le32(d, h + 0x10) as usize,
+            le32(d, h + 0x14) as usize,
+        );
+        let mut rows = Vec::with_capacity(count);
+        for i in 0..count {
+            let at = (le32(d, h + index + 4 * i) & 0xffff) as usize;
+            let size = le32(d, h + at) as usize;
+            rows.push(
+                d.get(h + at..h + at + size)
+                    .ok_or_else(|| format_err!("row outside its page"))?
+                    .to_vec(),
+            );
+        }
+        let mut at = start;
+        d[h + start..h + index].fill(0);
+        for (i, r) in rows.iter().enumerate() {
+            d[h + at..h + at + r.len()].copy_from_slice(r);
+            let entry = 0xffff_0000u32 | at as u32;
+            d[h + index + 4 * i..h + index + 4 * i + 4].copy_from_slice(&entry.to_le_bytes());
+            at += r.len();
+        }
+        d[h + 4..h + 8].copy_from_slice(&(at as u32).to_le_bytes());
+        d[h + 8..h + 12].copy_from_slice(&((index - at) as u32).to_le_bytes());
+        Ok(())
+    }
+
+    /// Removes the row whose key `this` accepts from a leaf page (its space
+    /// counts as free; the next compaction reuses it) and uncounts it in
+    /// the table's descriptor.
+    fn remove(&mut self, page: usize, this: &dyn Fn(&[u8]) -> bool) -> Result<()> {
+        let pos = Node::at(&self.pages[page].data, PAGE_HEADER_SIZE)?
+            .rows()
+            .position(|r| r.is_ok_and(|r| this(r.key)))
+            .ok_or_else(|| Error::NotFound("row to remove".into()))?;
+        self.mark(page);
+        let d = &mut self.pages[page].data;
+        let h = PAGE_HEADER_SIZE + le32(d, PAGE_HEADER_SIZE) as usize;
+        let (end, free, index, count) = (
+            le32(d, h + 4) as usize,
+            le32(d, h + 8) as usize,
+            le32(d, h + 0x10) as usize,
+            le32(d, h + 0x14) as usize,
+        );
+        let at = (le32(d, h + index + 4 * pos) & 0xffff) as usize;
+        let size = le32(d, h + at) as usize;
+        // The row stays as a tombstone (flag 4): Windows walks the row area
+        // row by row and takes a zeroed hole for a damaged page.
+        let flags = le16(d, h + at + 8) | ROW_DELETED;
+        d[h + at + 8..h + at + 10].copy_from_slice(&flags.to_le_bytes());
+        d.copy_within(h + index..h + index + 4 * pos, h + index + 4);
+        d[h + index..h + index + 4].fill(0);
+        let put = |d: &mut Vec<u8>, at: usize, v: u32| d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        if at + size == end {
+            put(d, h + 4, at as u32);
+        }
+        put(d, h + 8, (free + size + 4) as u32);
+        put(d, h + 0x10, (index + 4) as u32);
+        put(d, h + 0x14, (count - 1) as u32);
+        let root = self.roots[&self.pages[page].tree];
+        let d = &mut self.pages[root].data;
+        let rows = le64(d, PAGE_HEADER_SIZE + 0x20) - 1;
+        d[PAGE_HEADER_SIZE + 0x20..PAGE_HEADER_SIZE + 0x28].copy_from_slice(&rows.to_le_bytes());
+        Ok(())
+    }
+
+    /// Marks a page and those above it changed.
+    fn mark(&mut self, page: usize) {
+        let mut i = Some(page);
+        while let Some(j) = i {
+            self.pages[j].dirty = true;
+            i = self.pages[j].parent.map(|p| p.0);
+        }
     }
 
     /// Writes the changed pages and the new checkpoint.
@@ -568,18 +660,7 @@ impl<D: WriteAt> Volume<D> {
     pub fn create_file(&mut self, path: &str, data: &[u8], now: u64) -> Result<()> {
         let trimmed = path.trim_end_matches('/');
         let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
-        if name.is_empty()
-            || name.len() > 255
-            || name == "."
-            || name == ".."
-            || !name
-                .bytes()
-                .all(|b| (0x20..0x7f).contains(&b) && !b"\\/:*?\"<>|".contains(&b))
-        {
-            return Err(Error::Unsupported(format!(
-                "{name:?}: names of printable ASCII only, for now"
-            )));
-        }
+        check_name(name)?;
         if data.len() > 1024 {
             return Err(Error::Unsupported("files of more than 1 KiB (data in extents)".into()));
         }
@@ -607,24 +688,13 @@ impl<D: WriteAt> Volume<D> {
             let record = resident_record(data, now, next_id, common);
             let utf16: Vec<u8> = name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
             // The file id row.
-            let mut key = vec![0u8; 24];
-            key[0..4].copy_from_slice(&[0x20, 0, 0, 0x80]);
-            key[8..16].copy_from_slice(&next_id.to_le_bytes());
-            let mut value = vec![0u8; 12];
-            value[8..10].copy_from_slice(&12u16.to_le_bytes());
-            value[10..12].copy_from_slice(&(utf16.len() as u16).to_le_bytes());
-            value.extend(&utf16);
+            let (key, value) = file_id_row(next_id, &utf16);
             tx.insert(root, &row(&key, &value, 0), &|k| directory_key_order(&key, k).is_lt())?;
             // The name row with the record.
             let mut key = vec![ROW_NAME as u8, 0, 1, 0];
             key.extend(&utf16);
             tx.insert(root, &row(&key, &record, 1), &|k| directory_key_order(&key, k).is_lt())?;
-            // The directory's own times.
-            let own = tx.find(Tree::Object(dir), &|k| k.len() >= 2 && le16(k, 0) == ROW_OWN)?;
-            let v = tx.value_mut(own);
-            for at in [0x30, 0x38, 0x40] {
-                v[at..at + 8].copy_from_slice(&now.to_le_bytes());
-            }
+            self.touch_directory(&mut tx, parent, dir, now)?;
             tx.commit()?;
         }
         self.load()
@@ -655,6 +725,113 @@ impl<D: WriteAt> Volume<D> {
             }
         }
         Err(Error::Unsupported("no file to share a security descriptor with".into()))
+    }
+
+    /// Deletes a file whose record is in its directory entry and whose
+    /// data is inline (or none): its name row and file id row.
+    pub fn delete_file(&mut self, path: &str, now: u64) -> Result<()> {
+        let (parent, name, dir, record) = self.embedded_file(path)?;
+        let id = le64(&record, 0x80);
+        {
+            let mut tx = Transaction::new(&*self);
+            let root = tx.single_page(dir)?;
+            tx.remove(root, &|k| is_name_row(k, &name))?;
+            tx.remove(root, &|k| {
+                k.len() >= 16 && le16(k, 0) == ROW_FILE_ID && le64(k, 8) == id
+            })?;
+            self.touch_directory(&mut tx, &parent, dir, now)?;
+            tx.commit()?;
+        }
+        self.load()
+    }
+
+    /// Renames a file whose record is in its directory entry and whose
+    /// data is inline (or none), within its directory.
+    pub fn rename(&mut self, path: &str, new_name: &str, now: u64) -> Result<()> {
+        let (parent, name, dir, mut record) = self.embedded_file(path)?;
+        check_name(new_name)?;
+        let target = format!("{}/{new_name}", parent.trim_end_matches('/'));
+        match self.lookup(&target) {
+            Err(Error::NotFound(_)) => {}
+            Ok(_) => return Err(Error::Unsupported(format!("{target} exists"))),
+            Err(e) => return Err(e),
+        }
+        let id = le64(&record, 0x80);
+        record[0x38..0x40].copy_from_slice(&now.to_le_bytes());
+        let utf16: Vec<u8> = new_name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        {
+            let mut tx = Transaction::new(&*self);
+            let root = tx.single_page(dir)?;
+            tx.remove(root, &|k| is_name_row(k, &name))?;
+            tx.remove(root, &|k| {
+                k.len() >= 16 && le16(k, 0) == ROW_FILE_ID && le64(k, 8) == id
+            })?;
+            let (key, value) = file_id_row(id, &utf16);
+            tx.insert(root, &row(&key, &value, 0), &|k| directory_key_order(&key, k).is_lt())?;
+            let mut key = vec![ROW_NAME as u8, 0, 1, 0];
+            key.extend(&utf16);
+            tx.insert(root, &row(&key, &record, 1), &|k| directory_key_order(&key, k).is_lt())?;
+            self.touch_directory(&mut tx, &parent, dir, now)?;
+            tx.commit()?;
+        }
+        self.load()
+    }
+
+    /// For a file whose record is in its directory entry and whose data is
+    /// inline or none: its directory's path, its name, the directory's
+    /// object id and the record.
+    fn embedded_file(&self, path: &str) -> Result<(String, String, u64, Vec<u8>)> {
+        let trimmed = path.trim_end_matches('/');
+        let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
+        let entry = self.lookup(trimmed)?;
+        let Target::Embedded(record) = &entry.target else {
+            return Err(Error::Unsupported(format!(
+                "{path}: only files whose record is in their directory entry"
+            )));
+        };
+        let file = self.open_file(&entry)?;
+        let extents = file
+            .data
+            .iter()
+            .chain(file.streams.iter().chain(&file.snapshots).map(|(_, s)| s))
+            .any(|s| matches!(s.content, crate::file::Content::Extents(_)));
+        if extents || file.reparse.is_some() {
+            return Err(Error::Unsupported(format!(
+                "{path}: only files whose data is in their record (no links)"
+            )));
+        }
+        Ok((
+            parent.to_owned(),
+            name.to_owned(),
+            self.directory_of(parent)?,
+            record.clone(),
+        ))
+    }
+
+    /// New times for a directory written to: in its own row and in its
+    /// entry in its parent (which Windows updates later).
+    fn touch_directory(&self, tx: &mut Transaction<'_, D>, path: &str, dir: u64, now: u64) -> Result<()> {
+        let own = tx.find(Tree::Object(dir), &|k| k.len() >= 2 && le16(k, 0) == ROW_OWN)?;
+        let v = tx.value_mut(own);
+        for at in [0x30, 0x38, 0x40] {
+            v[at..at + 8].copy_from_slice(&now.to_le_bytes());
+        }
+        let trimmed = path.trim_end_matches('/');
+        if dir != ROOT_DIRECTORY
+            && let Some((grand, name)) = trimmed.rsplit_once('/')
+        {
+            let parent = self.directory_of(grand)?;
+            let at = tx.find(Tree::Object(parent), &|k| {
+                k.len() > 4 && le16(k, 0) == ROW_NAME && le16(k, 2) == 2 && utf16(&k[4..]) == name
+            })?;
+            let v = tx.value_mut(at);
+            if v.len() >= 0x30 {
+                for at in [0x18, 0x20, 0x28] {
+                    v[at..at + 8].copy_from_slice(&now.to_le_bytes());
+                }
+            }
+        }
+        Ok(())
     }
 
     fn directory_of(&self, parent: &str) -> Result<u64> {
@@ -716,6 +893,8 @@ fn inline_data(record: &[u8]) -> Option<usize> {
 }
 
 const ROW_OWN: u16 = 0x10;
+/// The row flag of removed rows (they stay in the row area).
+const ROW_DELETED: u16 = 4;
 const ROW_FILE_ID: u16 = 0x20;
 const ROW_NAME: u16 = 0x30;
 
@@ -823,4 +1002,39 @@ fn upcased(name: &[u8]) -> Vec<u16> {
             }
         })
         .collect()
+}
+
+/// Names `refs` creates for now: printable ASCII, no characters Windows
+/// forbids.
+fn check_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.len() > 255
+        || name == "."
+        || name == ".."
+        || !name
+            .bytes()
+            .all(|b| (0x20..0x7f).contains(&b) && !b"\\/:*?\"<>|".contains(&b))
+    {
+        return Err(Error::Unsupported(format!(
+            "{name:?}: names of printable ASCII only, for now"
+        )));
+    }
+    Ok(())
+}
+
+fn is_name_row(key: &[u8], name: &str) -> bool {
+    key.len() > 4 && le16(key, 0) == ROW_NAME && le16(key, 2) == 1 && utf16(&key[4..]) == name
+}
+
+/// The row mapping a file id to its name: key 0x20, 0x8000, the id;
+/// value: the name's offset (0x0c) and length, the name.
+fn file_id_row(id: u64, utf16: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut key = vec![0u8; 24];
+    key[0..4].copy_from_slice(&[0x20, 0, 0, 0x80]);
+    key[8..16].copy_from_slice(&id.to_le_bytes());
+    let mut value = vec![0u8; 12];
+    value[8..10].copy_from_slice(&12u16.to_le_bytes());
+    value[10..12].copy_from_slice(&(utf16.len() as u16).to_le_bytes());
+    value.extend(utf16);
+    (key, value)
 }

@@ -151,6 +151,34 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Delete a file (experimental: writes the volume, only with --yes;
+    /// files whose data is in their record).
+    Delete {
+        /// The image, disk or partition.
+        device: PathBuf,
+        #[arg(long)]
+        offset: Option<u64>,
+        #[arg(long)]
+        path: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Rename a file within its directory (experimental: writes the
+    /// volume, only with --yes; files whose data is in their record, a
+    /// printable ASCII name).
+    Rename {
+        /// The image, disk or partition.
+        device: PathBuf,
+        #[arg(long)]
+        offset: Option<u64>,
+        #[arg(long)]
+        path: String,
+        /// The new name (in the same directory).
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Every cluster the volume uses, by physical cluster: superblocks,
     /// checkpoints, the pages of each tree, the data runs of each file
     /// (for format work: what changed between two images).
@@ -365,6 +393,21 @@ fn tree_pages<D: ReadAt>(
         }
     }
     Ok(())
+}
+
+/// A volume on a device opened for writing when `write` (read-only
+/// otherwise, for a dry run).
+fn open_writable(device: &std::path::Path, offset: Option<u64>, write: bool) -> Result<Volume<File>> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(write)
+        .open(device)
+        .with_context(|| format!("cannot open {}", device.display()))?;
+    let offset = match offset {
+        Some(o) => o,
+        None => *find_volumes(&file)?.first().context("no ReFS volume on the device")?,
+    };
+    Ok(Volume::open(file, offset)?)
 }
 
 /// The time now as FILETIME.
@@ -831,6 +874,37 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             vol.create_file(&path, &bytes, now())?;
+            writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
+        }
+        Command::Delete {
+            device,
+            offset,
+            path,
+            yes,
+        } => {
+            let mut vol = open_writable(&device, offset, yes)?;
+            writeln!(out, "{path}: delete")?;
+            if !yes {
+                writeln!(out, "nothing written (--yes writes)")?;
+                return Ok(());
+            }
+            vol.delete_file(&path, now())?;
+            writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
+        }
+        Command::Rename {
+            device,
+            offset,
+            path,
+            to,
+            yes,
+        } => {
+            let mut vol = open_writable(&device, offset, yes)?;
+            writeln!(out, "{path}: rename to {to}")?;
+            if !yes {
+                writeln!(out, "nothing written (--yes writes)")?;
+                return Ok(());
+            }
+            vol.rename(&path, &to, now())?;
             writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
         }
         Command::Tree { source, root, object } => {
