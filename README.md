@@ -15,9 +15,11 @@ against pools created by Windows.
 
 > **Status: pools created by Windows 11; reading; writing to simple, mirror
 > and single parity spaces, fixed and thin (`attach --rw`); pool management
-> (`spaces pool|space|disk`); reading ReFS 3.x volumes (`refs`, new).**
+> (`spaces pool|space|disk`); reading and (experimentally) writing ReFS 3.x
+> volumes (`refs`, new).**
 > The pool disks are written only for spaces attached read-write and by
-> management commands given `--yes`; `refs` writes only with its writing commands and `--yes`.
+> management commands given `--yes`; `refs` writes only with its writing
+> commands and `--yes`, or mounted with `--rw`, and never into a pool.
 
 ## What works
 
@@ -44,8 +46,9 @@ against pools created by Windows.
 | Creating tiered spaces (SSD mirror over HDD simple or parity) | `spaces tier`, `spaces space create --tier` |
 | Creating dual parity spaces; writing tiered spaces | not yet |
 | ReFS 3.x volumes (Dev Drives, data volumes, inside a space): files, sparse, block-cloned and deduplicated files, named streams, stream snapshots, links, attributes; integrity streams checked on every read | `refs` reads and mounts read-only (FUSE); verified on ReFS 3.14 |
-| Writing ReFS: times and attributes, overwriting and rewriting files, creating, renaming, moving, linking and deleting files, creating directories | `refs set|overwrite|write|create|rename|move|link|delete|mkdir --yes` (experimental); Windows takes the result as healthy |
-| ReFS compression, encryption; ReFS 1.x/2.x; other ReFS writes | not yet |
+| Writing ReFS: files (up to 64 MiB each), directories, renames and moves, hard links, times and attributes, named streams, integrity streams, deleting block-cloned files and files with snapshots; a read-write FUSE mount; `mount -t ReFS` and udisks2 through `mount.ReFS` | `refs set|overwrite|write|create|rename|move|link|delete|mkdir --yes`, `refs mount --rw` (experimental); Windows takes the result as healthy (refsutil leak and triage) |
+| Checking ReFS | `refs check` (pages, allocators, shared clusters) |
+| ReFS compression, encryption; ReFS 1.x/2.x and 3.4-3.13 (no Windows at hand makes them); cloning files, stream snapshots by `refs` | not yet |
 
 ## Quick start
 
@@ -149,7 +152,7 @@ refs ls --space Data /dev/sdd /dev/sde --path /
 |---|---|
 | `crates/storage-spaces` | library: metadata parsing, space layouts, reader, writer and management planners |
 | `crates/spaces-cli` | the `spaces` command and its block device backends |
-| `crates/refs` | library: reading ReFS 3.x volumes |
+| `crates/refs` | library: reading, writing and checking ReFS 3.x volumes |
 | `crates/refs-cli` | the `refs` command and its FUSE driver |
 | `docs/` | format description, user guide, project plan, prior art |
 | `tools/` | test pool generators for the Windows VM, corpus and VM test scripts |
@@ -166,9 +169,11 @@ refs ls --space Data /dev/sdd /dev/sde --path /
 3. **Pool management**: creating, extending and repairing pools and spaces
    (done, except creating dual parity spaces).
 
-ReFS is a separate track: reading ReFS 3.x and mounting it read-only (done
-for ReFS 3.14, with snapshots and deduplicated files), then compression,
-older versions and writing.
+ReFS is a separate track: reading ReFS 3.x and mounting it (done for ReFS
+3.14, with snapshots and deduplicated files), writing (done for the
+operations above, each checked on Windows), then compression and older
+versions, which need Windows Server 2025 and older Windows to make
+samples.
 Details in [docs/plan.md](docs/plan.md).
 
 ## License
