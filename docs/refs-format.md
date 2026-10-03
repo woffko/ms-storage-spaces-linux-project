@@ -483,7 +483,7 @@ table's rows for a text diff):
   to a new place with its own record, the old one is freed. `refs`
   writes the same records and checksums (**verified**: Windows read the
   data, checking it, and went on writing); it copies a whole stream of
-  up to 8 MiB on an overwrite. On volumes of 64 KiB clusters the
+  up to 64 MiB on an overwrite. On volumes of 64 KiB clusters the
   checksums are CRC-64 per 16 KiB (kind 2, four per cluster), and
   `refs` writes them so (**verified**: Windows read 6 MB written so). A larger
   map (6 MB of integrity stream: three records of up to 768 clusters'
@@ -502,6 +502,23 @@ table's rows for a text diff):
   (**verified**: no leak after deleting Windows' 6 MB file). `refs` puts
   maps of more than 2 KiB in such a page (**verified**: Windows read 6
   and 8 MB integrity streams written so and wrote into them).
+* Maps of several pages (Windows' 64 MB integrity stream: 27 records in
+  7 pages, 3 to 5 records each): the value's index node (level 1, flags
+  0xf) has a row per page keyed (last cluster in the stream the page
+  maps, 1), the last one keyless with row flag 2, and key deltas against
+  the first key less 1 (base 0x6fe: 0x0001, 0x0701, 0x0e01, ...); 0x18
+  of the value counts the pages, 0x20 the records. Each page is a leaf
+  (flags 0x0c) with key deltas against its first cluster in the stream
+  less 1 (the first page: base 0), records in order. `refs` fills pages
+  with whole records in order (about 580 records, 580 MiB of data, on 4
+  KiB clusters; 15 MiB of integrity stream), a page whose records span
+  0xffff clusters or more without deltas (flags 0x04), the index without
+  them (flags 7) when its keys span that much; the index must fit the
+  2 KiB a record keeps for it (about 22 pages). **Verified**: Windows read
+  a 1.2 GB file (3 pages, the index without deltas) and a 64 MB
+  integrity stream (5 pages) written so, appended to both (records added
+  to the last page, with deltas against base 0x472ff, the rest kept), and
+  `refs` read its result.
 * Creating a file (step `create`) adds two rows to its directory: the
   name row (type 0x30) with the embedded record, and a row of type 0x20
   (key: 0x20, flags 0x8000, the file id as u64 at 8; value: the name's
@@ -536,6 +553,22 @@ table's rows for a text diff):
   attached it as healthy, `refsutil leak` found exactly the leaks it finds
   on the untouched volume, `refsutil triage /g` passed, and Windows
   committed its own transactions on top (`tools/vm/Test-RefsVolume.ps1`).
+* **Pages awaiting free.** Windows keeps some pages its last commit
+  replaced allocated, because the older checkpoint still references
+  them, and frees them with its next checkpoint, which takes the older
+  one's slot: after Windows wrote and detached a volume, the old pages
+  of the object tables (roots 0 and 5; 0x3400 and 0x3604, one page
+  each) were allocated in the medium allocator, referenced only by the
+  older checkpoint (the pages it replaced in the allocator tables were
+  free already). A commit by `refs` takes that slot too, so it frees
+  them first (Volume::deferred_pages: the pages of the tables whose root
+  differs between the two checkpoints that only the older one references,
+  still allocated, still matching the older checkpoint's checksums);
+  without that they leak: `refsutil leak` counted 8 more leaked clusters
+  after `refs` wrote such a volume, none once it freed them. The
+  4 clusters `refsutil leak` reports on every untouched volume of the
+  corpus are of that kind but referenced by neither checkpoint. `refs
+  check` counts the pages awaiting free.
 
 ## The log (MLog)
 

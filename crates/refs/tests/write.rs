@@ -340,6 +340,28 @@ fn setting_times_and_attributes_commits_copy_on_write() {
     }
 }
 
+/// The pages a file's extent map takes (0 when it is in the record),
+/// and its index node's flags there.
+fn map_pages<D: ReadAt>(vol: &Volume<D>, path: &str) -> (u32, u8) {
+    let record = vol.record(&vol.lookup(path).unwrap()).unwrap();
+    let node = Node::at(&record, 0).unwrap();
+    for row in node.rows() {
+        let row = row.unwrap();
+        let k = row.key;
+        if k.len() >= 0x18
+            && u32::from_le_bytes(k[8..12].try_into().unwrap()) == 0x8000_0002
+            && u64::from_le_bytes(k[0x10..0x18].try_into().unwrap()) >= 0x1000
+        {
+            let v = row.value;
+            if v[0x88 + 0x0c] == 0 {
+                return (0, v[0x88 + 0x0d]);
+            }
+            return (u32::from_le_bytes(v[0x18..0x1c].try_into().unwrap()), v[0x88 + 0x0d]);
+        }
+    }
+    panic!("{path}: no live level");
+}
+
 fn read_all<D: ReadAt>(vol: &Volume<D>, path: &str) -> Vec<u8> {
     let data = vol.open_file(&vol.lookup(path).unwrap()).unwrap().data.unwrap();
     let mut buf = vec![0u8; data.size as usize];
@@ -1177,7 +1199,7 @@ fn writing_integrity_streams() {
     assert!(checksummed(&vol, "/i.bin"));
     for err in [
         vol.set_integrity("/i.bin", false).unwrap_err(),
-        vol.write_file("/i.bin", &vec![0; 9 << 20], now).unwrap_err(),
+        vol.write_file("/i.bin", &vec![0; 257 << 20], now).unwrap_err(),
     ] {
         assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
     }
@@ -1193,8 +1215,17 @@ fn writing_integrity_streams() {
     assert_eq!(read_all(&vol, "/large.bin"), large);
     assert_allocated(&vol, &skip, "integrity map page");
     assert_pages_valid(&vol, &skip, "integrity map page");
+    // Larger: pages of extent map (15 MiB of data each), the value's index
+    // keyed (last cluster, 1).
+    let larger: Vec<u8> = (0..40_000_000u32).map(|i| (i % 239) as u8).collect();
+    vol.write_file("/large.bin", &larger, now).unwrap();
+    assert_eq!(map_pages(&vol, "/large.bin"), (3, 0x0f));
+    assert!(checksummed(&vol, "/large.bin"));
+    assert_eq!(read_all(&vol, "/large.bin"), larger);
+    assert_allocated(&vol, &skip, "integrity map pages");
+    assert_pages_valid(&vol, &skip, "integrity map pages");
     vol.write_file("/large.bin", b"", now).unwrap();
-    assert_eq!(used(&vol, 1).len(), pages_before, "data and map page freed");
+    assert_eq!(used(&vol, 1).len(), pages_before, "data and map pages freed");
     let fresh = Volume::open(&overlay, offset).unwrap();
     assert_eq!(read_all(&fresh, "/i.bin"), data);
     assert_allocated(&vol, &skip, "integrity");
@@ -1584,6 +1615,40 @@ fn writing_an_empty_volume() {
     );
     assert_allocated(&vol, &skip, "empty volume written");
     assert_pages_valid(&vol, &skip, "empty volume written");
+}
+
+#[test]
+fn freeing_the_pages_windows_left_for_its_next_checkpoint() {
+    // Windows keeps the pages a checkpoint replaced allocated until it
+    // writes the next one (the older checkpoint still references them):
+    // here the object tables' pages from before its last commit. The
+    // first commit by `refs` takes the older checkpoint's place and frees
+    // them, as Windows' next one would; left allocated, they would leak.
+    let (image, manifest, skip) = load("r314deferred");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 135_200_000_000_000_000;
+    let deferred = vol.deferred_pages().unwrap();
+    assert_eq!(deferred.len(), 2, "{deferred:x?}");
+    let before = used(&vol, 1);
+    for (allocator, lcns) in &deferred {
+        assert_eq!(*allocator, 1);
+        assert!(lcns.iter().all(|c| before.contains(c)), "{lcns:x?}");
+    }
+    vol.create_file("/new.txt", b"new", now).unwrap();
+    let after = used(&vol, 1);
+    for (_, lcns) in &deferred {
+        assert!(lcns.iter().all(|c| !after.contains(c)), "{lcns:x?} still used");
+    }
+    assert!(vol.deferred_pages().unwrap().is_empty());
+    assert_pages_valid(&vol, &skip, "deferred pages freed");
+    // Once only: the older checkpoint is now Windows' last one, whose
+    // replaced pages `refs` freed at once.
+    vol.create_file("/new2.txt", b"new2", now).unwrap();
+    assert_eq!(read_all(&vol, "/new.txt"), b"new");
+    assert_eq!(read_all(&vol, "/win50.bin").len(), 50_000_000);
+    assert_pages_valid(&vol, &skip, "written twice");
 }
 
 #[test]

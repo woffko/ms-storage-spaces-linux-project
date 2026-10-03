@@ -61,6 +61,9 @@ pub struct Volume<D> {
     /// The log's state, read once (commits by `refs` leave the log alone).
     log: std::sync::OnceLock<LogState>,
     objects: BTreeMap<u64, PageRef>,
+    /// The clock of the first checkpoint `refs` wrote through this value
+    /// (0: none yet).
+    pub(crate) own_since: std::sync::atomic::AtomicU64,
 }
 
 /// Verifies a superblock's or checkpoint's own checksum: the descriptor
@@ -119,6 +122,7 @@ impl<D: ReadAt> Volume<D> {
             objects: BTreeMap::new(),
             checkpoint_lcns: Vec::new(),
             log: std::sync::OnceLock::new(),
+            own_since: std::sync::atomic::AtomicU64::new(0),
         };
         vol.load()?;
         Ok(vol)
@@ -177,6 +181,135 @@ impl<D: ReadAt> Volume<D> {
         self.checkpoint = Self::parse_checkpoint(lcn, clock, &chkp)?;
         self.load_containers()?;
         self.load_objects()
+    }
+
+    /// The other checkpoint the superblock lists, when it is valid and
+    /// older than the current one.
+    pub(crate) fn older_checkpoint(&self) -> Option<Checkpoint> {
+        let lcn = *self.checkpoint_lcns.iter().find(|&&l| l != self.checkpoint.lcn)?;
+        let page = self.read_physical(lcn, self.page_size / self.cluster).ok()?;
+        let ok = page.get(0..4) == Some(b"CHKP")
+            && self_checksum_ok(
+                &page,
+                le32(&page, 0x58) as usize,
+                le32(&page, 0x5c) as usize,
+                self.cluster as usize,
+            );
+        let clock = le64(&page, 0x60);
+        if !ok || clock >= self.checkpoint.clock {
+            return None;
+        }
+        Self::parse_checkpoint(lcn, clock, &page).ok()
+    }
+
+    /// The pages of the tree below `r` (their references), but those
+    /// whose first cluster `skip` holds and the pages below them; with
+    /// `lenient`, also those that fail to read (overwritten since).
+    pub(crate) fn tree_pages(
+        &self,
+        r: &PageRef,
+        physical: bool,
+        skip: &std::collections::HashSet<u64>,
+        lenient: bool,
+        out: &mut Vec<PageRef>,
+    ) -> Result<()> {
+        let mut todo = vec![(r.clone(), 0)];
+        while let Some((r, depth)) = todo.pop() {
+            if depth > MAX_DEPTH {
+                return Err(format_err!("B+-tree deeper than {MAX_DEPTH} levels"));
+            }
+            if skip.contains(&r.lcns[0]) {
+                continue;
+            }
+            let page = match self.read_page(&r, physical) {
+                Ok(p) => p,
+                Err(_) if lenient => continue,
+                Err(e) => return Err(e),
+            };
+            let node = Node::at(&page, PAGE_HEADER_SIZE)?;
+            if !node.is_leaf() {
+                for row in node.rows() {
+                    todo.push((PageRef::parse(row?.value)?, depth + 1));
+                }
+            }
+            out.push(r);
+        }
+        Ok(())
+    }
+
+    /// The pages only the older checkpoint references that are still
+    /// allocated, as Windows leaves them: it keeps pages a checkpoint
+    /// replaced (those of the object tables, at least) allocated until it
+    /// writes the next checkpoint (the older one still needs them), and
+    /// frees them then. By allocator (1 medium, 2 container, 12 small),
+    /// their physical clusters; only pages whose content still matches
+    /// the older checkpoint's checksums. Tables both checkpoints reference
+    /// alike are not walked.
+    pub fn deferred_pages(&self) -> Result<Vec<(usize, Vec<u64>)>> {
+        use std::collections::HashSet;
+        let Some(old) = self.older_checkpoint() else {
+            return Ok(Vec::new());
+        };
+        let per_page = (self.page_size / self.cluster) as usize;
+        let allocator = |root: Option<usize>| match root {
+            Some(7 | 8 | 12) => 12,
+            Some(1 | 2 | 6 | 11) => 2,
+            _ => 1,
+        };
+        // (table, older root, current root)
+        let mut tables: Vec<(Option<usize>, PageRef, Option<PageRef>)> = Vec::new();
+        for (i, r) in old.roots.iter().enumerate() {
+            let current = self.checkpoint.roots.get(i).cloned();
+            if current.as_ref().is_some_and(|c| c.lcns == r.lcns) {
+                continue;
+            }
+            tables.push((Some(i), r.clone(), current));
+        }
+        let reference_size = old.reference_size;
+        // An older object table overwritten since: nothing to free.
+        let objects = self.walk(&old.roots[ROOT_OBJECTS], false, &mut |row| {
+            if row.key.len() < 16 {
+                return Err(format_err!("object table key of {} bytes", row.key.len()));
+            }
+            let reference = row
+                .value
+                .get(0x20..0x20 + reference_size)
+                .ok_or_else(|| format_err!("object table row of {} bytes", row.value.len()))?;
+            let r = PageRef::parse(reference)?;
+            let current = self.objects.get(&le64(row.key, 8)).cloned();
+            if current.as_ref().is_none_or(|c| c.lcns != r.lcns) {
+                tables.push((None, r, current));
+            }
+            Ok(())
+        });
+        if objects.is_err() {
+            return Ok(Vec::new());
+        }
+        let mut allocators = BTreeMap::new();
+        for a in [1, 2, 12] {
+            allocators.insert(a, crate::check::Allocator::read(self, a)?);
+        }
+        let mut out = Vec::new();
+        for (root, old_root, current) in tables {
+            let physical = matches!(root, Some(7 | 8 | 12));
+            let mut now = Vec::new();
+            if let Some(c) = &current {
+                self.tree_pages(c, physical, &HashSet::new(), false, &mut now)?;
+            }
+            let now: HashSet<u64> = now.iter().map(|r| r.lcns[0]).collect();
+            let mut then = Vec::new();
+            self.tree_pages(&old_root, physical, &now, true, &mut then)?;
+            for r in then {
+                let lcns = r.lcns[..per_page]
+                    .iter()
+                    .map(|&l| if physical { Ok(l) } else { self.translate(l) })
+                    .collect::<Result<Vec<_>>>()?;
+                if lcns.iter().all(|&c| allocators[&allocator(root)].used(c)) {
+                    out.push((allocator(root), lcns));
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn parse_checkpoint(lcn: u64, clock: u64, page: &[u8]) -> Result<Checkpoint> {

@@ -144,8 +144,7 @@ enum Command {
         yes: bool,
     },
     /// Create a file holding the content of a local file (experimental:
-    /// writes the volume, only with --yes; up to one page of extent map,
-    /// about 500 MiB on 4 KiB clusters; a printable ASCII
+    /// writes the volume, only with --yes; up to 4 GiB; a printable ASCII
     /// name).
     Create {
         /// The image, disk or partition.
@@ -204,8 +203,8 @@ enum Command {
     },
     /// Replace a file's content (or a named stream's) with a local file's,
     /// or append it (experimental: writes the volume, only with --yes; up
-    /// to one page of extent map, 8 MiB for integrity streams; not files
-    /// with snapshots).
+    /// to 4 GiB, 256 MiB for integrity streams; not files with
+    /// snapshots).
     Write {
         /// The image, disk or partition.
         device: PathBuf,
@@ -778,8 +777,11 @@ fn fixture(dir: &std::path::Path, out: &std::path::Path, data_limit: u64, exclud
                 tree_pages(&vol, &vol.object(oid)?.clone(), false, "", 0, &mut std::io::sink())?;
             }
         }
-        // The log's control and record pages (writing checks the log).
+        // The log's control and record pages (writing checks the log),
+        // and the pages only the older checkpoint references (writing
+        // frees them).
         vol.log_state()?;
+        vol.deferred_pages()?;
         excluded = excluded_objects;
     }
     let mut image = SparseImage::new(dev.size()?);
@@ -1152,6 +1154,8 @@ fn main() -> Result<()> {
         } => {
             if stream.is_none() {
                 let mut vol = open_writable(&device, offset, yes)?;
+                // Appending changes the file in place from its old end.
+                let mut old_size = None;
                 let source = if append {
                     // The old content, then the new, in a temporary file.
                     let e = vol.lookup(&path)?;
@@ -1170,6 +1174,7 @@ fn main() -> Result<()> {
                         }
                         at = s.size;
                     }
+                    old_size = Some(at);
                     let mut new =
                         std::fs::File::open(&from).with_context(|| format!("cannot read {}", from.display()))?;
                     let mut buf = vec![0u8; 1 << 20];
@@ -1190,7 +1195,13 @@ fn main() -> Result<()> {
                     writeln!(out, "nothing written (--yes writes)")?;
                     return Ok(());
                 }
-                vol.write_file_from(&path, &source, now())?;
+                match old_size {
+                    Some(old) => {
+                        let len = refs::write::Source::len(&source);
+                        vol.update_file(&path, &source, &[(old, len)], now())?
+                    }
+                    None => vol.write_file_from(&path, &source, now())?,
+                }
                 writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
                 return Ok(());
             }
@@ -1291,6 +1302,14 @@ fn main() -> Result<()> {
                 "{} pages, {} directories, {} files, {} data clusters",
                 report.pages, report.directories, report.files, report.data_clusters
             )?;
+            if report.deferred_clusters > 0 {
+                writeln!(
+                    out,
+                    "{} clusters of pages only the older checkpoint references, still allocated \
+                     (Windows frees them with its next checkpoint, refs with its next write)",
+                    report.deferred_clusters
+                )?;
+            }
             for p in &report.problems {
                 writeln!(out, "problem: {p}")?;
             }

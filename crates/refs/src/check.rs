@@ -11,6 +11,8 @@
 //!   streams, snapshots, and extent maps kept in pages) are used in the
 //!   medium allocator, and clusters several files map are counted as
 //!   shared in the block reference count table.
+//! * The pages only the older checkpoint references and that are still
+//!   allocated are counted (Windows frees them with its next checkpoint).
 
 use std::collections::BTreeMap;
 
@@ -32,6 +34,11 @@ pub struct Report {
     pub directories: u64,
     pub files: u64,
     pub data_clusters: u64,
+    /// Clusters of pages only the older checkpoint references, still
+    /// allocated (not a problem: Windows frees them with its next
+    /// checkpoint, `refs` with its next commit; `refsutil leak` counts
+    /// them as leaked meanwhile).
+    pub deferred_clusters: u64,
     pub problems: Vec<String>,
     /// All problems, also those beyond the listed ones.
     pub problem_count: u64,
@@ -54,12 +61,14 @@ enum Bits {
 }
 
 /// An allocator's rows: start, count, clusters.
-struct Allocator(Vec<(u64, u64, Bits)>);
+pub(crate) struct Allocator(Vec<(u64, u64, Bits)>);
 
 impl Allocator {
-    fn read<D: ReadAt>(vol: &Volume<D>, root: usize) -> Result<Self> {
+    /// Allocator `root`'s rows (the small allocator, 12, is kept at
+    /// physical clusters).
+    pub(crate) fn read<D: ReadAt>(vol: &Volume<D>, root: usize) -> Result<Self> {
         let mut rows = Vec::new();
-        vol.walk(&vol.checkpoint.roots[root].clone(), false, &mut |row| {
+        vol.walk(&vol.checkpoint.roots[root].clone(), root == 12, &mut |row| {
             let v = row.value;
             if v.len() >= 0x18 {
                 let (start, count) = (le64(v, 0), le64(v, 8));
@@ -78,7 +87,7 @@ impl Allocator {
     }
 
     /// Whether cluster `c` is used.
-    fn used(&self, c: u64) -> bool {
+    pub(crate) fn used(&self, c: u64) -> bool {
         let i = self.0.partition_point(|r| r.0 <= c);
         let Some((start, count, bits)) = i.checked_sub(1).map(|i| &self.0[i]) else {
             return false;
@@ -176,6 +185,10 @@ impl<D: ReadAt> Volume<D> {
     /// look into (fixtures that leave some out).
     pub fn check(&self, skip: &[u64]) -> Result<Report> {
         let mut report = Report::default();
+        match self.deferred_pages() {
+            Ok(d) => report.deferred_clusters = d.iter().map(|(_, l)| l.len() as u64).sum(),
+            Err(e) => report.problem(format!("the older checkpoint's pages: {e}")),
+        }
         let medium = Allocator::read(self, 1)?;
         let container = Allocator::read(self, 2)?;
         let per_page = (self.page_size / self.cluster) as usize;

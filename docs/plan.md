@@ -758,7 +758,10 @@ rows of thin spaces not allocated yet (M7).
   the untouched volume, and Windows deleted and copied trees there.
   Files are written from a source piece by piece (`write_file_from`,
   `create_file_from`; the mount keeps open files in temporary files), up
-  to one page of extent map (about 500 MiB on 4 KiB clusters). Found on
+  to 4 GiB (integrity streams 256 MiB), their extent maps in as many
+  pages as the record's index names (keys (last cluster, 1), key deltas;
+  Windows read a 1.2 GB file and a 64 MB integrity stream written so and
+  appended to both). Found on
   the way: an extent map with a record past cluster 0xffff must leave
   node flag 8 out and put 0xffff in its key index entries (Windows drops
   the file otherwise), and data must not go into containers Windows has
@@ -770,8 +773,7 @@ rows of thin spaces not allocated yet (M7).
   split as Windows indexes them (keys (last cluster, 1)); nodes with
   flag 8 carry key deltas against a base in their header, which Windows
   checks, and the writer keeps them (Windows read a three-leaf allocator
-  made so, wrote on and merged it back). Not done: extent maps of more
-  than one page.
+  made so, wrote on and merged it back).
   Volume::update_file changes a file's data in place as Windows does
   (changed bytes where they are, new runs after the file's own, a tail
   freed); the mount writes files back that way, so appending to a large
@@ -780,7 +782,13 @@ rows of thin spaces not allocated yet (M7).
   `refs check` (Volume::check) checks a volume the way the write tests
   do: page checksums and structure, pages and file clusters used in
   their allocators, shared clusters counted; every corpus volume and
-  every image `refs` wrote during this work checks clean.
+  every image `refs` wrote during this work checks clean. Pages Windows
+  leaves allocated for its next checkpoint (the old object table pages
+  the older checkpoint still references) are freed by the next commit of
+  `refs`, which takes that checkpoint's slot; they leaked before (8
+  clusters more in `refsutil leak` after writing a volume Windows had
+  just written, none since). `refs write --append` changes the file in
+  place.
 
 ## Test infrastructure (continuous, feeds every stage)
 

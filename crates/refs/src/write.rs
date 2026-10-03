@@ -115,7 +115,54 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
                     .into(),
             ));
         }
-        Ok(Self::new(vol))
+        let mut tx = Self::new(vol);
+        tx.free_deferred()?;
+        Ok(tx)
+    }
+
+    /// Frees the pages only the older checkpoint references, as Windows
+    /// does when it writes the checkpoint that replaces that one (this
+    /// transaction's): left allocated, nothing would ever free them. The
+    /// older checkpoints `refs` wrote have none (it frees replaced pages
+    /// at once), and are not looked at.
+    fn free_deferred(&mut self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let own = self.vol.own_since.load(Ordering::Relaxed);
+        if own != 0 && self.vol.older_checkpoint().is_none_or(|c| c.clock >= own) {
+            return Ok(());
+        }
+        for (allocator, lcns) in self.vol.deferred_pages()? {
+            let mut used = true;
+            for &c in &lcns {
+                used &= self.is_used(allocator, c)?;
+            }
+            if used {
+                self.release(allocator, &lcns)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether an allocator marks cluster `c` used.
+    fn is_used(&mut self, allocator: usize, c: u64) -> Result<bool> {
+        let at = match self.find(Tree::Root(allocator), &|k| {
+            k.len() >= 16 && le64(k, 0) <= c && c < le64(k, 0).saturating_add(le64(k, 8))
+        }) {
+            Ok(at) => at,
+            Err(Error::NotFound(_)) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        let v = &self.pages[at.page].data[at.value..at.value + at.len];
+        if v.len() < ALLOCATOR_HEADER {
+            return Ok(false);
+        }
+        let j = c - le64(v, 0);
+        Ok(match le16(v, 0x12) {
+            ALLOCATOR_BITMAP => v
+                .get(ALLOCATOR_HEADER + (j / 8) as usize)
+                .is_some_and(|b| b >> (j % 8) & 1 != 0),
+            _ => le16(v, 0x10) == 0,
+        })
     }
 
     fn new(vol: &'v Volume<D>) -> Self {
@@ -1430,6 +1477,12 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         store_reference(&mut new[own..own + own_size], &[slot], &zeroed)?;
         vol.write_clusters(slot, &new)?;
         vol.dev.flush()?;
+        let _ = vol.own_since.compare_exchange(
+            0,
+            clock,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         Ok(())
     }
 }
@@ -1536,9 +1589,9 @@ impl<D: WriteAt> Volume<D> {
                 .checked_add(bytes.len() as u64)
                 .filter(|&e| e <= data.size)
                 .ok_or_else(|| Error::Unsupported(format!("{path}: writing beyond its {} bytes", data.size)))?;
-            if data.size > MAX_INTEGRITY as u64 {
+            if data.size > MAX_INTEGRITY_COPY {
                 return Err(Error::Unsupported(format!(
-                    "{path}: integrity streams of more than {MAX_INTEGRITY} bytes"
+                    "{path}: overwriting integrity streams of more than {MAX_INTEGRITY_COPY} bytes"
                 )));
             }
             let mut all = vec![0u8; data.size as usize];
@@ -1767,9 +1820,13 @@ impl<D: WriteAt> Volume<D> {
     }
 
     /// A live level's value for these extents: the map in the value, or,
-    /// when it is large, in a page of its own (written now, to clusters
-    /// free until the commit) that the value's index node names, as Windows
-    /// keeps large maps. The page belongs to table `table`.
+    /// when it is large, in pages of its own (written now, to clusters free
+    /// until the commit) that the value's index node names, as Windows
+    /// keeps large maps: each page a leaf of whole records in order (node
+    /// flags 0x0c, key deltas against its first cluster in the stream less
+    /// 1; 0x04 without when they do not fit), the index rows keyed (last
+    /// cluster in the stream the page maps, 1), the last one keyless. The
+    /// pages belong to table `table`.
     #[allow(clippy::type_complexity)]
     fn map_value(
         &self,
@@ -1784,66 +1841,135 @@ impl<D: WriteAt> Volume<D> {
             return Ok(inline);
         }
         let page_size = self.page_size as usize;
-        let root = tx.root(Tree::Object(table))?;
-        let mut page = vec![0u8; page_size];
-        page[..PAGE_HEADER_SIZE].copy_from_slice(&tx.pages[root].data[..PAGE_HEADER_SIZE]);
-        page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + 4].copy_from_slice(&8u32.to_le_bytes());
-        // The leaf: the extent records of the inline map's node.
-        let node = &inline[0x88..];
-        let n = extents.len();
-        let used = le32(node, 4) as usize - 0x28;
         let h = PAGE_HEADER_SIZE + 8;
         let area = page_size - h;
-        let index = area - 4 * n;
-        if 0x28 + used > index {
-            return Err(Error::Unsupported("an extent map of more than one page".into()));
+        // The records of the inline map's node, in order.
+        let node = &inline[0x88..];
+        let mut records = Vec::with_capacity(extents.len());
+        let mut at = 0x28;
+        for x in extents {
+            let slot = (24 + x.3.len()).next_multiple_of(8);
+            records.push(&node[at..at + slot]);
+            at += slot;
         }
+        // Pages: as many whole records as fit in each.
+        let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut first = 0;
+        let mut used = 0;
+        for (i, &r) in records.iter().enumerate() {
+            if 0x28 + used + r.len() + 4 * (i + 1 - first) > area {
+                if i == first {
+                    return Err(format_err!("an extent record larger than a page"));
+                }
+                groups.push(first..i);
+                first = i;
+                used = 0;
+            }
+            used += r.len();
+        }
+        groups.push(first..records.len());
+        let root = tx.root(Tree::Object(table))?;
+        let header = tx.pages[root].data[..PAGE_HEADER_SIZE].to_vec();
         let put = |d: &mut Vec<u8>, at: usize, v: u32| d[at..at + 4].copy_from_slice(&v.to_le_bytes());
-        put(&mut page, h, 0x28);
-        put(&mut page, h + 4, (0x28 + used) as u32);
-        put(&mut page, h + 8, (index - 0x28 - used) as u32);
-        // The value node's flags but the root's (2).
-        page[h + 0x0c..h + 0x10].copy_from_slice(&[0, node[0x0d] & !2, 0, 0]);
-        put(&mut page, h + 0x10, index as u32);
-        put(&mut page, h + 0x14, n as u32);
-        put(&mut page, h + 0x20, area as u32);
-        page[h + 0x28..h + 0x28 + used].copy_from_slice(&node[0x28..0x28 + used]);
-        let old_index = le32(node, 0x10) as usize;
-        page[h + index..h + index + 4 * n].copy_from_slice(&node[old_index..old_index + 4 * n]);
-        // Its clusters, header and reference.
-        let lcns = tx.take(ROOT_MEDIUM_ALLOCATOR, page_size / self.cluster as usize)?;
-        let named = lcns.iter().map(|&l| self.virtual_of(l)).collect::<Result<Vec<_>>>()?;
-        page[0x10..0x18].copy_from_slice(&(self.checkpoint.clock + 1).to_le_bytes());
-        for (k, l) in named.iter().enumerate() {
-            page[0x20 + 8 * k..0x28 + 8 * k].copy_from_slice(&l.to_le_bytes());
-        }
-        page[0x48..0x50].copy_from_slice(&table.to_le_bytes());
-        let mut index_row = tx.index_row(&[])?;
-        let vo = le16(&index_row, 0x0a) as usize;
-        let vl = le16(&index_row, 0x0c) as usize;
-        store_reference(&mut index_row[vo..vo + vl], &named, &page)?;
-        for (k, &l) in lcns.iter().enumerate() {
-            let c = self.cluster as usize;
-            self.write_clusters(l, &page[k * c..(k + 1) * c])?;
+        let mut index_rows = Vec::with_capacity(groups.len());
+        for (g, range) in groups.iter().enumerate() {
+            let mut page = vec![0u8; page_size];
+            page[..PAGE_HEADER_SIZE].copy_from_slice(&header);
+            page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + 4].copy_from_slice(&8u32.to_le_bytes());
+            let n = range.len();
+            let index = area - 4 * n;
+            let base = extents[range.start].0.saturating_sub(1);
+            let deltas = extents[range.clone()].iter().all(|x| x.0 - base < 0xffff);
+            let mut at = 0x28;
+            for (i, &r) in records[range.clone()].iter().enumerate() {
+                page[h + at..h + at + r.len()].copy_from_slice(r);
+                let high = if deltas {
+                    (extents[range.start + i].0 - base) as u32
+                } else {
+                    0xffff
+                };
+                put(&mut page, h + index + 4 * i, high << 16 | at as u32);
+                at += r.len();
+            }
+            put(&mut page, h, 0x28);
+            put(&mut page, h + 4, at as u32);
+            put(&mut page, h + 8, (index - at) as u32);
+            page[h + 0x0c..h + 0x10].copy_from_slice(&[0, if deltas { 0x0c } else { 0x04 }, 0, 0]);
+            put(&mut page, h + 0x10, index as u32);
+            put(&mut page, h + 0x14, n as u32);
+            if deltas {
+                page[h + 0x18..h + 0x20].copy_from_slice(&base.to_le_bytes());
+            }
+            put(&mut page, h + 0x20, area as u32);
+            // Its clusters, header and reference.
+            let lcns = tx.take(ROOT_MEDIUM_ALLOCATOR, page_size / self.cluster as usize)?;
+            let named = lcns.iter().map(|&l| self.virtual_of(l)).collect::<Result<Vec<_>>>()?;
+            page[0x10..0x18].copy_from_slice(&(self.checkpoint.clock + 1).to_le_bytes());
+            for (k, l) in named.iter().enumerate() {
+                page[0x20 + 8 * k..0x28 + 8 * k].copy_from_slice(&l.to_le_bytes());
+            }
+            page[0x48..0x50].copy_from_slice(&table.to_le_bytes());
+            let last = &extents[range.end - 1];
+            let key = if g + 1 < groups.len() {
+                [(last.0 + last.2 - 1).to_le_bytes(), 1u64.to_le_bytes()].concat()
+            } else {
+                Vec::new()
+            };
+            let mut index_row = tx.index_row(&key)?;
+            let vo = le16(&index_row, 0x0a) as usize;
+            let vl = le16(&index_row, 0x0c) as usize;
+            store_reference(&mut index_row[vo..vo + vl], &named, &page)?;
+            for (k, &l) in lcns.iter().enumerate() {
+                let c = self.cluster as usize;
+                self.write_clusters(l, &page[k * c..(k + 1) * c])?;
+            }
+            index_rows.push((key, index_row));
         }
         self.dev.flush()?;
-        // The value: the inline map's header, one page below, an index node
-        // of one row (no key, flag 2: everything) naming the page.
+        // The value: the inline map's header (0x18: the pages), an index
+        // node (level 1) over the pages, with key deltas when they fit.
         let mut v = inline[..0x88].to_vec();
-        v[0x18..0x1c].copy_from_slice(&1u32.to_le_bytes());
-        let mut node = vec![0u8; 0x28 + index_row.len() + 4 + 4];
+        v[0x18..0x1c].copy_from_slice(&(groups.len() as u32).to_le_bytes());
+        let n = index_rows.len();
+        let rows: usize = index_rows.iter().map(|(_, r)| r.len()).sum();
+        let index = 0x28 + rows + 4 * n % 8;
+        let mut node = vec![0u8; index + 4 * n];
+        let keys: Vec<u64> = index_rows
+            .iter()
+            .filter(|(k, _)| !k.is_empty())
+            .map(|(k, _)| le64(k, 0))
+            .collect();
+        let base = keys.first().map_or(0, |k| k.saturating_sub(1));
+        let deltas = keys.iter().all(|k| k - base < 0xffff);
+        let mut at = 0x28;
+        for (i, (key, r)) in index_rows.iter().enumerate() {
+            node[at..at + r.len()].copy_from_slice(r);
+            let high = if deltas && !key.is_empty() {
+                (le64(key, 0) - base) as u32
+            } else {
+                0xffff
+            };
+            put(&mut node, index + 4 * i, high << 16 | at as u32);
+            at += r.len();
+        }
         put(&mut node, 0, 0x28);
-        put(&mut node, 4, (0x28 + index_row.len()) as u32);
-        put(&mut node, 8, 4);
-        node[0x0c..0x10].copy_from_slice(&[1, 7, 0, 0]);
-        put(&mut node, 0x10, (0x28 + index_row.len() + 4) as u32);
-        put(&mut node, 0x14, 1);
+        put(&mut node, 4, at as u32);
+        put(&mut node, 8, (index - at) as u32);
+        node[0x0c..0x10].copy_from_slice(&[1, if deltas { 0x0f } else { 0x07 }, 0, 0]);
+        put(&mut node, 0x10, index as u32);
+        put(&mut node, 0x14, n as u32);
+        if deltas {
+            node[0x18..0x20].copy_from_slice(&base.to_le_bytes());
+        }
         let len = node.len() as u32;
         put(&mut node, 0x20, len);
-        node[0x28..0x28 + index_row.len()].copy_from_slice(&index_row);
-        let at = 0x28 + index_row.len() + 4;
-        put(&mut node, at, 0xffff_0028);
         v.extend(node);
+        if v.len() > MAP_INLINE {
+            return Err(Error::Unsupported(format!(
+                "an extent map of {} pages (more than a record's index holds)",
+                groups.len()
+            )));
+        }
         Ok(v)
     }
 
@@ -3049,9 +3175,12 @@ fn inline_data(record: &[u8]) -> Option<usize> {
 const ROW_OWN: u16 = 0x10;
 /// The integrity stream attribute.
 const INTEGRITY: u32 = 0x8000;
-/// The largest integrity stream `refs` writes (its checksums fit one
-/// page of extent map).
-const MAX_INTEGRITY: usize = 8 << 20;
+/// The largest integrity stream `refs` writes (its extent map, about 15
+/// MiB of data a page on 4 KiB clusters, fits the index a record holds).
+const MAX_INTEGRITY: usize = 256 << 20;
+/// The largest integrity stream `refs` overwrites (copied whole, through
+/// memory).
+const MAX_INTEGRITY_COPY: u64 = 64 << 20;
 /// A data band that names no allocator row (data goes where there is room).
 const NO_BAND: u64 = u64::MAX;
 /// Free clusters data leaves in a metadata container's row (for pages).

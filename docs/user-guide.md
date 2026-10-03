@@ -487,8 +487,7 @@ sparse ranges; integrity streams are copied) where they are, as Windows does,
 and sets the modification and change times to now. `refs create` makes a
 file (up to 1 KiB kept in its record; larger ones in clusters near the
 data of the files around it, read from the local file piece by piece,
-up to what one page of extent map holds: about 500 MiB on 4 KiB
-clusters) with a printable ASCII name, in a directory
+up to 4 GiB) with a printable ASCII name, in a directory
 of any size (its pages split as it grows and merge as it shrinks); it
 takes the permissions of the files beside it. `refs rename` renames a
 file or directory within its directory and `refs delete` deletes a file
@@ -510,7 +509,7 @@ in the file's record) and `refs delete --stream NAME`
 deletes one. `refs set --integrity
 on` turns integrity streams on for an empty file (as Set-FileIntegrity
 does); its data is then written with checksums (CRC32-C per 4 KiB
-cluster, CRC-64 per 16 KiB on 64 KiB clusters; up to 8 MiB), and files
+cluster, CRC-64 per 16 KiB on 64 KiB clusters; up to 256 MiB), and files
 created in a directory with
 integrity streams have them too.
 

@@ -240,8 +240,7 @@ Experimental; only with
 .B create
 Create a file with the content of
 .I local-file
-(empty without), up to what one page of extent map holds (about 500
-MiB on 4 KiB clusters, more on 64 KiB ones), named in printable ASCII,
+(empty without), up to 4 GiB, named in printable ASCII,
 read from it piece by piece. It takes the
 permissions of the files beside it. Experimental; only with
 .BR \-\-yes .
@@ -271,7 +270,7 @@ or with
 add it to the end; the file keeps its creation time, attributes,
 permissions and named streams (as large as
 .B create
-takes, 8 MiB for integrity
+takes, 256 MiB for integrity
 streams; not files with snapshots or streams in clusters). With
 .BI \-\-stream " name"
 it writes that named stream instead (small ones stay in the file's
