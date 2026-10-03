@@ -989,7 +989,11 @@ passes the same checks. Release `v1.0.0`.
   (a Storage Spaces one, with pool management over D-Bus, would need
   libblockdev and udisks2 changes upstream).
 * A native kernel dm target or kernel driver, only if ublk performance is
-  insufficient.
+  insufficient. Not needed: ublk reads at 91-93 % of dm (which runs at
+  member speed) and beats it for 64 KiB reads, against a target of 70 %
+  (see the M-stage throughput figures above), and the spaces dm cannot
+  map (parity, mirrors with failover, write-back cache) are what ublk is
+  for. Decided 2026-10-03; revisit only on a measured shortfall.
 * Storage Spaces Direct (clustered) pools are out of scope.
 
 ## Track B: ReFS
