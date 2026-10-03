@@ -1130,10 +1130,24 @@ fn writing_integrity_streams() {
     assert!(checksummed(&vol, "/i.bin"));
     for err in [
         vol.set_integrity("/i.bin", false).unwrap_err(),
-        vol.write_file("/i.bin", &vec![0; 3 << 20], now).unwrap_err(),
+        vol.write_file("/i.bin", &vec![0; 9 << 20], now).unwrap_err(),
     ] {
         assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
     }
+    // Large: the checksummed records go to a page of extent map, which
+    // goes free with the data.
+    let large: Vec<u8> = (0..6_000_000u32).map(|i| (i % 241) as u8).collect();
+    vol.write_file("/large.bin", &[], now).unwrap_err();
+    vol.create_file("/large.bin", b"", now).unwrap();
+    vol.set_integrity("/large.bin", true).unwrap();
+    let pages_before = used(&vol, 1).len();
+    vol.write_file("/large.bin", &large, now).unwrap();
+    assert!(checksummed(&vol, "/large.bin"));
+    assert_eq!(read_all(&vol, "/large.bin"), large);
+    assert_allocated(&vol, &skip, "integrity map page");
+    assert_pages_valid(&vol, &skip, "integrity map page");
+    vol.write_file("/large.bin", b"", now).unwrap();
+    assert_eq!(used(&vol, 1).len(), pages_before, "data and map page freed");
     let fresh = Volume::open(&overlay, offset).unwrap();
     assert_eq!(read_all(&fresh, "/i.bin"), data);
     assert_allocated(&vol, &skip, "integrity");

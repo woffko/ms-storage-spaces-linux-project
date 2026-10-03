@@ -475,7 +475,7 @@ NAME` writes a named stream (an alternate data stream, up to 64 MiB; up
 to 1 KiB stays in the file's record) and `refs delete --stream NAME`
 deletes one. `refs set --integrity
 on` turns integrity streams on for an empty file (as Set-FileIntegrity
-does); its data is then written with a checksum per cluster (up to 2 MiB,
+does); its data is then written with a checksum per cluster (up to 8 MiB,
 volumes of 4 KiB clusters), and files created in a directory with
 integrity streams have them too.
 

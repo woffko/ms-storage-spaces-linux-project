@@ -1339,6 +1339,7 @@ impl<D: WriteAt> Volume<D> {
                 id: next_id,
                 security: common,
                 integrity,
+                table: dir,
             };
             let record = self.new_record(&mut tx, band, data, file)?;
             let utf16: Vec<u8> = name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
@@ -1374,6 +1375,7 @@ impl<D: WriteAt> Volume<D> {
             id,
             security,
             integrity,
+            ..
         } = file;
         let Some(band) = band.filter(|_| data.len() > MAX_INLINE) else {
             let mut record = resident_record(data, now, id, security);
@@ -1388,7 +1390,8 @@ impl<D: WriteAt> Volume<D> {
             )));
         }
         let (extents, allocated) = self.write_data(tx, band, data, integrity)?;
-        let mut record = extent_record(data.len() as u64, allocated, &extents, now, id, security);
+        let live = self.map_value(tx, file.table, data.len() as u64, allocated, &extents)?;
+        let mut record = extent_record(data.len() as u64, allocated, live, now, id, security);
         if integrity {
             let a = le32(&record, 0x48) | INTEGRITY;
             record[0x48..0x4c].copy_from_slice(&a.to_le_bytes());
@@ -1427,6 +1430,87 @@ impl<D: WriteAt> Volume<D> {
         }
         self.dev.flush()?;
         Ok((extents, clusters * self.cluster))
+    }
+
+    /// A live level's value for these extents: the map in the value, or,
+    /// when it is large, in a page of its own (written now, to clusters
+    /// free until the commit) that the value's index node names, as Windows
+    /// keeps large maps. The page belongs to table `table`.
+    #[allow(clippy::type_complexity)]
+    fn map_value(
+        &self,
+        tx: &mut Transaction<'_, D>,
+        table: u64,
+        size: u64,
+        allocated: u64,
+        extents: &[(u64, u64, u64, Vec<u32>)],
+    ) -> Result<Vec<u8>> {
+        let inline = level_value(size, allocated, extents);
+        if inline.len() <= MAP_INLINE {
+            return Ok(inline);
+        }
+        let page_size = self.page_size as usize;
+        let root = tx.root(Tree::Object(table))?;
+        let mut page = vec![0u8; page_size];
+        page[..PAGE_HEADER_SIZE].copy_from_slice(&tx.pages[root].data[..PAGE_HEADER_SIZE]);
+        page[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + 4].copy_from_slice(&8u32.to_le_bytes());
+        // The leaf: the extent records of the inline map's node.
+        let node = &inline[0x88..];
+        let n = extents.len();
+        let used = le32(node, 4) as usize - 0x28;
+        let h = PAGE_HEADER_SIZE + 8;
+        let area = page_size - h;
+        let index = area - 4 * n;
+        if 0x28 + used > index {
+            return Err(Error::Unsupported("an extent map of more than one page".into()));
+        }
+        let put = |d: &mut Vec<u8>, at: usize, v: u32| d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        put(&mut page, h, 0x28);
+        put(&mut page, h + 4, (0x28 + used) as u32);
+        put(&mut page, h + 8, (index - 0x28 - used) as u32);
+        page[h + 0x0c..h + 0x10].copy_from_slice(&[0, 0x0c, 0, 0]);
+        put(&mut page, h + 0x10, index as u32);
+        put(&mut page, h + 0x14, n as u32);
+        put(&mut page, h + 0x20, area as u32);
+        page[h + 0x28..h + 0x28 + used].copy_from_slice(&node[0x28..0x28 + used]);
+        let old_index = le32(node, 0x10) as usize;
+        page[h + index..h + index + 4 * n].copy_from_slice(&node[old_index..old_index + 4 * n]);
+        // Its clusters, header and reference.
+        let lcns = tx.take(ROOT_MEDIUM_ALLOCATOR, page_size / self.cluster as usize)?;
+        let named = lcns.iter().map(|&l| self.virtual_of(l)).collect::<Result<Vec<_>>>()?;
+        page[0x10..0x18].copy_from_slice(&(self.checkpoint.clock + 1).to_le_bytes());
+        for (k, l) in named.iter().enumerate() {
+            page[0x20 + 8 * k..0x28 + 8 * k].copy_from_slice(&l.to_le_bytes());
+        }
+        page[0x48..0x50].copy_from_slice(&table.to_le_bytes());
+        let mut index_row = tx.index_row(&[])?;
+        let vo = le16(&index_row, 0x0a) as usize;
+        let vl = le16(&index_row, 0x0c) as usize;
+        store_reference(&mut index_row[vo..vo + vl], &named, &page)?;
+        for (k, &l) in lcns.iter().enumerate() {
+            let c = self.cluster as usize;
+            self.dev
+                .write_all_at(&page[k * c..(k + 1) * c], self.offset + l * self.cluster)?;
+        }
+        self.dev.flush()?;
+        // The value: the inline map's header, one page below, an index node
+        // of one row (no key, flag 2: everything) naming the page.
+        let mut v = inline[..0x88].to_vec();
+        v[0x18..0x1c].copy_from_slice(&1u32.to_le_bytes());
+        let mut node = vec![0u8; 0x28 + index_row.len() + 4 + 4];
+        put(&mut node, 0, 0x28);
+        put(&mut node, 4, (0x28 + index_row.len()) as u32);
+        put(&mut node, 8, 4);
+        node[0x0c..0x10].copy_from_slice(&[1, 7, 0, 0]);
+        put(&mut node, 0x10, (0x28 + index_row.len() + 4) as u32);
+        put(&mut node, 0x14, 1);
+        let len = node.len() as u32;
+        put(&mut node, 0x20, len);
+        node[0x28..0x28 + index_row.len()].copy_from_slice(&index_row);
+        let at = 0x28 + index_row.len() + 4;
+        put(&mut node, at, 0xffff_0028);
+        v.extend(node);
+        Ok(v)
     }
 
     /// Replaces a file's whole content with `data` (appending, truncating
@@ -1484,6 +1568,7 @@ impl<D: WriteAt> Volume<D> {
                 id,
                 security,
                 integrity,
+                table: home.unwrap_or(dir),
             };
             let mut record = self.new_record(&mut tx, band, data, file)?;
             // Kept: creation and access times, attributes (but the bits
@@ -1997,7 +2082,13 @@ impl<D: WriteAt> Volume<D> {
             };
             let header = level_set_header();
             insert_attribute(&mut rows, row(&set_key(header.len(), 8, 1), &header, 0));
-            let live = level_value(data.len() as u64, allocated, &extents);
+            let live = self.map_value(
+                &mut tx,
+                file.home.unwrap_or(file.dir),
+                data.len() as u64,
+                allocated,
+                &extents,
+            )?;
             insert_attribute(
                 &mut rows,
                 row(&set_key(live.len(), LIVE_STREAM, 0), &live, ROW_EMBEDS_NODE),
@@ -2491,9 +2582,12 @@ fn inline_data(record: &[u8]) -> Option<usize> {
 const ROW_OWN: u16 = 0x10;
 /// The integrity stream attribute.
 const INTEGRITY: u32 = 0x8000;
-/// The largest integrity stream `refs` writes (its checksums stay in the
-/// record).
-const MAX_INTEGRITY: usize = 2 << 20;
+/// The largest integrity stream `refs` writes (its checksums fit one
+/// page of extent map).
+const MAX_INTEGRITY: usize = 8 << 20;
+/// The largest extent map kept in its level's value; larger ones go to a
+/// page of their own.
+const MAP_INLINE: usize = 2048;
 /// Rows of records kept apart from the names (files moved or linked).
 const ROW_RECORD: u16 = 0x40;
 /// The sparse file attribute.
@@ -2627,6 +2721,9 @@ struct NewRecord {
     id: u64,
     security: u64,
     integrity: bool,
+    /// The directory whose table holds the record (pages of a large
+    /// extent map belong to it).
+    table: u64,
 }
 
 /// A file by path: the directory's path, the name, the directory's object
@@ -2689,14 +2786,7 @@ const MAX_CREATED: u64 = 64 << 20;
 /// the level set's header row (id 8) and the live level (id 0x1000) whose
 /// value is an extent node; `extents` are (first cluster in the file,
 /// first virtual cluster, clusters).
-fn extent_record(
-    size: u64,
-    allocated: u64,
-    extents: &[(u64, u64, u64, Vec<u32>)],
-    now: u64,
-    id: u64,
-    common: u64,
-) -> Vec<u8> {
+fn extent_record(size: u64, allocated: u64, v: Vec<u8>, now: u64, id: u64, common: u64) -> Vec<u8> {
     let multi = |len: usize, level: u64, parent: u64, header: u64| {
         let mut k = vec![0u8; 0x28];
         k[0..8].copy_from_slice(&(len as u64).to_le_bytes());
@@ -2709,7 +2799,6 @@ fn extent_record(
     };
     let set = level_set_header();
     let set_row = row(&multi(set.len(), 8, 8, 1), &set, 0);
-    let v = level_value(size, allocated, extents);
     // Flag 1: the value embeds a node (as name rows embed records).
     let live_row = row(&multi(v.len(), LIVE_STREAM, 8, 0), &v, ROW_EMBEDS_NODE);
     // The record: as for inline data, with two rows and no inline flag.
