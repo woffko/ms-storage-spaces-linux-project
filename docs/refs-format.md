@@ -372,6 +372,20 @@ table's rows for a text diff):
   row and frees its pages; the parent gets new times. `refs` writes
   these rows as Windows does (**verified**: equal rows but for the order
   of the record's rows).
+* Named streams (steps `stream`, `unstream`): a small stream (200
+  bytes) is a row of the file's record, key: the value's length,
+  0x80000002, descriptor 0x000500b0, the name; value laid out like inline
+  $DATA (0x04 = 0x30 + size, 0x08 = 0x0c, 0x0c = 0x30, the size at 0x18,
+  0x20, 0x28 and 0x30, exact rather than rounded, 2 at 0x38, the bytes
+  from 0x3c). The record's rows sort by marker (0x80000001, 0x80000002,
+  3: the low bits), attribute type, then name. Adding one bumps the
+  record's row count and its modification, change and access times;
+  deleting one lowers the count and sets the change time. A larger stream
+  (5000 bytes) is kept in clusters: value flag 0x1000 at 2, the stream
+  set id (0xf000) at 0x3c and its level at 0x44, and rows of type 3 in
+  the record (the set's header row and its live level with the extents).
+  `refs` writes and deletes streams kept in the record (**verified**:
+  Windows' rows but for the order of rewritten rows).
 * Creating a file (step `create`) adds two rows to its directory: the
   name row (type 0x30) with the embedded record, and a row of type 0x20
   (key: 0x20, flags 0x8000, the file id as u64 at 8; value: the name's

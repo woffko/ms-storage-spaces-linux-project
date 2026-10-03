@@ -161,6 +161,9 @@ enum Command {
         offset: Option<u64>,
         #[arg(long)]
         path: String,
+        /// Delete this named stream (kept in the record) instead.
+        #[arg(long)]
+        stream: Option<String>,
         #[arg(long)]
         yes: bool,
     },
@@ -191,9 +194,10 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Replace a file's content with a local file's, or append it
-    /// (experimental: writes the volume, only with --yes; up to 64 MiB; not
-    /// files with named streams, snapshots or integrity streams).
+    /// Replace a file's content (or a named stream's) with a local file's,
+    /// or append it (experimental: writes the volume, only with --yes; up
+    /// to 64 MiB; not files with snapshots, streams in clusters or
+    /// integrity streams).
     Write {
         /// The image, disk or partition.
         device: PathBuf,
@@ -206,6 +210,10 @@ enum Command {
         /// Add to the end instead of replacing.
         #[arg(long)]
         append: bool,
+        /// Write this named stream (up to 1 KiB, kept in the record)
+        /// instead of the file's data.
+        #[arg(long)]
+        stream: Option<String>,
         #[arg(long)]
         yes: bool,
     },
@@ -958,15 +966,22 @@ fn main() -> Result<()> {
             device,
             offset,
             path,
+            stream,
             yes,
         } => {
             let mut vol = open_writable(&device, offset, yes)?;
-            writeln!(out, "{path}: delete")?;
+            match &stream {
+                Some(s) => writeln!(out, "{path}: delete stream {s}")?,
+                None => writeln!(out, "{path}: delete")?,
+            }
             if !yes {
                 writeln!(out, "nothing written (--yes writes)")?;
                 return Ok(());
             }
-            vol.delete_file(&path, now())?;
+            match &stream {
+                Some(s) => vol.delete_stream(&path, s, now())?,
+                None => vol.delete_file(&path, now())?,
+            }
             writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
         }
         Command::Rename {
@@ -1006,6 +1021,7 @@ fn main() -> Result<()> {
             path,
             from,
             append,
+            stream,
             yes,
         } => {
             let bytes = std::fs::read(&from).with_context(|| format!("cannot read {}", from.display()))?;
@@ -1014,7 +1030,15 @@ fn main() -> Result<()> {
                 let e = vol.lookup(&path)?;
                 let file = vol.open_file(&e)?;
                 let mut old = Vec::new();
-                if let Some(s) = &file.data {
+                let current = match &stream {
+                    Some(name) => file
+                        .streams
+                        .iter()
+                        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                        .map(|(_, s)| s),
+                    None => file.data.as_ref(),
+                };
+                if let Some(s) = current {
                     old.resize(s.size as usize, 0);
                     let mut at = 0;
                     while at < old.len() {
@@ -1035,7 +1059,10 @@ fn main() -> Result<()> {
                 writeln!(out, "nothing written (--yes writes)")?;
                 return Ok(());
             }
-            vol.write_file(&path, &data, now())?;
+            match &stream {
+                Some(s) => vol.write_stream(&path, s, &data, now())?,
+                None => vol.write_file(&path, &data, now())?,
+            }
             writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
         }
         Command::Move {

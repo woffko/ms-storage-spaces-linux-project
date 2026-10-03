@@ -726,8 +726,9 @@ rows of thin spaces not allocated yet (M7).
   there). Times, attributes and data of moved or linked files change in
   their record and in the index entry of the name used, as on Windows.
   Directories are renamed, moved (not below themselves) and deleted
-  when empty, with Windows' rows. Next: named streams, integrity
-  streams.
+  when empty, with Windows' rows. Named streams up to 1 KiB are written
+  and deleted in the record (Windows read them and went on changing
+  them). Next: integrity streams, named streams in clusters.
 
 ## Test infrastructure (continuous, feeds every stage)
 

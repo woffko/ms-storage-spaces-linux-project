@@ -2,9 +2,9 @@
 //! crates/refs/tests (a clean log, no shared clusters), its stored bytes
 //! patched by the start of the input (as in refs_volume), then the
 //! operations the rest of the input picks (times, attributes, overwriting,
-//! creating, writing, renaming, moving, linking and deleting files,
-//! creating directories)
-//! on a writable overlay. Fuzzing builds accept every checksum. Whatever
+//! creating, writing, renaming, moving, linking and deleting files and
+//! directories, also through the names those operations give) on a
+//! writable overlay. Fuzzing builds accept every checksum. Whatever
 //! the metadata says, nothing may panic and no byte may be written outside
 //! the volume.
 #![no_main]
@@ -19,7 +19,7 @@ static BASE: LazyLock<SparseImage> = LazyLock::new(|| {
     SparseImage::read_from(&include_bytes!("../../crates/refs/tests/fixtures/r314small/disk.fixture")[..]).unwrap()
 });
 const OFFSET: u64 = 16 << 20;
-const PATHS: [&str; 8] = [
+const PATHS: [&str; 11] = [
     "/small.txt",
     "/mid.bin",
     "/last.txt",
@@ -28,6 +28,9 @@ const PATHS: [&str; 8] = [
     "/new.txt",
     "/dir/new",
     "/d2",
+    "/renamed",
+    "/dir/moved",
+    "/linked",
 ];
 
 fuzz_target!(|data: &[u8]| {

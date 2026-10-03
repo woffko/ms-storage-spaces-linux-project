@@ -237,9 +237,15 @@ Replace a file's content with that of
 .IR local-file ,
 or with
 .B \-\-append
-add it to the end; the file keeps its creation time, attributes and
-permissions (up to 64 MiB; not files with named streams, snapshots or
-integrity streams). Experimental; only with
+add it to the end; the file keeps its creation time, attributes,
+permissions and named streams (up to 64 MiB; not files with snapshots,
+streams in clusters or integrity streams). With
+.BI \-\-stream " name"
+it writes that named stream instead (up to 1 KiB, kept in the file's
+record), and
+.B delete \-\-stream
+.I name
+deletes one. Experimental; only with
 .BR \-\-yes .
 .PP
 The writing commands refuse a volume whose log holds changes its last

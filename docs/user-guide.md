@@ -470,7 +470,9 @@ block-cloned or deduplicated clusters. `refs mkdir` creates a directory;
 `--append`), keeping its creation time, attributes and permissions.
 `refs move` moves a file or directory into another directory and `refs
 link` gives a file another name (a hard link); changing a hard-linked
-file through one name changes it for all of them.
+file through one name changes it for all of them. `refs write --stream
+NAME` writes a named stream (an alternate data stream, up to 1 KiB for
+now) and `refs delete --stream NAME` deletes one.
 
 It writes the way Windows does (copy on write, then a new checkpoint), so
 an interruption leaves the volume as it was before.

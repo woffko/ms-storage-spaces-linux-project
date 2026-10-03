@@ -1291,13 +1291,17 @@ impl<D: WriteAt> Volume<D> {
             record: old,
             runs,
             home,
+            apart,
         } = self.file_at(path)?;
+        if apart {
+            return Err(Error::Unsupported(format!(
+                "{path}: named streams or snapshots in clusters, or a link"
+            )));
+        }
         let entry = self.lookup(path)?;
         let file = self.open_file(&entry)?;
-        if !file.streams.is_empty() || !file.snapshots.is_empty() {
-            return Err(Error::Unsupported(format!(
-                "{path}: named streams, snapshots or integrity"
-            )));
+        if !file.snapshots.is_empty() {
+            return Err(Error::Unsupported(format!("{path}: snapshots")));
         }
         if let Some(crate::file::Stream {
             content: crate::file::Content::Extents(x),
@@ -1330,6 +1334,18 @@ impl<D: WriteAt> Volume<D> {
             record[0x40..0x48].copy_from_slice(&old[0x40..0x48]);
             let attributes = (le32(&old, 0x48) & !SPARSE) | (le32(&record, 0x48) & SPARSE);
             record[0x48..0x4c].copy_from_slice(&attributes.to_le_bytes());
+            // Named streams (kept in the record) stay.
+            let streams: Vec<Vec<u8>> = embedded_rows(&old)?
+                .into_iter()
+                .filter(|r| is_stream_row(r, None))
+                .collect();
+            if !streams.is_empty() {
+                let mut rows = embedded_rows(&record)?;
+                for s in streams {
+                    insert_attribute(&mut rows, s);
+                }
+                record = record_with_rows(&record, &rows, le64(&record, 0x98))?;
+            }
             if let Some(home) = home {
                 // A moved or linked file: the new record keeps the names,
                 // the name written through gets a fresh index entry.
@@ -1394,6 +1410,11 @@ impl<D: WriteAt> Volume<D> {
         let file = self.file_at(path)?;
         if let Some(home) = file.home {
             return self.unlink(file, home, now);
+        }
+        if file.apart {
+            return Err(Error::Unsupported(format!(
+                "{path}: named streams or snapshots in clusters, or a link"
+            )));
         }
         let FileAt {
             parent,
@@ -1712,6 +1733,75 @@ impl<D: WriteAt> Volume<D> {
         self.load()
     }
 
+    /// Writes a named stream (an alternate data stream) of a file, kept in
+    /// its record as Windows keeps small ones (up to 1 KiB for now), in
+    /// place of a stream of that name (compared without case; it keeps its
+    /// name); the file's modification, change and access times become
+    /// `now`.
+    pub fn write_stream(&mut self, path: &str, stream: &str, data: &[u8], now: u64) -> Result<()> {
+        check_name(stream)?;
+        if data.len() > MAX_INLINE {
+            return Err(Error::Unsupported(format!(
+                "named streams of more than {MAX_INLINE} bytes"
+            )));
+        }
+        let file = self.file_at(path)?;
+        let mut rows = embedded_rows(&file.record)?;
+        // A stream of that name (without case) keeps its name.
+        let name = rows
+            .iter()
+            .find(|r| is_stream_row(r, Some(stream)))
+            .map_or_else(|| stream.to_owned(), |r| utf16(&row_key(r)[0x10..]));
+        rows.retain(|r| !is_stream_row(r, Some(stream)));
+        insert_attribute(&mut rows, stream_row(&name, data));
+        let mut record = record_with_rows(&file.record, &rows, le64(&file.record, 0x98))?;
+        for at in [0x30, 0x38, 0x40] {
+            record[at..at + 8].copy_from_slice(&now.to_le_bytes());
+        }
+        self.store_record(&file, &record)
+    }
+
+    /// Deletes a named stream kept in a file's record; the file's change
+    /// time becomes `now`.
+    pub fn delete_stream(&mut self, path: &str, stream: &str, now: u64) -> Result<()> {
+        let file = self.file_at(path)?;
+        let mut rows = embedded_rows(&file.record)?;
+        let count = rows.len();
+        rows.retain(|r| !is_stream_row(r, Some(stream)));
+        if rows.len() == count {
+            return Err(Error::NotFound(format!("{path}:{stream}")));
+        }
+        let mut record = record_with_rows(&file.record, &rows, le64(&file.record, 0x98))?;
+        record[0x38..0x40].copy_from_slice(&now.to_le_bytes());
+        self.store_record(&file, &record)
+    }
+
+    /// Stores a file's changed record: in its name row, or for a moved or
+    /// linked file in its home (and the index entry of the name used).
+    fn store_record(&mut self, file: &FileAt, record: &[u8]) -> Result<()> {
+        {
+            let mut tx = Transaction::begin(&*self)?;
+            match file.home {
+                Some(home) => {
+                    put_record(&mut tx, home, le64(record, 0x80), record)?;
+                    refresh_entry(&mut tx, file.dir, &file.name, record)?;
+                }
+                None => {
+                    tx.remove_row(Tree::Object(file.dir), &|k| is_name_row(k, &file.name))?;
+                    let mut key = vec![ROW_NAME as u8, 0, 1, 0];
+                    key.extend(utf16_bytes(&file.name));
+                    tx.insert_sorted(
+                        Tree::Object(file.dir),
+                        &row(&key, record, ROW_EMBEDS_NODE),
+                        &directory_key_order,
+                    )?;
+                }
+            }
+            tx.commit()?;
+        }
+        self.load()
+    }
+
     /// Gives one name of a file whose record is a row of type 0x40 of
     /// directory `home` a new directory and name, as Windows does: its
     /// index entry moves and its link row changes.
@@ -1791,6 +1881,7 @@ impl<D: WriteAt> Volume<D> {
             dir,
             mut record,
             runs,
+            apart,
             ..
         } = file;
         let id = le64(&record, 0x80);
@@ -1802,6 +1893,11 @@ impl<D: WriteAt> Volume<D> {
             .ok_or_else(|| format_err!("{parent}/{name}: no link row for the name"))?;
         names.remove(at);
         let last = names.is_empty();
+        if last && apart {
+            return Err(Error::Unsupported(format!(
+                "{parent}/{name}: named streams or snapshots in clusters, or a link"
+            )));
+        }
         if last && !runs.is_empty() && self.has_shared_clusters()? {
             return Err(Error::Unsupported(format!(
                 "{parent}/{name}: the volume has shared (cloned or deduplicated) clusters"
@@ -1828,10 +1924,7 @@ impl<D: WriteAt> Volume<D> {
         self.load()
     }
 
-    /// For a file (no named streams or snapshots in clusters, no reparse
-    /// point): its directory's path, its name, the directory's object id,
-    /// the record, the physical runs of its data and its home directory
-    /// when its record is kept apart from its names.
+    /// A file by path (see `FileAt`).
     fn file_at(&self, path: &str) -> Result<FileAt> {
         let trimmed = path.trim_end_matches('/');
         let parent = trimmed.rsplit_once('/').map_or("", |(p, _)| p);
@@ -1842,16 +1935,12 @@ impl<D: WriteAt> Volume<D> {
             Target::Directory(_) => return Err(Error::Unsupported(format!("{path} is a directory"))),
         };
         let file = self.open_file(&entry)?;
-        let other = file
-            .streams
-            .iter()
-            .chain(&file.snapshots)
-            .any(|(_, s)| matches!(s.content, crate::file::Content::Extents(_)));
-        if other || file.reparse.is_some() {
-            return Err(Error::Unsupported(format!(
-                "{path}: named streams or snapshots in clusters, or a link"
-            )));
-        }
+        let apart = file.reparse.is_some()
+            || file
+                .streams
+                .iter()
+                .chain(&file.snapshots)
+                .any(|(_, s)| matches!(s.content, crate::file::Content::Extents(_)));
         // The physical runs of its data.
         let mut runs = Vec::new();
         if let Some(crate::file::Stream {
@@ -1870,6 +1959,7 @@ impl<D: WriteAt> Volume<D> {
             record,
             runs,
             home,
+            apart,
         })
     }
 
@@ -2235,8 +2325,10 @@ fn upcased(name: &[u8]) -> Vec<u16> {
 }
 
 /// A file by path: the directory's path, the name, the directory's object
-/// id, the record, the physical runs of its data, and for a file whose
-/// record is a row of type 0x40 (moved or linked), its home directory.
+/// id, the record, the physical runs of its data, for a file whose record
+/// is a row of type 0x40 (moved or linked) its home directory, and whether
+/// it has data `refs` does not free or rewrite yet (named streams or
+/// snapshots in clusters, a reparse point).
 struct FileAt {
     parent: String,
     name: String,
@@ -2244,6 +2336,7 @@ struct FileAt {
     record: Vec<u8>,
     runs: Vec<(u64, u64)>,
     home: Option<u64>,
+    apart: bool,
 }
 
 /// Names `refs` creates for now: printable ASCII, no characters Windows
@@ -2635,6 +2728,55 @@ fn refresh_entry<D: WriteAt>(tx: &mut Transaction<'_, D>, dir: u64, name: &str, 
     v[0x38..0x40].copy_from_slice(&record[0x58..0x60]);
     v[0x40..0x44].copy_from_slice(&record[0x48..0x4c]);
     Ok(())
+}
+
+/// A named stream kept in a record: key (the value's length, 0x80000002,
+/// descriptor 0x000500b0, the name), value laid out like inline $DATA
+/// (sizes exact, not rounded).
+fn stream_row(name: &str, data: &[u8]) -> Vec<u8> {
+    let n = data.len();
+    let mut v = vec![0u8; 0x3c + n];
+    v[0x04..0x08].copy_from_slice(&((0x30 + n) as u32).to_le_bytes());
+    v[0x08..0x0c].copy_from_slice(&0x0cu32.to_le_bytes());
+    v[0x0c..0x10].copy_from_slice(&0x30u32.to_le_bytes());
+    for at in [0x18, 0x20, 0x28, 0x30] {
+        v[at..at + 8].copy_from_slice(&(n as u64).to_le_bytes());
+    }
+    v[0x38..0x3c].copy_from_slice(&2u32.to_le_bytes());
+    v[0x3c..].copy_from_slice(data);
+    let mut key = (v.len() as u64).to_le_bytes().to_vec();
+    key.extend(0x8000_0002u32.to_le_bytes());
+    key.extend(0x0005_00b0u32.to_le_bytes());
+    key.extend(utf16_bytes(name));
+    row(&key, &v, 0)
+}
+
+/// Whether a record row is a named stream kept in the record (any, or the
+/// one named `name`, compared without case).
+fn is_stream_row(r: &[u8], name: Option<&str>) -> bool {
+    let (key, value) = (row_key(r), row_value(r));
+    key.len() >= 0x10
+        && le32(key, 8) == 0x8000_0002
+        && le32(key, 12) & 0xffff == 0xb0
+        && value.len() >= 0x3c
+        && le16(value, 0x10) == 0
+        && le16(value, 2) & 0x1000 == 0
+        && name.is_none_or(|n| upcased(&key[0x10..]) == upcased(&utf16_bytes(n)))
+}
+
+/// Inserts a row into a record's rows in Windows' order: by marker (the
+/// low bits of 0x80000001, 0x80000002, 3), attribute type, then name.
+fn insert_attribute(rows: &mut Vec<Vec<u8>>, new: Vec<u8>) {
+    let class = |k: &[u8]| {
+        (
+            k.get(8..12).map(|_| le32(k, 8) & 0x7fff_ffff),
+            k.get(12..16).map(|_| le32(k, 12) & 0xffff),
+            upcased(k.get(0x10..).unwrap_or(&[])),
+        )
+    };
+    let at = class(row_key(&new));
+    let pos = rows.iter().position(|r| class(row_key(r)) > at).unwrap_or(rows.len());
+    rows.insert(pos, new);
 }
 
 /// Whether a directory row is the index entry (key flags 2) of `name`.

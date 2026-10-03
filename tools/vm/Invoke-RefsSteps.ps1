@@ -19,6 +19,9 @@ volume before the first step: step-0-base.vhdx).
   move|PATH|NEWPATH     move to another directory
   link|PATH|NEWPATH     a hard link to PATH
   attrib|PATH|ATTRS     set the attributes ([IO.FileAttributes] names)
+  stream|PATH|NAME|LEN  write named stream NAME: LEN bytes 0x77
+  unstream|PATH|NAME    delete named stream NAME
+  integrity|PATH|on     turn integrity streams on (or off) for a file
 Run on the Windows test VM only.
 #>
 param(
@@ -66,6 +69,12 @@ foreach ($step in ($Steps.Split(';') | Where-Object { $_ })) {
             'move' { Move-Item -LiteralPath $p (Join-Path $drive $a[2]) }
             'link' { New-Item -ItemType HardLink -Path (Join-Path $drive $a[2]) -Target $p | Out-Null }
             'attrib' { [IO.File]::SetAttributes($p, [IO.FileAttributes]$a[2]) }
+            'stream' {
+                $b = New-Object byte[] ([int]$a[3]); for ($k = 0; $k -lt $b.Length; $k++) { $b[$k] = 0x77 }
+                Set-Content -LiteralPath $p -Stream $a[2] -Value $b -Encoding Byte
+            }
+            'unstream' { Remove-Item -LiteralPath $p -Stream $a[2] }
+            'integrity' { Set-FileIntegrity -FileName $p -Enable ($a[2] -eq 'on') }
             default { throw "unknown step $step" }
         }
         Write-VolumeCache -DriveLetter $part.DriveLetter

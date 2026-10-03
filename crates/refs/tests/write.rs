@@ -1023,3 +1023,56 @@ fn renaming_moving_and_deleting_directories() {
     let fresh = Volume::open(&overlay, offset).unwrap();
     assert_eq!(read_all(&fresh, "/dir/inner.txt").len(), 3000);
 }
+
+#[test]
+fn writing_named_streams() {
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 134_100_000_000_000_000;
+    let streams = |vol: &Volume<_>, path: &str| -> Vec<(String, Vec<u8>)> {
+        let file = vol.open_file(&vol.lookup(path).unwrap()).unwrap();
+        file.streams
+            .iter()
+            .map(|(n, s)| {
+                let refs::Content::Inline(b) = &s.content else {
+                    panic!("{n}: in clusters")
+                };
+                (n.clone(), b.clone())
+            })
+            .collect()
+    };
+    let data = read_all(&vol, "/small.txt");
+    vol.write_stream("/small.txt", "s1", &[1; 100], now).unwrap();
+    vol.write_stream("/small.txt", "Zz", b"zz", now).unwrap();
+    vol.write_stream("/small.txt", "S1", &[2; 300], now).unwrap();
+    assert_eq!(
+        streams(&vol, "/small.txt"),
+        vec![("s1".into(), vec![2; 300]), ("Zz".into(), b"zz".to_vec())],
+        "replaced without case, in name order"
+    );
+    assert_eq!(read_all(&vol, "/small.txt"), data);
+    // They stay with the file through renames, moves and new content.
+    vol.rename("/small.txt", "streams.txt", now).unwrap();
+    vol.write_file("/streams.txt", &[3; 5000], now).unwrap();
+    vol.move_file("/streams.txt", "/dir/streams.txt", now).unwrap();
+    assert_eq!(read_all(&vol, "/dir/streams.txt"), vec![3; 5000]);
+    assert_eq!(streams(&vol, "/dir/streams.txt").len(), 2);
+    vol.delete_stream("/dir/streams.txt", "zz", now).unwrap();
+    assert_eq!(streams(&vol, "/dir/streams.txt"), vec![("s1".into(), vec![2; 300])]);
+    for err in [
+        vol.delete_stream("/dir/streams.txt", "zz", now).unwrap_err(),
+        vol.write_stream("/dir/streams.txt", "big", &[0; 2000], now)
+            .unwrap_err(),
+        vol.write_stream("/dir/streams.txt", "a:b", b"x", now).unwrap_err(),
+    ] {
+        assert!(
+            matches!(err, refs::Error::NotFound(_) | refs::Error::Unsupported(_)),
+            "{err}"
+        );
+    }
+    vol.delete_file("/dir/streams.txt", now).unwrap();
+    assert_allocated(&vol, &skip, "streams");
+    assert_pages_valid(&vol, &skip, "streams");
+}
