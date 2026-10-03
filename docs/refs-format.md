@@ -322,7 +322,14 @@ table's rows for a text diff):
   and 0x705.
 * Allocator rows (roots 1, 2) are bitmaps of a cluster range with a count
   of free clusters; allocating a 16 KiB page sets four bits and lowers
-  the count by four.
+  the count by four. Value: start, count, free (u16 at 0x10), kind (u16
+  at 0x12: 1 a bitmap of 0x4000 clusters from 0x18, 0x218 at 0x14; 2 a
+  uniform range of any multiple of 0x4000, 24 bytes, 0x200 at 0x14, free
+  0 when all used and 0xffff when all free; 5 and 9 bitmaps Windows keeps
+  aside). To free a cluster in a used uniform row `refs` splits it: the
+  block of 0x4000 clusters holding it becomes a bitmap row with every bit
+  set, the rest stays uniform (**verified**: Windows reported no leak and
+  wrote on).
 * Object table rows carry, before their page reference, a counter pair
   that the checkpoint (0x70) and MLog records carry as well; it grows with
   every transaction (the log's sequence number, presumably).
@@ -330,9 +337,11 @@ table's rows for a text diff):
   writes a stream without integrity checksums where it is (the extents
   stay) and commits the new times with copy on write.
 * Block reference counts (root 6): rows keyed by a range of virtual
-  clusters (first, count) whose values count references per cluster
-  (u16 each, 2 for a cluster two files share); empty on volumes without
-  block clones or deduplication.
+  clusters (first, count; 0x400 clusters each seen) whose values count
+  references per cluster (u16 each, 2 for a cluster two files share);
+  empty on volumes without block clones or deduplication. `refs` frees
+  no cluster inside such a range (deleting a file whose clusters lie
+  there is refused) and frees others as on any volume.
 * Moving a file to another directory, or giving it a second name (steps
   `move`, `link`): its record leaves its name row and becomes a row of
   type 0x40 of the directory it was made in (its home; key 0x40, 0x8000,
@@ -386,8 +395,10 @@ table's rows for a text diff):
   (5000 bytes) is kept in clusters: value flag 0x1000 at 2, the stream
   set id (0xf000) at 0x3c and its level at 0x44, and rows of type 3 in
   the record (the set's header row and its live level with the extents).
-  `refs` writes and deletes streams kept in the record (**verified**:
-  Windows' rows but for the order of rewritten rows).
+  Deleting one in clusters removes its row and its set's rows and frees
+  the set's clusters. `refs` writes and deletes streams kept in the
+  record and deletes streams in clusters (**verified**: Windows' rows but
+  for the order of rewritten rows).
 * Integrity streams (steps `integrity`, `append`, `write`):
   Set-FileIntegrity on an empty file sets attribute 0x8000 and checksum
   kind 1 at 0x3a of its inline $DATA value. Data then goes to clusters

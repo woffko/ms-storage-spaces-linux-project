@@ -487,9 +487,14 @@ fn deleting_and_renaming_files() {
     assert_eq!(fresh.lookup("/sizes/renamed (100).bin").unwrap().times.changed, now);
     assert_allocated(&fresh, &skip, "deleted and renamed");
     assert_pages_valid(&fresh, &skip, "deleted and renamed");
-    // Refused: data in extents, an existing target name.
+    // Data in clusters Windows counted as one used block (a uniform
+    // allocator row): the block becomes a bitmap row, the clusters free.
+    vol.delete_file("/sizes/size_65537.bin", now).unwrap();
+    assert_allocated(&vol, &skip, "freed from a uniform row");
+    assert_pages_valid(&vol, &skip, "freed from a uniform row");
+    // Refused: cloned clusters, an existing target name.
     for err in [
-        vol.delete_file("/sizes/size_65537.bin", now).unwrap_err(),
+        vol.delete_file("/clones/copy1.bin", now).unwrap_err(),
         vol.rename("/sizes/size_0.bin", "size_1000.bin", now).unwrap_err(),
     ] {
         assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
@@ -533,9 +538,24 @@ fn creating_files_in_extents() {
     }
     assert_allocated(&vol, &skip, "created in extents");
     assert_pages_valid(&vol, &skip, "created in extents");
-    // Deleting them is not done yet (their data clusters).
-    let err = vol.delete_file("/names/large.bin", now).unwrap_err();
-    assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
+    // Deleted again on a volume with cloned files: their clusters are
+    // not shared, so they become free.
+    let file = vol.open_file(&vol.lookup("/names/large.bin").unwrap()).unwrap();
+    let refs::Content::Extents(extents) = &file.data.unwrap().content else {
+        panic!("large.bin: inline")
+    };
+    let large: Vec<u64> = extents
+        .iter()
+        .flat_map(|x| {
+            let lcn = vol.translate(x.vlcn).unwrap();
+            lcn..lcn + x.clusters
+        })
+        .collect();
+    vol.delete_file("/names/large.bin", now).unwrap();
+    let used1 = used(&vol, 1);
+    assert!(large.iter().all(|c| !used1.contains(c)), "large.bin's clusters freed");
+    assert_allocated(&vol, &skip, "deleted in extents");
+    assert_pages_valid(&vol, &skip, "deleted in extents");
 }
 
 #[test]
@@ -1120,4 +1140,50 @@ fn writing_integrity_streams() {
     assert_eq!(read_all(&fresh, "/i.bin"), data);
     assert_allocated(&vol, &skip, "integrity");
     assert_pages_valid(&vol, &skip, "integrity");
+}
+
+#[test]
+fn deleting_named_streams_in_clusters() {
+    let (image, manifest, skip) = load("r314basic4k");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 134_300_000_000_000_000;
+    // Windows put streams/host.txt:big (200000 bytes) in clusters, a
+    // stream set of its record.
+    let big_clusters = |vol: &Volume<_>| {
+        let file = vol.open_file(&vol.lookup("/streams/host.txt").unwrap()).unwrap();
+        let (_, s) = file.streams.iter().find(|(n, _)| n == "big").unwrap();
+        let refs::Content::Extents(x) = &s.content else {
+            panic!("big: inline")
+        };
+        x.iter()
+            .flat_map(|x| {
+                let lcn = vol.translate(x.vlcn).unwrap();
+                lcn..lcn + x.clusters
+            })
+            .collect::<Vec<_>>()
+    };
+    let clusters = big_clusters(&vol);
+    let data = read_all(&vol, "/streams/host.txt");
+    // The file keeps it through a rename and new content.
+    vol.rename("/streams/host.txt", "host2.txt", now).unwrap();
+    vol.rename("/streams/host2.txt", "host.txt", now).unwrap();
+    vol.write_file("/streams/host.txt", &data, now).unwrap();
+    assert_eq!(big_clusters(&vol), clusters);
+    vol.delete_stream("/streams/host.txt", "BIG", now).unwrap();
+    let file = vol.open_file(&vol.lookup("/streams/host.txt").unwrap()).unwrap();
+    assert_eq!(
+        file.streams.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        ["small"]
+    );
+    let used1 = used(&vol, 1);
+    assert!(
+        clusters.iter().all(|c| !used1.contains(c)),
+        "the stream's clusters are free"
+    );
+    // A file with a stream in clusters deleted: those clusters go too.
+    vol.write_stream("/streams/host.txt", "small", b"x", now).unwrap();
+    assert_allocated(&vol, &skip, "streams");
+    assert_pages_valid(&vol, &skip, "streams");
 }

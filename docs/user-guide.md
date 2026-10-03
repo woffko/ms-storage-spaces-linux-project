@@ -464,8 +464,8 @@ of any size (its pages split as it grows and merge as it shrinks); it
 takes the permissions of the files beside it. `refs rename` renames a
 file or directory within its directory and `refs delete` deletes a file
 (for a hard-linked file: the one name) or an empty directory; deleting a
-file's last name with data clusters is refused on volumes with
-block-cloned or deduplicated clusters. `refs mkdir` creates a directory;
+file's last name is refused when its clusters are block-cloned or
+deduplicated. `refs mkdir` creates a directory;
 `refs write` replaces a file's content (or appends to it with
 `--append`), keeping its creation time, attributes and permissions.
 `refs move` moves a file or directory into another directory and `refs

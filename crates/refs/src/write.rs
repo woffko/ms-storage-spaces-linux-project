@@ -95,6 +95,8 @@ pub struct Transaction<'v, D> {
     /// Clusters freed by this transaction: the old checkpoint still uses
     /// them, so they are not taken again before the commit.
     freed: std::collections::HashSet<u64>,
+    /// Set while committing: allocator rows are not restructured then.
+    committing: bool,
 }
 
 impl<'v, D: WriteAt> Transaction<'v, D> {
@@ -118,6 +120,7 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
             loaded: HashMap::new(),
             roots: HashMap::new(),
             freed: Default::default(),
+            committing: false,
         }
     }
 
@@ -331,8 +334,12 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
 
     /// Marks clusters free again.
     fn release(&mut self, allocator: usize, clusters: &[u64]) -> Result<()> {
-        let bitmaps = self.bitmaps(allocator)?;
+        let mut bitmaps = self.bitmaps(allocator)?;
         for &c in clusters {
+            if !self.committing && !bitmaps.iter().any(|(start, count, _)| *start <= c && c < start + count) {
+                self.unpack(allocator, c)?;
+                bitmaps = self.bitmaps(allocator)?;
+            }
             let &(start, _, at) = bitmaps
                 .iter()
                 .find(|(start, count, _)| *start <= c && c < start + count)
@@ -347,6 +354,55 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
             let free = le16(v, 0x10) + 1;
             v[0x10..0x12].copy_from_slice(&free.to_le_bytes());
             self.freed.insert(c);
+        }
+        Ok(())
+    }
+
+    /// Turns the block of a fully used uniform allocator row (kind 2, no
+    /// free clusters) that holds cluster `c` into a bitmap row of its
+    /// 0x4000 clusters, all used, so that clusters there can be freed: the
+    /// row becomes up to three (uniform before, the bitmap, uniform after).
+    fn unpack(&mut self, allocator: usize, c: u64) -> Result<()> {
+        const BLOCK: u64 = 0x4000;
+        let tree = Tree::Root(allocator);
+        let at = self.find(tree, &|k| {
+            k.len() >= 16 && le64(k, 0) <= c && c < le64(k, 0).saturating_add(le64(k, 8))
+        })?;
+        let v = self.pages[at.page].data[at.value..at.value + at.len].to_vec();
+        let (start, count) = (le64(&v, 0), le64(&v, 8));
+        if v.len() != 0x18 || le16(&v, 0x12) != 2 || le16(&v, 0x10) != 0 || start % BLOCK != 0 || count % BLOCK != 0 {
+            return Err(format_err!(
+                "cluster {c:#x} in an allocator row of kind {} with {} free (not a used uniform row)",
+                le16(&v, 0x12),
+                le16(&v, 0x10)
+            ));
+        }
+        let block = start + (c - start) / BLOCK * BLOCK;
+        let key = |s: u64, n: u64| [s.to_le_bytes(), n.to_le_bytes()].concat();
+        let uniform = |s: u64, n: u64| {
+            let mut u = v.clone();
+            u[0..8].copy_from_slice(&s.to_le_bytes());
+            u[8..16].copy_from_slice(&n.to_le_bytes());
+            row(&key(s, n), &u, 0)
+        };
+        let mut bitmap = vec![0xffu8; ALLOCATOR_HEADER + (BLOCK / 8) as usize];
+        bitmap[..0x18].fill(0);
+        bitmap[0..8].copy_from_slice(&block.to_le_bytes());
+        bitmap[8..16].copy_from_slice(&BLOCK.to_le_bytes());
+        bitmap[0x12..0x14].copy_from_slice(&ALLOCATOR_BITMAP.to_le_bytes());
+        bitmap[0x14..0x16].copy_from_slice(&0x218u16.to_le_bytes());
+        let mut rows = vec![row(&key(block, BLOCK), &bitmap, 0)];
+        if block > start {
+            rows.push(uniform(start, block - start));
+        }
+        if block + BLOCK < start + count {
+            rows.push(uniform(block + BLOCK, start + count - block - BLOCK));
+        }
+        let old = key(start, count);
+        let page = at.page;
+        self.remove_quiet(page, &|k| k == old)?;
+        for r in rows {
+            self.insert_sorted(tree, &r, &u64_key_order)?;
         }
         Ok(())
     }
@@ -732,6 +788,17 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
             self.count_rows(page, -1);
             return self.drop_page(page);
         }
+        self.remove_quiet(page, this)?;
+        if self.pages[page].parent.is_some() {
+            self.merge(page)?;
+        }
+        Ok(())
+    }
+
+    /// Removes a leaf row as `remove` does, but leaves the page where it is
+    /// (also when it empties: a row is about to take its place).
+    fn remove_quiet(&mut self, page: usize, this: &dyn Fn(&[u8]) -> bool) -> Result<()> {
+        let node = Node::at(&self.pages[page].data, PAGE_HEADER_SIZE)?;
         let pos = node
             .rows()
             .position(|r| r.is_ok_and(|r| this(r.key)))
@@ -764,9 +831,6 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         let d = &mut self.pages[root].data;
         let rows = le64(d, PAGE_HEADER_SIZE + 0x20) - 1;
         d[PAGE_HEADER_SIZE + 0x20..PAGE_HEADER_SIZE + 0x28].copy_from_slice(&rows.to_le_bytes());
-        if self.pages[page].parent.is_some() {
-            self.merge(page)?;
-        }
         Ok(())
     }
 
@@ -959,6 +1023,7 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
 
     /// Writes the changed pages and the new checkpoint.
     pub fn commit(mut self) -> Result<()> {
+        self.committing = true;
         let vol = self.vol;
         let reference_size = vol.checkpoint.reference_size;
         // Object trees whose root changes: their rows in both object tables.
@@ -1365,12 +1430,11 @@ impl<D: WriteAt> Volume<D> {
             record: old,
             runs,
             home,
-            apart,
+            kept,
+            ..
         } = self.file_at(path)?;
-        if apart {
-            return Err(Error::Unsupported(format!(
-                "{path}: named streams or snapshots in clusters, or a link"
-            )));
+        if kept {
+            return Err(Error::Unsupported(format!("{path}: stream snapshots or a link")));
         }
         let entry = self.lookup(path)?;
         let file = self.open_file(&entry)?;
@@ -1383,9 +1447,9 @@ impl<D: WriteAt> Volume<D> {
                 content: crate::file::Content::Extents(x),
                 ..
             }) if x.iter().any(|x| x.checksums.is_some()));
-        if !runs.is_empty() && self.has_shared_clusters()? {
+        if self.refcounted(&runs)? {
             return Err(Error::Unsupported(format!(
-                "{path}: the volume has shared (cloned or deduplicated) clusters"
+                "{path}: shared (cloned or deduplicated) clusters"
             )));
         }
         let band = if data.len() > MAX_INLINE {
@@ -1412,10 +1476,10 @@ impl<D: WriteAt> Volume<D> {
             record[0x40..0x48].copy_from_slice(&old[0x40..0x48]);
             let attributes = (le32(&old, 0x48) & !SPARSE) | (le32(&record, 0x48) & SPARSE);
             record[0x48..0x4c].copy_from_slice(&attributes.to_le_bytes());
-            // Named streams (kept in the record) stay.
+            // Named streams stay, with the stream sets of those in clusters.
             let streams: Vec<Vec<u8>> = embedded_rows(&old)?
                 .into_iter()
-                .filter(|r| is_stream_row(r, None))
+                .filter(|r| is_named_stream(r) || is_set_row(r))
                 .collect();
             if !streams.is_empty() {
                 let mut rows = embedded_rows(&record)?;
@@ -1489,23 +1553,23 @@ impl<D: WriteAt> Volume<D> {
         if let Some(home) = file.home {
             return self.unlink(file, home, now);
         }
-        if file.apart {
-            return Err(Error::Unsupported(format!(
-                "{path}: named streams or snapshots in clusters, or a link"
-            )));
+        if file.kept {
+            return Err(Error::Unsupported(format!("{path}: stream snapshots or a link")));
         }
         let FileAt {
             parent,
             name,
             dir,
             record,
-            runs,
+            mut runs,
+            stream_runs,
             ..
         } = file;
+        runs.extend(stream_runs);
         let id = le64(&record, 0x80);
-        if !runs.is_empty() && self.has_shared_clusters()? {
+        if self.refcounted(&runs)? {
             return Err(Error::Unsupported(format!(
-                "{path}: the volume has shared (cloned or deduplicated) clusters"
+                "{path}: shared (cloned or deduplicated) clusters"
             )));
         }
         {
@@ -1573,15 +1637,33 @@ impl<D: WriteAt> Volume<D> {
         self.load()
     }
 
-    /// Whether the block reference count table (root 6) counts clusters
-    /// that several files share (block clones, deduplication).
-    fn has_shared_clusters(&self) -> Result<bool> {
-        let mut any = false;
-        self.walk(&self.checkpoint.roots[6].clone(), false, &mut |_| {
-            any = true;
+    /// Whether any of these physical runs lies in a range the block
+    /// reference count table (root 6: rows keyed by first virtual cluster
+    /// and count) covers: clusters files may share (block clones,
+    /// deduplication), which `refs` does not free yet.
+    fn refcounted(&self, runs: &[(u64, u64)]) -> Result<bool> {
+        let mut ranges = Vec::new();
+        self.walk(&self.checkpoint.roots[6].clone(), false, &mut |row| {
+            if row.key.len() >= 16 {
+                ranges.push((le64(row.key, 0), le64(row.key, 8)));
+            }
             Ok(())
         })?;
-        Ok(any)
+        if ranges.is_empty() {
+            return Ok(false);
+        }
+        for &(lcn, n) in runs {
+            for c in lcn..lcn + n {
+                let v = self.virtual_of(c)?;
+                if ranges
+                    .iter()
+                    .any(|&(first, count)| first <= v && v < first.saturating_add(count))
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Moves a file whose record is in its directory entry into another
@@ -1823,7 +1905,16 @@ impl<D: WriteAt> Volume<D> {
                 "named streams of more than {MAX_INLINE} bytes"
             )));
         }
-        let file = self.file_at(path)?;
+        let mut file = self.file_at(path)?;
+        // One in clusters goes first (its set and clusters with it).
+        if embedded_rows(&file.record)?.iter().any(|r| {
+            is_named_stream(r)
+                && !is_stream_row(r, None)
+                && upcased(&row_key(r)[0x10..]) == upcased(&utf16_bytes(stream))
+        }) {
+            self.delete_stream(path, stream, now)?;
+            file = self.file_at(path)?;
+        }
         let mut rows = embedded_rows(&file.record)?;
         // A stream of that name (without case) keeps its name.
         let name = rows
@@ -1836,29 +1927,56 @@ impl<D: WriteAt> Volume<D> {
         for at in [0x30, 0x38, 0x40] {
             record[at..at + 8].copy_from_slice(&now.to_le_bytes());
         }
-        self.store_record(&file, &record)
+        self.store_record(&file, &record, &[])
     }
 
-    /// Deletes a named stream kept in a file's record; the file's change
-    /// time becomes `now`.
+    /// Deletes a named stream, as Windows does: its row, and for one in
+    /// clusters the rows of its stream set, whose clusters become free
+    /// (refused on volumes with shared clusters); the file's change time
+    /// becomes `now`.
     pub fn delete_stream(&mut self, path: &str, stream: &str, now: u64) -> Result<()> {
         let file = self.file_at(path)?;
-        let mut rows = embedded_rows(&file.record)?;
-        let count = rows.len();
-        rows.retain(|r| !is_stream_row(r, Some(stream)));
-        if rows.len() == count {
-            return Err(Error::NotFound(format!("{path}:{stream}")));
+        let rows = embedded_rows(&file.record)?;
+        let named = |r: &Vec<u8>| is_named_stream(r) && upcased(&row_key(r)[0x10..]) == upcased(&utf16_bytes(stream));
+        let value = rows
+            .iter()
+            .find(|r| named(r))
+            .map(|r| row_value(r).to_vec())
+            .ok_or_else(|| Error::NotFound(format!("{path}:{stream}")))?;
+        let mut rows: Vec<Vec<u8>> = rows.into_iter().filter(|r| !named(r)).collect();
+        let mut clusters = Vec::new();
+        if value.len() >= 0x4c && le16(&value, 2) & 0x1000 != 0 {
+            let set = le64(&value, 0x3c);
+            let of_set = |r: &Vec<u8>| is_set_row(r) && le64(row_key(r), 0x30) == set;
+            for r in rows
+                .iter()
+                .filter(|r| of_set(r) && le64(row_key(r), 0x38) >= LIVE_STREAM)
+            {
+                for x in self.extents(row_value(r))?.iter().filter(|x| x.written) {
+                    let lcn = self.translate(x.vlcn)?;
+                    clusters.extend(lcn..lcn + x.clusters);
+                }
+            }
+            rows.retain(|r| !of_set(r));
+            let runs: Vec<(u64, u64)> = clusters.iter().map(|&c| (c, 1)).collect();
+            if self.refcounted(&runs)? {
+                return Err(Error::Unsupported(format!(
+                    "{path}: shared (cloned or deduplicated) clusters"
+                )));
+            }
         }
         let mut record = record_with_rows(&file.record, &rows, le32(&file.record, 0x98))?;
         record[0x38..0x40].copy_from_slice(&now.to_le_bytes());
-        self.store_record(&file, &record)
+        self.store_record(&file, &record, &clusters)
     }
 
     /// Stores a file's changed record: in its name row, or for a moved or
-    /// linked file in its home (and the index entry of the name used).
-    fn store_record(&mut self, file: &FileAt, record: &[u8]) -> Result<()> {
+    /// linked file in its home (and the index entry of the name used);
+    /// `free` clusters become free.
+    fn store_record(&mut self, file: &FileAt, record: &[u8], free: &[u64]) -> Result<()> {
         {
             let mut tx = Transaction::begin(&*self)?;
+            tx.release(ROOT_MEDIUM_ALLOCATOR, free)?;
             match file.home {
                 Some(home) => {
                     put_record(&mut tx, home, le64(record, 0x80), record)?;
@@ -1958,10 +2076,12 @@ impl<D: WriteAt> Volume<D> {
             name,
             dir,
             mut record,
-            runs,
-            apart,
+            mut runs,
+            stream_runs,
+            kept,
             ..
         } = file;
+        runs.extend(stream_runs);
         let id = le64(&record, 0x80);
         let (mut names, rows) = record_names(&record)?;
         let old = (dir, utf16_bytes(&name));
@@ -1971,12 +2091,12 @@ impl<D: WriteAt> Volume<D> {
             .ok_or_else(|| format_err!("{parent}/{name}: no link row for the name"))?;
         names.remove(at);
         let last = names.is_empty();
-        if last && apart {
+        if last && kept {
             return Err(Error::Unsupported(format!(
-                "{parent}/{name}: named streams or snapshots in clusters, or a link"
+                "{parent}/{name}: stream snapshots or a link"
             )));
         }
-        if last && !runs.is_empty() && self.has_shared_clusters()? {
+        if last && self.refcounted(&runs)? {
             return Err(Error::Unsupported(format!(
                 "{parent}/{name}: the volume has shared (cloned or deduplicated) clusters"
             )));
@@ -2013,22 +2133,20 @@ impl<D: WriteAt> Volume<D> {
             Target::Directory(_) => return Err(Error::Unsupported(format!("{path} is a directory"))),
         };
         let file = self.open_file(&entry)?;
-        let apart = file.reparse.is_some()
-            || file
-                .streams
-                .iter()
-                .chain(&file.snapshots)
-                .any(|(_, s)| matches!(s.content, crate::file::Content::Extents(_)));
-        // The physical runs of its data.
-        let mut runs = Vec::new();
-        if let Some(crate::file::Stream {
-            content: crate::file::Content::Extents(extents),
-            ..
-        }) = &file.data
-        {
-            for x in extents.iter().filter(|x| x.written) {
-                runs.push((self.translate(x.vlcn)?, x.clusters));
+        // The physical runs of its data, and of its named streams.
+        let runs_of = |s: &crate::file::Stream| -> Result<Vec<(u64, u64)>> {
+            let mut runs = Vec::new();
+            if let crate::file::Content::Extents(extents) = &s.content {
+                for x in extents.iter().filter(|x| x.written) {
+                    runs.push((self.translate(x.vlcn)?, x.clusters));
+                }
             }
+            Ok(runs)
+        };
+        let runs = file.data.as_ref().map(runs_of).transpose()?.unwrap_or_default();
+        let mut stream_runs = Vec::new();
+        for (_, s) in &file.streams {
+            stream_runs.extend(runs_of(s)?);
         }
         Ok(FileAt {
             parent: parent.to_owned(),
@@ -2036,8 +2154,9 @@ impl<D: WriteAt> Volume<D> {
             dir: self.directory_of(parent)?,
             record,
             runs,
+            stream_runs,
             home,
-            apart,
+            kept: !file.snapshots.is_empty() || file.reparse.is_some(),
         })
     }
 
@@ -2428,18 +2547,19 @@ struct NewRecord {
 }
 
 /// A file by path: the directory's path, the name, the directory's object
-/// id, the record, the physical runs of its data, for a file whose record
-/// is a row of type 0x40 (moved or linked) its home directory, and whether
-/// it has data `refs` does not free or rewrite yet (named streams or
-/// snapshots in clusters, a reparse point).
+/// id, the record, the physical runs of its data and of its named
+/// streams, for a file whose record is a row of type 0x40 (moved or
+/// linked) its home directory, and whether it has what `refs` does not
+/// delete or rewrite yet (stream snapshots, a reparse point).
 struct FileAt {
     parent: String,
     name: String,
     dir: u64,
     record: Vec<u8>,
     runs: Vec<(u64, u64)>,
+    stream_runs: Vec<(u64, u64)>,
     home: Option<u64>,
-    apart: bool,
+    kept: bool,
 }
 
 /// Names `refs` creates for now: printable ASCII, no characters Windows
@@ -2891,6 +3011,24 @@ fn is_stream_row(r: &[u8], name: Option<&str>) -> bool {
         && le16(value, 0x10) == 0
         && le16(value, 2) & 0x1000 == 0
         && name.is_none_or(|n| upcased(&key[0x10..]) == upcased(&utf16_bytes(n)))
+}
+
+/// Whether a record row is a named stream (inline or in clusters; not a
+/// snapshot).
+fn is_named_stream(r: &[u8]) -> bool {
+    let (key, value) = (row_key(r), row_value(r));
+    key.len() >= 0x10
+        && le32(key, 8) == 0x8000_0002
+        && le32(key, 12) & 0xffff == 0xb0
+        && value.len() >= 0x12
+        && le16(value, 0x10) == 0
+}
+
+/// Whether a record row belongs to a stream set (the levels of named
+/// streams in clusters); its set id is at 0x30 of the key.
+fn is_set_row(r: &[u8]) -> bool {
+    let key = row_key(r);
+    key.len() >= 0x38 && le32(key, 8) == 3
 }
 
 /// Inserts a row into a record's rows in Windows' order: by marker (the

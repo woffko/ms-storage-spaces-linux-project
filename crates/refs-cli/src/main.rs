@@ -155,8 +155,8 @@ enum Command {
         yes: bool,
     },
     /// Delete a file, one name of a hard-linked file, or an empty directory
-    /// (experimental: writes the volume, only with --yes; with data
-    /// clusters, not on volumes with shared clusters).
+    /// (experimental: writes the volume, only with --yes; not files whose
+    /// clusters are cloned or deduplicated).
     Delete {
         /// The image, disk or partition.
         device: PathBuf,

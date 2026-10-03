@@ -730,9 +730,13 @@ rows of thin spaces not allocated yet (M7).
   and deleted in the record (Windows read them and went on changing
   them). Integrity streams (CRC32-C per cluster, up to 2 MiB) are
   written, turned on for empty files and inherited from directories;
-  Windows read them, checking every cluster, and wrote on. Next: named
-  streams in clusters, deleting files with them, larger integrity
-  streams (extent maps in pages), CRC-64 on 64 KiB clusters.
+  Windows read them, checking every cluster, and wrote on. Named streams
+  in clusters are deleted (and files with them), deletes work on volumes
+  with clones for clusters outside the reference count table's ranges,
+  and clusters in used uniform allocator rows are freed (the row's block
+  becomes a bitmap). Next: writing named streams in clusters, larger
+  integrity streams (extent maps in pages), CRC-64 on 64 KiB clusters,
+  reference counts.
 
 ## Test infrastructure (continuous, feeds every stage)
 

@@ -463,7 +463,7 @@ impl<D: ReadAt> Volume<D> {
     /// The extent map of a $DATA value: a node at the value's start whose
     /// leaf rows are 24-byte extent records (more with per-cluster
     /// checksums); index rows point at pages of the same.
-    fn extents(&self, value: &[u8]) -> Result<Vec<Extent>> {
+    pub(crate) fn extents(&self, value: &[u8]) -> Result<Vec<Extent>> {
         let mut out = Vec::new();
         // The checksum of integrity streams' data.
         let kind = le16(value, 0x16);
