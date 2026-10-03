@@ -734,9 +734,10 @@ rows of thin spaces not allocated yet (M7).
   in clusters are deleted (and files with them), deletes work on volumes
   with clones for clusters outside the reference count table's ranges,
   and clusters in used uniform allocator rows are freed (the row's block
-  becomes a bitmap). Next: writing named streams in clusters, larger
-  integrity streams (extent maps in pages), CRC-64 on 64 KiB clusters,
-  reference counts.
+  becomes a bitmap). Named streams are written to clusters too (stream
+  sets as Windows numbers them). A power-cut test replays every prefix
+  of a commit's writes. Next: larger integrity streams (extent maps in
+  pages), CRC-64 on 64 KiB clusters, reference counts.
 
 ## Test infrastructure (continuous, feeds every stage)
 

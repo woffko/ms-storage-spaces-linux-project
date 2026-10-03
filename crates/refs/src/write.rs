@@ -1387,6 +1387,27 @@ impl<D: WriteAt> Volume<D> {
                 "integrity streams of more than {MAX_INTEGRITY} bytes, or on volumes of other than 4 KiB clusters"
             )));
         }
+        let (extents, allocated) = self.write_data(tx, band, data, integrity)?;
+        let mut record = extent_record(data.len() as u64, allocated, &extents, now, id, security);
+        if integrity {
+            let a = le32(&record, 0x48) | INTEGRITY;
+            record[0x48..0x4c].copy_from_slice(&a.to_le_bytes());
+        }
+        Ok(record)
+    }
+
+    /// Writes `data` to clusters taken from the data band `band` (free until
+    /// the commit): its extents (first cluster in the stream, virtual
+    /// cluster, clusters, and with `integrity` a CRC32-C per cluster) and
+    /// the bytes allocated.
+    #[allow(clippy::type_complexity)]
+    fn write_data(
+        &self,
+        tx: &mut Transaction<'_, D>,
+        band: u64,
+        data: &[u8],
+        integrity: bool,
+    ) -> Result<(Vec<(u64, u64, u64, Vec<u32>)>, u64)> {
         let clusters = (data.len() as u64).div_ceil(self.cluster);
         let runs = tx.take_data(band, clusters)?;
         let mut at = 0usize;
@@ -1405,12 +1426,7 @@ impl<D: WriteAt> Volume<D> {
             at += len;
         }
         self.dev.flush()?;
-        let mut record = extent_record(data.len() as u64, clusters * self.cluster, &extents, now, id, security);
-        if integrity {
-            let a = le32(&record, 0x48) | INTEGRITY;
-            record[0x48..0x4c].copy_from_slice(&a.to_le_bytes());
-        }
-        Ok(record)
+        Ok((extents, clusters * self.cluster))
     }
 
     /// Replaces a file's whole content with `data` (appending, truncating
@@ -1900,20 +1916,28 @@ impl<D: WriteAt> Volume<D> {
     /// `now`.
     pub fn write_stream(&mut self, path: &str, stream: &str, data: &[u8], now: u64) -> Result<()> {
         check_name(stream)?;
-        if data.len() > MAX_INLINE {
-            return Err(Error::Unsupported(format!(
-                "named streams of more than {MAX_INLINE} bytes"
-            )));
+        if data.len() as u64 > MAX_CREATED {
+            return Err(Error::Unsupported(format!("streams of more than {MAX_CREATED} bytes")));
         }
         let mut file = self.file_at(path)?;
-        // One in clusters goes first (its set and clusters with it).
-        if embedded_rows(&file.record)?.iter().any(|r| {
+        // One in clusters goes first (its set and clusters with it; the new
+        // one keeps its name and, in clusters, its set id, as on Windows).
+        let mut kept = (stream.to_owned(), None);
+        if let Some(r) = embedded_rows(&file.record)?.iter().find(|r| {
             is_named_stream(r)
                 && !is_stream_row(r, None)
                 && upcased(&row_key(r)[0x10..]) == upcased(&utf16_bytes(stream))
         }) {
+            kept = (utf16(&row_key(r)[0x10..]), Some(le64(row_value(r), 0x3c)));
             self.delete_stream(path, stream, now)?;
             file = self.file_at(path)?;
+        }
+        if data.len() > MAX_INLINE {
+            let stream = embedded_rows(&file.record)?
+                .iter()
+                .find(|r| is_stream_row(r, Some(stream)))
+                .map_or(kept.0, |r| utf16(&row_key(r)[0x10..]));
+            return self.write_stream_clusters(file, &stream, data, kept.1, now);
         }
         let mut rows = embedded_rows(&file.record)?;
         // A stream of that name (without case) keeps its name.
@@ -1928,6 +1952,65 @@ impl<D: WriteAt> Volume<D> {
             record[at..at + 8].copy_from_slice(&now.to_le_bytes());
         }
         self.store_record(&file, &record, &[])
+    }
+
+    /// Writes a named stream to clusters, as Windows does: a stream row
+    /// naming its stream set (set id: `set`, else past the record's
+    /// counter at 0x9c, from 0xf000), the set's header row and its live
+    /// level with the extents. An inline stream of that name goes.
+    fn write_stream_clusters(
+        &mut self,
+        file: FileAt,
+        stream: &str,
+        data: &[u8],
+        set: Option<u64>,
+        now: u64,
+    ) -> Result<()> {
+        if le32(&file.record, 0x48) & INTEGRITY != 0 {
+            return Err(Error::Unsupported(format!(
+                "{}: named streams in clusters of integrity streams",
+                file.name
+            )));
+        }
+        let last = le32(&file.record, 0x9c);
+        let set = set.unwrap_or(if last == 0 { 0xf000 } else { u64::from(last) + 1 });
+        let band = self.data_band(file.dir)?;
+        {
+            let mut tx = Transaction::begin(&*self)?;
+            let (extents, allocated) = self.write_data(&mut tx, band, data, false)?;
+            let mut rows = embedded_rows(&file.record)?;
+            rows.retain(|r| !is_stream_row(r, Some(stream)));
+            insert_attribute(
+                &mut rows,
+                stream_clusters_row(stream, data.len() as u64, allocated, set),
+            );
+            let set_key = |len: usize, level: u64, header: u64| {
+                let mut k = vec![0u8; 0x50];
+                k[0..8].copy_from_slice(&(len as u64).to_le_bytes());
+                k[8..12].copy_from_slice(&3u32.to_le_bytes());
+                k[0x10..0x30].copy_from_slice(&SET_KEY_SCHEMA);
+                k[0x30..0x38].copy_from_slice(&set.to_le_bytes());
+                k[0x38..0x40].copy_from_slice(&level.to_le_bytes());
+                k[0x40..0x48].copy_from_slice(&8u64.to_le_bytes());
+                k[0x48..0x50].copy_from_slice(&header.to_le_bytes());
+                k
+            };
+            let header = level_set_header();
+            insert_attribute(&mut rows, row(&set_key(header.len(), 8, 1), &header, 0));
+            let live = level_value(data.len() as u64, allocated, &extents);
+            insert_attribute(
+                &mut rows,
+                row(&set_key(live.len(), LIVE_STREAM, 0), &live, ROW_EMBEDS_NODE),
+            );
+            let mut record = record_with_rows(&file.record, &rows, le32(&file.record, 0x98))?;
+            record[0x9c..0xa0].copy_from_slice(&(set.max(u64::from(last)) as u32).to_le_bytes());
+            for at in [0x30, 0x38, 0x40] {
+                record[at..at + 8].copy_from_slice(&now.to_le_bytes());
+            }
+            store_in(&mut tx, &file, &record)?;
+            tx.commit()?;
+        }
+        self.load()
     }
 
     /// Deletes a named stream, as Windows does: its row, and for one in
@@ -1977,22 +2060,7 @@ impl<D: WriteAt> Volume<D> {
         {
             let mut tx = Transaction::begin(&*self)?;
             tx.release(ROOT_MEDIUM_ALLOCATOR, free)?;
-            match file.home {
-                Some(home) => {
-                    put_record(&mut tx, home, le64(record, 0x80), record)?;
-                    refresh_entry(&mut tx, file.dir, &file.name, record)?;
-                }
-                None => {
-                    tx.remove_row(Tree::Object(file.dir), &|k| is_name_row(k, &file.name))?;
-                    let mut key = vec![ROW_NAME as u8, 0, 1, 0];
-                    key.extend(utf16_bytes(&file.name));
-                    tx.insert_sorted(
-                        Tree::Object(file.dir),
-                        &row(&key, record, ROW_EMBEDS_NODE),
-                        &directory_key_order,
-                    )?;
-                }
-            }
+            store_in(&mut tx, file, record)?;
             tx.commit()?;
         }
         self.load()
@@ -2624,13 +2692,47 @@ fn extent_record(
         k[0x20..0x28].copy_from_slice(&header.to_le_bytes());
         k
     };
-    // The header of the level set: the next free level id, one level.
+    let set = level_set_header();
+    let set_row = row(&multi(set.len(), 8, 8, 1), &set, 0);
+    let v = level_value(size, allocated, extents);
+    // Flag 1: the value embeds a node (as name rows embed records).
+    let live_row = row(&multi(v.len(), LIVE_STREAM, 8, 0), &v, ROW_EMBEDS_NODE);
+    // The record: as for inline data, with two rows and no inline flag.
+    let mut r = resident_record(&[], now, id, common);
+    r.truncate(0xa8);
+    r[0x20..0x28].copy_from_slice(&2u64.to_le_bytes());
+    r[0x4c..0x50].fill(0);
+    r[0x58..0x60].copy_from_slice(&size.to_le_bytes());
+    r[0x60..0x68].copy_from_slice(&allocated.to_le_bytes());
+    let index = 0x28 + set_row.len() + live_row.len();
+    let mut node = vec![0u8; index + 8];
+    node[0..4].copy_from_slice(&0x28u32.to_le_bytes());
+    node[4..8].copy_from_slice(&(index as u32).to_le_bytes());
+    node[0x0c..0x10].copy_from_slice(&[0, 2, 0, 0]);
+    node[0x10..0x14].copy_from_slice(&(index as u32).to_le_bytes());
+    node[0x14..0x18].copy_from_slice(&2u32.to_le_bytes());
+    node[0x20..0x24].copy_from_slice(&((index + 8) as u32).to_le_bytes());
+    node[0x28..0x28 + set_row.len()].copy_from_slice(&set_row);
+    node[0x28 + set_row.len()..index].copy_from_slice(&live_row);
+    node[index..index + 4].copy_from_slice(&0xffff_0028u32.to_le_bytes());
+    node[index + 4..index + 8].copy_from_slice(&(0xffff_0000u32 | (0x28 + set_row.len()) as u32).to_le_bytes());
+    r.extend(node);
+    r
+}
+
+/// The header row's value of a level set: the next free level id, one
+/// level.
+fn level_set_header() -> Vec<u8> {
     let mut set = vec![0u8; 0x28];
     set[0..4].copy_from_slice(&0x1001u32.to_le_bytes());
     set[8..16].copy_from_slice(&1u64.to_le_bytes());
-    let set_row = row(&multi(set.len(), 8, 8, 1), &set, 0);
-    // The live level: a header, then a node of raw extent records keyed by
-    // their first cluster in the file.
+    set
+}
+
+/// A live level's value (of a file's $DATA or of a stream set): a header,
+/// then a node of raw extent records keyed by their first cluster in the
+/// stream.
+fn level_value(size: u64, allocated: u64, extents: &[(u64, u64, u64, Vec<u32>)]) -> Vec<u8> {
     const NODE: usize = 0x88;
     let n = extents.len();
     // Integrity streams: a CRC32-C per cluster after each record (records
@@ -2690,29 +2792,7 @@ fn extent_record(
         );
         at += slots[i];
     }
-    // Flag 1: the value embeds a node (as name rows embed records).
-    let live_row = row(&multi(v.len(), LIVE_STREAM, 8, 0), &v, ROW_EMBEDS_NODE);
-    // The record: as for inline data, with two rows and no inline flag.
-    let mut r = resident_record(&[], now, id, common);
-    r.truncate(0xa8);
-    r[0x20..0x28].copy_from_slice(&2u64.to_le_bytes());
-    r[0x4c..0x50].fill(0);
-    r[0x58..0x60].copy_from_slice(&size.to_le_bytes());
-    r[0x60..0x68].copy_from_slice(&allocated.to_le_bytes());
-    let index = 0x28 + set_row.len() + live_row.len();
-    let mut node = vec![0u8; index + 8];
-    node[0..4].copy_from_slice(&0x28u32.to_le_bytes());
-    node[4..8].copy_from_slice(&(index as u32).to_le_bytes());
-    node[0x0c..0x10].copy_from_slice(&[0, 2, 0, 0]);
-    node[0x10..0x14].copy_from_slice(&(index as u32).to_le_bytes());
-    node[0x14..0x18].copy_from_slice(&2u32.to_le_bytes());
-    node[0x20..0x24].copy_from_slice(&((index + 8) as u32).to_le_bytes());
-    node[0x28..0x28 + set_row.len()].copy_from_slice(&set_row);
-    node[0x28 + set_row.len()..index].copy_from_slice(&live_row);
-    node[index..index + 4].copy_from_slice(&0xffff_0028u32.to_le_bytes());
-    node[index + 4..index + 8].copy_from_slice(&(0xffff_0000u32 | (0x28 + set_row.len()) as u32).to_le_bytes());
-    r.extend(node);
-    r
+    v
 }
 
 /// Keys compared as a sequence of u64 (the object and parent-child tables).
@@ -2962,6 +3042,56 @@ fn record_with_names(record: &[u8], mut names: Names, rows: Vec<Vec<u8>>) -> Res
 
 fn utf16_bytes(name: &str) -> Vec<u8> {
     name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect()
+}
+
+/// Puts a file's changed record in place within a transaction: in its name
+/// row, or for a moved or linked file in its home (and the index entry of
+/// the name used).
+fn store_in<D: WriteAt>(tx: &mut Transaction<'_, D>, file: &FileAt, record: &[u8]) -> Result<()> {
+    match file.home {
+        Some(home) => {
+            put_record(tx, home, le64(record, 0x80), record)?;
+            refresh_entry(tx, file.dir, &file.name, record)
+        }
+        None => {
+            tx.remove_row(Tree::Object(file.dir), &|k| is_name_row(k, &file.name))?;
+            let mut key = vec![ROW_NAME as u8, 0, 1, 0];
+            key.extend(utf16_bytes(&file.name));
+            tx.insert_sorted(
+                Tree::Object(file.dir),
+                &row(&key, record, ROW_EMBEDS_NODE),
+                &directory_key_order,
+            )
+        }
+    }
+}
+
+/// The bytes 0x10..0x30 of every stream set row's key (the same on every
+/// row Windows wrote).
+const SET_KEY_SCHEMA: [u8; 0x20] = [
+    0, 0, 0x0c, 0, 2, 0, 0x20, 0, 0, 0, 1, 0, 8, 0, 0x28, 0, 0, 0, 0x0e, 0, 0x18, 0, 0x30, 0, 0, 2, 0, 0, 0, 0, 0, 0,
+];
+
+/// The row of a named stream in clusters: flag 0x1000, its sizes, the
+/// stream set and its live level.
+fn stream_clusters_row(name: &str, size: u64, allocated: u64, set: u64) -> Vec<u8> {
+    let mut v = vec![0u8; 0x74];
+    v[2..4].copy_from_slice(&0x1000u16.to_le_bytes());
+    v[0x04..0x08].copy_from_slice(&0x68u32.to_le_bytes());
+    v[0x08..0x0c].copy_from_slice(&0x0cu32.to_le_bytes());
+    v[0x0c..0x10].copy_from_slice(&0x30u32.to_le_bytes());
+    v[0x18..0x20].copy_from_slice(&allocated.to_le_bytes());
+    v[0x20..0x28].copy_from_slice(&size.to_le_bytes());
+    v[0x28..0x30].copy_from_slice(&size.to_le_bytes());
+    v[0x30..0x38].copy_from_slice(&allocated.to_le_bytes());
+    v[0x38..0x3c].copy_from_slice(&2u32.to_le_bytes());
+    v[0x3c..0x44].copy_from_slice(&set.to_le_bytes());
+    v[0x44..0x4c].copy_from_slice(&LIVE_STREAM.to_le_bytes());
+    let mut key = (v.len() as u64).to_le_bytes().to_vec();
+    key.extend(0x8000_0002u32.to_le_bytes());
+    key.extend(0x0005_00b0u32.to_le_bytes());
+    key.extend(utf16_bytes(name));
+    row(&key, &v, 0)
 }
 
 /// Copies a record's times, sizes and attributes into the index entry of

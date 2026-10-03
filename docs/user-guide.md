@@ -471,8 +471,9 @@ deduplicated. `refs mkdir` creates a directory;
 `refs move` moves a file or directory into another directory and `refs
 link` gives a file another name (a hard link); changing a hard-linked
 file through one name changes it for all of them. `refs write --stream
-NAME` writes a named stream (an alternate data stream, up to 1 KiB for
-now) and `refs delete --stream NAME` deletes one. `refs set --integrity
+NAME` writes a named stream (an alternate data stream, up to 64 MiB; up
+to 1 KiB stays in the file's record) and `refs delete --stream NAME`
+deletes one. `refs set --integrity
 on` turns integrity streams on for an empty file (as Set-FileIntegrity
 does); its data is then written with a checksum per cluster (up to 2 MiB,
 volumes of 4 KiB clusters), and files created in a directory with

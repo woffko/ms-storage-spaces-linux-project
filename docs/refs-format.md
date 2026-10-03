@@ -395,10 +395,18 @@ table's rows for a text diff):
   (5000 bytes) is kept in clusters: value flag 0x1000 at 2, the stream
   set id (0xf000) at 0x3c and its level at 0x44, and rows of type 3 in
   the record (the set's header row and its live level with the extents).
-  Deleting one in clusters removes its row and its set's rows and frees
-  the set's clusters. `refs` writes and deletes streams kept in the
-  record and deletes streams in clusters (**verified**: Windows' rows but
-  for the order of rewritten rows).
+  A stream set's rows: key the value's length, 3, 0, 32 constant bytes
+  (00 00 0c 00 02 00 20 00 00 00 01 00 08 00 28 00 00 00 0e 00 18 00 30
+  00 00 02 and zeros), the set id at 0x30, the level at 0x38 (8 for the
+  header, 0x1000 live), the parent at 0x40 (8) and 1 at 0x48 for the
+  header; values as for the levels of $DATA (the header: next level id
+  0x1001, one level; the live level: the extent map, row flag 1). A new
+  set takes 0xf000, or the record's counter at 0x9c plus one, and the
+  counter follows; rewriting a stream keeps its set id. Deleting one in
+  clusters removes its row and its set's rows and frees the set's
+  clusters. `refs` writes and deletes streams both ways (**verified**:
+  Windows' rows but for the order of rewritten rows and the split of
+  runs, and Windows read and rewrote them).
 * Integrity streams (steps `integrity`, `append`, `write`):
   Set-FileIntegrity on an empty file sets attribute 0x8000 and checksum
   kind 1 at 0x3a of its inline $DATA value. Data then goes to clusters

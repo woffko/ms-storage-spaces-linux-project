@@ -164,7 +164,7 @@ enum Command {
         offset: Option<u64>,
         #[arg(long)]
         path: String,
-        /// Delete this named stream (kept in the record) instead.
+        /// Delete this named stream instead.
         #[arg(long)]
         stream: Option<String>,
         #[arg(long)]
@@ -199,8 +199,7 @@ enum Command {
     },
     /// Replace a file's content (or a named stream's) with a local file's,
     /// or append it (experimental: writes the volume, only with --yes; up
-    /// to 64 MiB, 2 MiB for integrity streams; not files with snapshots or
-    /// streams in clusters).
+    /// to 64 MiB, 2 MiB for integrity streams; not files with snapshots).
     Write {
         /// The image, disk or partition.
         device: PathBuf,
@@ -213,8 +212,7 @@ enum Command {
         /// Add to the end instead of replacing.
         #[arg(long)]
         append: bool,
-        /// Write this named stream (up to 1 KiB, kept in the record)
-        /// instead of the file's data.
+        /// Write this named stream instead of the file's data.
         #[arg(long)]
         stream: Option<String>,
         #[arg(long)]

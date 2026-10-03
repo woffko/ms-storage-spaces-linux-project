@@ -1083,8 +1083,6 @@ fn writing_named_streams() {
     assert_eq!(streams(&vol, "/dir/streams.txt"), vec![("s1".into(), vec![2; 300])]);
     for err in [
         vol.delete_stream("/dir/streams.txt", "zz", now).unwrap_err(),
-        vol.write_stream("/dir/streams.txt", "big", &[0; 2000], now)
-            .unwrap_err(),
         vol.write_stream("/dir/streams.txt", "a:b", b"x", now).unwrap_err(),
     ] {
         assert!(
@@ -1279,4 +1277,64 @@ fn interrupted_writes_leave_the_old_or_the_new_volume() {
             }
         }
     }
+}
+
+#[test]
+fn writing_named_streams_in_clusters() {
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 134_500_000_000_000_000;
+    let stream = |vol: &Volume<_>, path: &str, name: &str| -> (Vec<u8>, Vec<u64>) {
+        let file = vol.open_file(&vol.lookup(path).unwrap()).unwrap();
+        let (_, s) = file.streams.iter().find(|(n, _)| n == name).unwrap();
+        let mut data = vec![0u8; s.size as usize];
+        vol.read_stream(s, 0, &mut data).unwrap();
+        let clusters = match &s.content {
+            refs::Content::Extents(x) => x
+                .iter()
+                .flat_map(|x| {
+                    let lcn = vol.translate(x.vlcn).unwrap();
+                    lcn..lcn + x.clusters
+                })
+                .collect(),
+            refs::Content::Inline(_) => Vec::new(),
+        };
+        (data, clusters)
+    };
+    let set_counter = |vol: &Volume<_>, path: &str| {
+        let record = vol.record(&vol.lookup(path).unwrap()).unwrap();
+        u32::from_le_bytes(record[0x9c..0xa0].try_into().unwrap())
+    };
+    let a: Vec<u8> = (0..20_000u32).map(|i| (i % 249) as u8).collect();
+    let b: Vec<u8> = (0..7_000u32).map(|i| (i % 13) as u8).collect();
+    vol.write_stream("/small.txt", "a", &a, now).unwrap();
+    assert_eq!(set_counter(&vol, "/small.txt"), 0xf000);
+    vol.write_stream("/small.txt", "b", &b, now).unwrap();
+    assert_eq!(set_counter(&vol, "/small.txt"), 0xf001);
+    let (got, a_clusters) = stream(&vol, "/small.txt", "a");
+    assert_eq!(got, a);
+    assert!(!a_clusters.is_empty());
+    assert_eq!(stream(&vol, "/small.txt", "b").0, b);
+    // Rewritten (shorter, still in clusters): the old clusters go free, the
+    // set id stays; then small enough to stay in the record.
+    vol.write_stream("/small.txt", "A", &a[..5000], now).unwrap();
+    assert_eq!(stream(&vol, "/small.txt", "a").0, &a[..5000]);
+    let used1 = used(&vol, 1);
+    assert!(a_clusters.iter().all(|c| !used1.contains(c)), "old clusters freed");
+    assert_eq!(set_counter(&vol, "/small.txt"), 0xf001);
+    vol.write_stream("/small.txt", "b", b"tiny", now).unwrap();
+    assert_eq!(stream(&vol, "/small.txt", "b"), (b"tiny".to_vec(), Vec::new()));
+    // The file keeps them through new content and a move, and takes their
+    // clusters along when it goes.
+    vol.write_file("/small.txt", &[9; 3000], now).unwrap();
+    vol.move_file("/small.txt", "/dir/streams.txt", now).unwrap();
+    let (got, clusters) = stream(&vol, "/dir/streams.txt", "a");
+    assert_eq!(got, &a[..5000]);
+    vol.delete_file("/dir/streams.txt", now).unwrap();
+    let used1 = used(&vol, 1);
+    assert!(clusters.iter().all(|c| !used1.contains(c)), "freed with the file");
+    assert_allocated(&vol, &skip, "streams in clusters");
+    assert_pages_valid(&vol, &skip, "streams in clusters");
 }
