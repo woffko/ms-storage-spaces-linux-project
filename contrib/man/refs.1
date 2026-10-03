@@ -176,13 +176,15 @@ stream snapshots and a link's target.
 .TP
 .B mount
 Mount the volume read-only through FUSE, in the foreground (unmount with
-.BR "fusermount \-u" ).
+.BR "fusermount \-u" ;
+mounted by root, a block device is mounted as type fuseblk, as ntfs\-3g
+mounts are, which udisks2 counts as the device's mount).
 With
 .B \-\-rw
 (one image, disk or partition; not
 .BR \-\-space )
-the mount writes: files (written back whole when closed; the size
-limit is that of
+the mount writes: files (written back when closed, the changed parts
+in place as Windows changes them; the size limit is that of
 .BR create ),
 directories, renames, hard links, times, the read-only attribute and
 named streams, each change one transaction as the writing commands make

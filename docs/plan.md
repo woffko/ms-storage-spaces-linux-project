@@ -1016,11 +1016,14 @@ passes the same checks. Release `v1.0.0`.
   udisks2 lists (the udev rule attaches pools when their disks appear),
   blkid 2.37 already reports ReFS, and `mount.ReFS` (contrib) lets
   `mount -t ReFS`, fstab and `udisksctl mount` mount ReFS volumes through
-  `refs mount` (tried on the Linux test VM, udisks2 2.9.4). Not done:
-  udisks2 does not count those FUSE mounts as mounts (fuser mounts type
-  `fuse`, not `fuseblk`), and libblockdev has a fixed set of plugin types
-  (a Storage Spaces one, with pool management over D-Bus, would need
-  libblockdev and udisks2 changes upstream).
+  `refs mount` (tried on the Linux test VM, udisks2 2.9.4). Mounted by
+  root, a block device is mounted as type `fuseblk` (fuser's fusermount3
+  path with `blkdev`), so udisks2 counts it as the device's mount:
+  `udisksctl mount` and `unmount` work on the Linux test VM (2026-10-03;
+  before, udisks2 lost track of type `fuse` mounts). Not done:
+  libblockdev has a fixed set of plugin types (a Storage Spaces one, with
+  pool management over D-Bus, would need libblockdev and udisks2 changes
+  upstream).
 * A native kernel dm target or kernel driver, only if ublk performance is
   insufficient. Not needed: ublk reads at 91-93 % of dm (which runs at
   member speed) and beats it for 64 KiB reads, against a target of 70 %

@@ -396,7 +396,12 @@ impl RefsFs {
         }
         let (rw, ro) = if self.writable { (0o200, 0o555) } else { (0, 0o555) };
         let (kind, mut size, perm, times) = match &entry {
-            None => (FileType::Directory, 0, ro | rw, Times::default()),
+            None => (
+                FileType::Directory,
+                0,
+                ro | rw,
+                vol.directory_times(refs::volume::ROOT_DIRECTORY).unwrap_or_default(),
+            ),
             Some(e) if Self::is_link(e) => (
                 FileType::Symlink,
                 self.link(vol, &path).map_or(0, |l| l.len() as u64),
@@ -1047,8 +1052,18 @@ impl Filesystem for RefsFs {
 
 /// Mounts the volume at `mountpoint` and serves it until unmounted; with
 /// `writable` changes go to the volume. `source` names the mount (the
-/// device, as mount(8) and udisks2 expect to find it in the mount table).
-pub fn serve(vol: Volume<Rw>, source: &str, mountpoint: &Path, allow_other: bool, writable: bool) -> Result<()> {
+/// device, as mount(8) and udisks2 expect to find it in the mount table);
+/// with `blkdev` (root, a block device) the mount is of type fuseblk on
+/// that device, as ntfs-3g's are, so that udisks2 counts it as the
+/// device's mount.
+pub fn serve(
+    vol: Volume<Rw>,
+    source: &str,
+    mountpoint: &Path,
+    allow_other: bool,
+    writable: bool,
+    blkdev: bool,
+) -> Result<()> {
     let mut config = Config::default();
     config.mount_options.extend([
         MountOption::FSName(source.into()),
@@ -1060,6 +1075,18 @@ pub fn serve(vol: Volume<Rw>, source: &str, mountpoint: &Path, allow_other: bool
     }
     if allow_other {
         config.acl = fuser::SessionACL::All;
+    }
+    if blkdev {
+        // fusermount3 makes a fuseblk mount of "blkdev" (fuser mounts
+        // type fuse itself, as root, unless asked to unmount through
+        // fusermount3 when the process ends; that needs allow_other, which
+        // fuser narrows to root and the owner itself).
+        config
+            .mount_options
+            .extend([MountOption::CUSTOM("blkdev".into()), MountOption::AutoUnmount]);
+        if config.acl == fuser::SessionACL::Owner {
+            config.acl = fuser::SessionACL::RootAndOwner;
+        }
     }
     // Changes are made one at a time; reads may run beside each other.
     config.n_threads = Some(if writable { 1 } else { 4 });

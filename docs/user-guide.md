@@ -451,8 +451,9 @@ reports) and `/sbin/mount.refs`, lets `mount -t ReFS /dev/sdb2 /mnt`,
 (`udisksctl mount -b /dev/sdb2`, desktop file managers) mount ReFS
 volumes through `refs mount`, in the background. Mounted by root, every
 user may enter the mount; it is read-only unless the options hold both
-`rw` and `refs.rw`. udisks2 mounts such volumes but does not count FUSE
-mounts of block devices as mounted: unmount them with `umount`. Every metadata page is checked against its checksum; a volume that
+`rw` and `refs.rw`. Mounted by root, a block device is mounted as type
+`fuseblk` (as ntfs-3g mounts are), so udisks2 counts it as the device's
+mount: `udisksctl unmount` and the file managers unmount it. Every metadata page is checked against its checksum; a volume that
 fails is reported, not guessed at. The data of integrity streams
 (`Set-FileIntegrity`, or volumes formatted with integrity streams) is
 checked on every read too: damaged data is an error (EIO in the mount),

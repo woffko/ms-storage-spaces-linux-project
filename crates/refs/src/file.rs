@@ -320,6 +320,22 @@ impl<D: ReadAt> Volume<D> {
         Ok(rows)
     }
 
+    /// A directory's own times (its own row keeps them where a file's
+    /// record does: created, modified, changed, accessed from 0x28); the
+    /// root directory, which has no entry, has them only there.
+    pub fn directory_times(&self, oid: u64) -> Result<Times> {
+        let own = self.own_row(oid)?;
+        if own.len() < 0x48 {
+            return Err(format_err!("directory {oid:#x}: own row of {} bytes", own.len()));
+        }
+        Ok(Times {
+            created: le64(&own, 0x28),
+            modified: le64(&own, 0x30),
+            changed: le64(&own, 0x38),
+            accessed: le64(&own, 0x40),
+        })
+    }
+
     /// A directory's own row. Rows sort by their type, and the own row's
     /// is the lowest, so the walk stops at the first row of another type
     /// (the whole tree of a large directory is megabytes); a tree in

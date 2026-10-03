@@ -317,6 +317,14 @@ type Device = Box<dyn ReadAt>;
 
 /// A local file as the data `refs::write` writes from (its length fixed
 /// when opened).
+/// The process's effective user id (from /proc/self/status).
+#[cfg(feature = "fuse")]
+fn effective_uid() -> Option<u32> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|l| l.starts_with("Uid:"))?;
+    line.split_whitespace().nth(2)?.parse().ok()
+}
+
 struct FileSource(File, u64);
 
 impl FileSource {
@@ -972,7 +980,13 @@ fn main() -> Result<()> {
                     .display()
                     .to_string(),
             };
-            fuse::serve(vol, &name, &mountpoint, allow_other, rw)?;
+            // Root mounting a block device: a fuseblk mount of it.
+            let blkdev = source.space.is_none()
+                && source.devices.len() == 1
+                && std::fs::metadata(&source.devices[0])
+                    .is_ok_and(|m| std::os::unix::fs::FileTypeExt::is_block_device(&m.file_type()))
+                && effective_uid() == Some(0);
+            fuse::serve(vol, &name, &mountpoint, allow_other, rw, blkdev)?;
         }
         Command::Set {
             device,

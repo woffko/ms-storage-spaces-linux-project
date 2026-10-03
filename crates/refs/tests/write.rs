@@ -1671,9 +1671,13 @@ fn writing_an_empty_volume() {
     let mut vol = Volume::open(&overlay, offset).unwrap();
     let now = 135_000_000_000_000_000;
     let data: Vec<u8> = (0..300_000u32).map(|i| (i % 247) as u8).collect();
+    let root_times = vol.directory_times(ROOT_DIRECTORY).unwrap();
+    assert!(root_times.created > 133_000_000_000_000_000, "{root_times:?}");
     vol.create_file("/first.txt", b"first", now).unwrap();
     vol.create_directory("/dir", now).unwrap();
     vol.create_file("/dir/data.bin", &data, now).unwrap();
+    let times = vol.directory_times(ROOT_DIRECTORY).unwrap();
+    assert_eq!((times.created, times.modified), (root_times.created, now));
     assert_eq!(read_all(&vol, "/first.txt"), b"first");
     assert_eq!(read_all(&vol, "/dir/data.bin"), data);
     let root_security = {
