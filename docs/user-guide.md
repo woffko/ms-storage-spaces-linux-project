@@ -483,7 +483,8 @@ refs link devdrive.img --path /archive/log.txt --to /notes/log.txt --yes
 ```
 
 `refs overwrite` replaces bytes inside a file (not beyond its end, not in
-sparse ranges; integrity streams are copied) where they are, as Windows does,
+sparse ranges; the clusters of integrity streams it touches are copied
+on write) where they are, as Windows does,
 and sets the modification and change times to now. `refs create` makes a
 file (up to 1 KiB kept in its record; larger ones in clusters near the
 data of the files around it, read from the local file piece by piece,

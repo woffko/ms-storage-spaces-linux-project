@@ -1589,6 +1589,19 @@ impl<D: WriteAt> Volume<D> {
                 .checked_add(bytes.len() as u64)
                 .filter(|&e| e <= data.size)
                 .ok_or_else(|| Error::Unsupported(format!("{path}: writing beyond its {} bytes", data.size)))?;
+            // The clusters it touches, copied on write; the whole stream
+            // when that does not apply.
+            let fa = self.file_at(path)?;
+            if !fa.snapshots && !fa.reparse && data.size > MAX_INLINE as u64 {
+                let patch = Patch {
+                    size: data.size,
+                    at: offset,
+                    bytes,
+                };
+                if self.update_integrity(path, fa, &data, &patch, &[(offset, end)], now)? {
+                    return Ok(());
+                }
+            }
             if data.size > MAX_INTEGRITY_COPY {
                 return Err(Error::Unsupported(format!(
                     "{path}: overwriting integrity streams of more than {MAX_INTEGRITY_COPY} bytes"
@@ -1992,6 +2005,203 @@ impl<D: WriteAt> Volume<D> {
         }
     }
 
+    /// `update_file` for an integrity stream, as Windows changes one: the
+    /// clusters the `dirty` ranges touch are copied on write (their old
+    /// bytes with the new ones, to new clusters with new checksums; the
+    /// old ones freed, records split around them), clusters it grows by
+    /// are added after its own, clusters past its new end are freed. False
+    /// (nothing written) for streams it does not take: holes, shared
+    /// clusters, checksums of another kind than the volume's.
+    #[allow(clippy::too_many_arguments)]
+    fn update_integrity(
+        &mut self,
+        path: &str,
+        fa: FileAt,
+        stream: &crate::file::Stream,
+        data: &dyn Source,
+        dirty: &[(u64, u64)],
+        now: u64,
+    ) -> Result<bool> {
+        let kind = u16::from(self.integrity_kind());
+        let mut extents = match &stream.content {
+            crate::file::Content::Extents(x)
+                if le32(&fa.record, 0x48) & INTEGRITY != 0
+                    && !x.is_empty()
+                    && x.iter()
+                        .all(|x| x.written && x.checksums.as_ref().is_some_and(|c| c.kind == kind)) =>
+            {
+                x.clone()
+            }
+            _ => return Ok(false),
+        };
+        let new_size = data.len();
+        if new_size > MAX_INTEGRITY as u64 {
+            return Err(Error::Unsupported(format!(
+                "integrity streams of more than {MAX_INTEGRITY} bytes"
+            )));
+        }
+        extents.sort_by_key(|x| x.vcn);
+        let mut old_clusters = 0;
+        for x in &extents {
+            if x.vcn != old_clusters {
+                return Ok(false);
+            }
+            old_clusters += x.clusters;
+        }
+        let physical: Vec<(u64, u64)> = extents
+            .iter()
+            .map(|x| Ok((self.translate(x.vlcn)?, x.clusters)))
+            .collect::<Result<_>>()?;
+        if self.refcounted(&physical)? {
+            return Ok(false);
+        }
+        let cluster = self.cluster;
+        let new_clusters = new_size.div_ceil(cluster);
+        let kept = old_clusters.min(new_clusters);
+        // The kept clusters the changed bytes touch, as ranges.
+        let mut touched: Vec<(u64, u64)> = dirty
+            .iter()
+            .filter_map(|&(from, to)| {
+                let to = to.min(new_size).min(kept * cluster);
+                (from < to).then(|| (from / cluster, to.div_ceil(cluster)))
+            })
+            .collect();
+        touched.sort_unstable();
+        let mut copies: Vec<(u64, u64)> = Vec::new();
+        for (a, b) in touched {
+            match copies.last_mut() {
+                Some(l) if a <= l.1 => l.1 = l.1.max(b),
+                _ => copies.push((a, b)),
+            }
+        }
+        // Their new content: the old bytes, the changed ones over them,
+        // zeros past the new end.
+        let mut contents = Vec::with_capacity(copies.len());
+        for &(a, b) in &copies {
+            let mut buf = vec![0u8; ((b - a) * cluster) as usize];
+            let old_end = (stream.size.min(b * cluster) - a * cluster) as usize;
+            let mut at = 0;
+            while at < old_end {
+                let n = self.read_stream(stream, a * cluster + at as u64, &mut buf[at..old_end])?;
+                if n == 0 {
+                    break;
+                }
+                at += n;
+            }
+            for &(from, to) in dirty {
+                let (from, to) = (from.max(a * cluster), to.min(b * cluster).min(new_size));
+                if from < to {
+                    let o = (from - a * cluster) as usize;
+                    data.read_into(from, &mut buf[o..o + (to - from) as usize])?;
+                }
+            }
+            if new_size < b * cluster {
+                buf[(new_size - a * cluster) as usize..].fill(0);
+            }
+            contents.push(buf);
+        }
+        // The records it keeps (split around the copies), the clusters it
+        // frees.
+        let sums_of = |x: &crate::file::Extent, from: u64, n: u64| -> Vec<u8> {
+            let c = x.checksums.as_ref().unwrap();
+            let p = c.per_cluster;
+            c.values[from as usize * p..(from + n) as usize * p]
+                .iter()
+                .flat_map(|&v| {
+                    if c.kind == 1 {
+                        (v as u32).to_le_bytes().to_vec()
+                    } else {
+                        v.to_le_bytes().to_vec()
+                    }
+                })
+                .collect()
+        };
+        let mut out: Vec<(u64, u64, u64, Vec<u8>)> = Vec::new();
+        let mut free = Vec::new();
+        for x in &extents {
+            let (start, end) = (x.vcn, x.vcn + x.clusters);
+            let mut v = start;
+            while v < end {
+                let next = if v >= kept {
+                    (end, true)
+                } else {
+                    match copies.iter().find(|&&(_, b)| b > v) {
+                        Some(&(a, b)) if a <= v => (b.min(end), true),
+                        Some(&(a, _)) => (a.min(end).min(kept), false),
+                        None => (end.min(kept), false),
+                    }
+                };
+                let (stop, gone) = next;
+                if gone {
+                    for c in v..stop {
+                        free.push(self.translate(x.vlcn + (c - start))?);
+                    }
+                } else {
+                    out.push((v, x.vlcn + (v - start), stop - v, sums_of(x, v - start, stop - v)));
+                }
+                v = stop;
+            }
+        }
+        let table = fa.home.unwrap_or(fa.dir);
+        let band = self.data_band(fa.dir)?;
+        let live_key = |k: &[u8]| {
+            k.len() >= 0x18 && le32(k, 8) == 0x8000_0002 && le32(k, 12) & 0xffff == 0x80 && le64(k, 0x10) == LIVE_STREAM
+        };
+        let mut rows = embedded_rows(&fa.record)?;
+        let at = rows
+            .iter()
+            .position(|r| live_key(row_key(r)))
+            .ok_or_else(|| format_err!("{path}: no live level of its data"))?;
+        free.extend(self.extent_map_pages(row_value(&rows[at]))?);
+        {
+            let mut tx = Transaction::begin(&*self)?;
+            tx.free_data(&free)?;
+            // The copies and the clusters it grows by, to new clusters.
+            let mut writes: Vec<(u64, u64, std::borrow::Cow<'_, [u8]>)> = copies
+                .iter()
+                .zip(&contents)
+                .map(|(&(a, b), buf)| (a, b, std::borrow::Cow::Borrowed(&buf[..])))
+                .collect();
+            if new_clusters > old_clusters {
+                writes.push((old_clusters, new_clusters, std::borrow::Cow::Owned(Vec::new())));
+            }
+            for (a, b, content) in writes {
+                let runs = tx.take_data(band, b - a, a)?;
+                let mut vcn = a;
+                for (lcn, n) in runs {
+                    let mut buf = vec![0u8; (n * cluster) as usize];
+                    if content.is_empty() {
+                        let len = (n * cluster).min(new_size - vcn * cluster);
+                        data.read_into(vcn * cluster, &mut buf[..len as usize])?;
+                    } else {
+                        let (o, len) = (((vcn - a) * cluster) as usize, buf.len());
+                        buf.copy_from_slice(&content[o..o + len]);
+                    }
+                    self.write_clusters(lcn, &buf)?;
+                    out.push((vcn, self.virtual_of(lcn)?, n, self.checksums_of(&buf)));
+                    vcn += n;
+                }
+            }
+            self.dev.flush()?;
+            out.sort_by_key(|x| x.0);
+            let allocated = new_clusters * cluster;
+            let live = self.map_value(&mut tx, table, new_size, allocated, &out)?;
+            let mut key = row_key(&rows[at]).to_vec();
+            key[0..8].copy_from_slice(&(live.len() as u64).to_le_bytes());
+            rows[at] = row(&key, &live, ROW_EMBEDS_NODE);
+            let mut record = record_with_rows(&fa.record, &rows, le32(&fa.record, 0x98))?;
+            record[0x58..0x60].copy_from_slice(&new_size.to_le_bytes());
+            record[0x60..0x68].copy_from_slice(&allocated.to_le_bytes());
+            for at in [0x30, 0x38] {
+                record[at..at + 8].copy_from_slice(&now.to_le_bytes());
+            }
+            store_in(&mut tx, &fa, &record)?;
+            tx.commit()?;
+        }
+        self.load()?;
+        Ok(true)
+    }
+
     /// Changes a file's data in place, as Windows does for a stream in
     /// clusters without integrity checksums (and without snapshots or
     /// shared clusters): the `dirty` byte ranges of `data` within its
@@ -2016,6 +2226,13 @@ impl<D: WriteAt> Volume<D> {
                 && x.iter().all(|x| x.written && x.checksums.is_none()) =>
             {
                 x.clone()
+            }
+            Some(stream) if new_size > MAX_INLINE as u64 && !fa.snapshots && !fa.reparse => {
+                let stream = stream.clone();
+                if self.update_integrity(path, fa, &stream, data, dirty, now)? {
+                    return Ok(());
+                }
+                return self.write_file_from(path, data, now);
             }
             _ => return self.write_file_from(path, data, now),
         };
@@ -3195,6 +3412,30 @@ pub trait Source {
     fn read_into(&self, offset: u64, buf: &mut [u8]) -> Result<()>;
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// A stream's size and the bytes overwriting puts at `at` (the rest reads
+/// as zeros; overwriting reads only those).
+struct Patch<'a> {
+    size: u64,
+    at: u64,
+    bytes: &'a [u8],
+}
+
+impl Source for Patch<'_> {
+    fn len(&self) -> u64 {
+        self.size
+    }
+    fn read_into(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        buf.fill(0);
+        let end = self.at + self.bytes.len() as u64;
+        let (from, to) = (offset.max(self.at), (offset + buf.len() as u64).min(end));
+        if from < to {
+            buf[(from - offset) as usize..(to - offset) as usize]
+                .copy_from_slice(&self.bytes[(from - self.at) as usize..(to - self.at) as usize]);
+        }
+        Ok(())
     }
 }
 

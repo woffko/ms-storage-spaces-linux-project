@@ -1233,6 +1233,85 @@ fn writing_integrity_streams() {
 }
 
 #[test]
+fn changing_integrity_streams_in_place() {
+    // As Windows changes an integrity stream: the clusters a change
+    // touches are copied on write with new checksums, the rest stays.
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 135_300_000_000_000_000;
+    let runs = |vol: &Volume<_>, path: &str| -> Vec<(u64, u64, u64)> {
+        let file = vol.open_file(&vol.lookup(path).unwrap()).unwrap();
+        match file.data.unwrap().content {
+            refs::Content::Extents(x) => {
+                assert!(x.iter().all(|x| x.checksums.is_some()), "{path}: checksummed");
+                x.iter().map(|x| (x.vcn, x.vlcn, x.clusters)).collect()
+            }
+            refs::Content::Inline(_) => panic!("{path}: inline"),
+        }
+    };
+    let at = |runs: &[(u64, u64, u64)], vcn: u64| {
+        runs.iter()
+            .find(|r| r.0 <= vcn && vcn < r.0 + r.2)
+            .map(|r| r.1 + vcn - r.0)
+            .unwrap()
+    };
+    vol.create_file("/i.bin", b"", now).unwrap();
+    vol.set_integrity("/i.bin", true).unwrap();
+    let mut data: Vec<u8> = (0..200_000u32).map(|i| (i * 13 % 251) as u8).collect();
+    vol.write_file("/i.bin", &data, now).unwrap();
+    let before = runs(&vol, "/i.bin");
+    let used_before = used(&vol, 1).len();
+    // Three bytes in cluster 1: that cluster moves, the others stay.
+    vol.overwrite("/i.bin", 5000, b"XYZ", now).unwrap();
+    data[5000..5003].copy_from_slice(b"XYZ");
+    let after = runs(&vol, "/i.bin");
+    assert_ne!(at(&after, 1), at(&before, 1));
+    for vcn in [0, 2, 48] {
+        assert_eq!(at(&after, vcn), at(&before, vcn), "cluster {vcn}");
+    }
+    assert_eq!(read_all(&vol, "/i.bin"), data);
+    assert_eq!(used(&vol, 1).len(), used_before, "one cluster copied, one freed");
+    // Appended to (the last, partial cluster copied), changed in the
+    // middle and grown at once, then shortened.
+    let old = data.len() as u64;
+    data.extend((0..30_000u32).map(|i| (i % 7) as u8));
+    data[100_000] ^= 0xff;
+    vol.update_file(
+        "/i.bin",
+        &data.as_slice(),
+        &[(100_000, 100_001), (old, data.len() as u64)],
+        now,
+    )
+    .unwrap();
+    let grown = runs(&vol, "/i.bin");
+    assert_eq!(at(&grown, 0), at(&before, 0));
+    assert_ne!(at(&grown, 24), at(&before, 24));
+    assert_ne!(at(&grown, 48), at(&before, 48));
+    assert_eq!(read_all(&vol, "/i.bin"), data);
+    data.truncate(150_000);
+    vol.update_file("/i.bin", &data.as_slice(), &[], now).unwrap();
+    assert_eq!(read_all(&vol, "/i.bin"), data);
+    assert_allocated(&vol, &skip, "integrity changed in place");
+    assert_pages_valid(&vol, &skip, "integrity changed in place");
+    // A stream over several pages of extent map: one cluster copied.
+    let mut large: Vec<u8> = (0..40_000_000u32).map(|i| (i % 239) as u8).collect();
+    vol.create_file("/large.bin", b"", now).unwrap();
+    vol.set_integrity("/large.bin", true).unwrap();
+    vol.write_file("/large.bin", &large, now).unwrap();
+    let before = runs(&vol, "/large.bin");
+    vol.overwrite("/large.bin", 20_000_000, b"changed", now).unwrap();
+    large[20_000_000..20_000_007].copy_from_slice(b"changed");
+    let after = runs(&vol, "/large.bin");
+    assert_eq!(after.len(), before.len() + 2, "a record split around the copy");
+    assert_eq!(map_pages(&vol, "/large.bin").0, 3);
+    assert_eq!(read_all(&vol, "/large.bin"), large);
+    assert_allocated(&vol, &skip, "large integrity changed in place");
+    assert_pages_valid(&vol, &skip, "large integrity changed in place");
+}
+
+#[test]
 fn deleting_named_streams_in_clusters() {
     let (image, manifest, skip) = load("r314basic4k");
     let offset = manifest["partition_offset"].as_u64().unwrap();

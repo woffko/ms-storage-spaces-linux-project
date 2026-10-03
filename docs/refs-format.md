@@ -482,8 +482,12 @@ table's rows for a text diff):
   the $DATA value. Overwriting copies on write: the changed cluster goes
   to a new place with its own record, the old one is freed. `refs`
   writes the same records and checksums (**verified**: Windows read the
-  data, checking it, and went on writing); it copies a whole stream of
-  up to 64 MiB on an overwrite. On volumes of 64 KiB clusters the
+  data, checking it, and went on writing), and changes integrity streams
+  as Windows does (overwriting, appending, the mount's write-back): the
+  clusters a change touches go to new clusters with new checksums, their
+  record split around them, the old ones freed; clusters it grows by
+  follow (**verified**: Windows read a 64 MB stream patched in the
+  middle and appended to so, patched it itself, and `refs` read that). On volumes of 64 KiB clusters the
   checksums are CRC-64 per 16 KiB (kind 2, four per cluster), and
   `refs` writes them so (**verified**: Windows read 6 MB written so). A larger
   map (6 MB of integrity stream: three records of up to 768 clusters'

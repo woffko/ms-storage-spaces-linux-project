@@ -231,8 +231,9 @@ Replace bytes of a file with the content of
 .I local-file
 at byte
 .IR offset ,
-where they are (within the file's size; not in sparse ranges; an
-integrity stream is copied with new checksums), and set its
+where they are (within the file's size; not in sparse ranges; the
+clusters of an integrity stream it touches are copied on write with new
+checksums, as Windows does), and set its
 modification and change times to now.
 Experimental; only with
 .BR \-\-yes .
