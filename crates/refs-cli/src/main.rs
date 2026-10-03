@@ -87,6 +87,11 @@ enum Command {
         /// Allow other users to read the mount (needs user_allow_other).
         #[arg(long)]
         allow_other: bool,
+        /// Mount for writing (experimental: every change is a transaction
+        /// as `refs write` makes; files up to 64 MiB are written; not
+        /// --space).
+        #[arg(long)]
+        rw: bool,
     },
     /// Change a file's times or attributes (experimental: writes the
     /// volume, only with --yes). Times are UTC, "YYYY-MM-DD hh:mm:ss" or a
@@ -299,6 +304,33 @@ enum Command {
 
 /// A device for the volume: a file, or a space of a pool.
 type Device = Box<dyn ReadAt>;
+
+/// A device that refuses writes (a volume mounted read-only).
+#[cfg(feature = "fuse")]
+struct ReadOnly(Device);
+
+#[cfg(feature = "fuse")]
+impl ReadAt for ReadOnly {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        self.0.read_exact_at(buf, offset)
+    }
+    fn size(&self) -> std::io::Result<u64> {
+        self.0.size()
+    }
+}
+
+#[cfg(feature = "fuse")]
+impl storage_spaces::io::WriteAt for ReadOnly {
+    fn write_all_at(&self, _buf: &[u8], _offset: u64) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "mounted read-only",
+        ))
+    }
+    fn flush(&self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 fn open_device(source: &Source) -> Result<Device> {
     let files = source
@@ -848,9 +880,40 @@ fn main() -> Result<()> {
             source,
             mountpoint,
             allow_other,
+            rw,
         } => {
-            let vol = open_volume(&source)?;
-            fuse::serve(vol, &mountpoint, allow_other)?;
+            let vol: Volume<fuse::Rw> = if rw {
+                if source.space.is_some() || source.devices.len() != 1 {
+                    bail!("--rw mounts one image, disk or partition (not --space)");
+                }
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&source.devices[0])
+                    .with_context(|| format!("cannot open {}", source.devices[0].display()))?;
+                let offset = match source.offset {
+                    Some(o) => o,
+                    None => *find_volumes(&file)?.first().context("no ReFS volume on the device")?,
+                };
+                let vol = Volume::open(Box::new(file) as fuse::Rw, offset)?;
+                if vol.log_state()?.needs_replay() {
+                    bail!(
+                        "the volume's log has changes its checkpoint lacks: attach it to Windows once and \
+                         detach it before mounting it for writing"
+                    );
+                }
+                vol
+            } else {
+                let dev = open_device(&source)?;
+                let offset = match source.offset {
+                    Some(o) => o,
+                    None => *find_volumes(dev.as_ref())?
+                        .first()
+                        .context("no ReFS volume on the device (or its partitions)")?,
+                };
+                Volume::open(Box::new(ReadOnly(dev)) as fuse::Rw, offset)?
+            };
+            fuse::serve(vol, &mountpoint, allow_other, rw)?;
         }
         Command::Set {
             device,

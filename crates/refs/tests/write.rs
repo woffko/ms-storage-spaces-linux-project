@@ -1487,3 +1487,61 @@ fn deleting_links_and_files_with_snapshots() {
     assert_allocated(&vol, &skip, "snapshots deleted");
     assert_pages_valid(&vol, &skip, "snapshots deleted");
 }
+
+#[test]
+fn renaming_only_the_case_of_a_name() {
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 134_800_000_000_000_000;
+    let data = read_all(&vol, "/small.txt");
+    vol.rename("/small.txt", "SMALL.txt", now).unwrap();
+    vol.rename("/dir", "Dir", now).unwrap();
+    vol.rename("/SMALL.txt", "SMALL.txt", now).unwrap();
+    let names: Vec<String> = vol
+        .read_dir(ROOT_DIRECTORY)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert!(
+        names.contains(&"SMALL.txt".to_owned()) && names.contains(&"Dir".to_owned()),
+        "{names:?}"
+    );
+    assert_eq!(read_all(&vol, "/SMALL.txt"), data);
+    assert!(
+        vol.rename("/SMALL.txt", "last.txt", now).is_err(),
+        "another file's name"
+    );
+    assert_pages_valid(&vol, &skip, "case");
+}
+
+#[test]
+fn data_beyond_its_band() {
+    // More data than the bitmap row of the files around it holds (16384
+    // clusters): other rows, then free uniform ranges made bitmaps.
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 134_900_000_000_000_000;
+    let files: Vec<(String, Vec<u8>)> = (0..3u8)
+        .map(|k| {
+            let data: Vec<u8> = (0..30_000_000u32).map(|i| (i % 251) as u8 ^ k).collect();
+            (format!("/big{k}.bin"), data)
+        })
+        .collect();
+    for (path, data) in &files {
+        vol.create_file(path, data, now).unwrap();
+    }
+    for (path, data) in &files {
+        assert!(read_all(&vol, path) == *data, "{path}");
+    }
+    assert_allocated(&vol, &skip, "beyond the band");
+    assert_pages_valid(&vol, &skip, "beyond the band");
+    for (path, _) in &files {
+        vol.delete_file(path, now).unwrap();
+    }
+    assert_allocated(&vol, &skip, "freed again");
+}

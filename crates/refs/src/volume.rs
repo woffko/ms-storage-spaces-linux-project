@@ -11,7 +11,7 @@ use crate::checksum::{crc32c, crc64, sha256};
 use crate::error::{Error, Result, format_err};
 use crate::node::{Node, Row};
 use crate::page::{PAGE_HEADER_SIZE, PageHeader, PageRef};
-use crate::util::{le32, le64};
+use crate::util::{le16, le32, le64};
 
 /// Cluster of the primary superblock.
 pub const SUPERBLOCK_LCN: u64 = 0x1e;
@@ -438,6 +438,24 @@ impl<D: ReadAt> Volume<D> {
     }
 
     /// Every leaf row of an object's tree, in key order.
+    /// The clusters free for data (the medium allocator's bitmap rows'
+    /// free counts and its free uniform ranges).
+    pub fn free_clusters(&self) -> Result<u64> {
+        let mut free = 0u64;
+        self.walk(&self.checkpoint.roots[1].clone(), false, &mut |row| {
+            let v = row.value;
+            if v.len() >= 0x18 {
+                match (le16(v, 0x12), le16(v, 0x10)) {
+                    (1, n) => free += u64::from(n),
+                    (2, 0xffff) => free += le64(v, 8),
+                    _ => {}
+                }
+            }
+            Ok(())
+        })?;
+        Ok(free)
+    }
+
     pub fn object_rows(&self, oid: u64) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let root = self.object(oid)?.clone();
         let mut rows = Vec::new();

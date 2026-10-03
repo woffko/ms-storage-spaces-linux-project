@@ -24,7 +24,7 @@ use storage_spaces::io::WriteAt;
 
 use crate::checksum::{crc32c, crc64};
 use crate::error::{Error, Result, format_err};
-use crate::file::{LIVE_STREAM, Target, Times};
+use crate::file::{Entry, LIVE_STREAM, Target, Times};
 use crate::node::Node;
 use crate::page::{PAGE_HEADER_SIZE, PageRef, store_reference};
 use crate::util::{le16, le32, le64, utf16};
@@ -241,64 +241,97 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
             .collect())
     }
 
-    /// `count` clusters for file data from the medium allocator's bitmap
-    /// row that starts at `band` (the row where data near it is), in as few
-    /// runs as fit: (first physical cluster, clusters) each, marked used.
+    /// `count` clusters for file data from the medium allocator, in as
+    /// few runs as fit: (first physical cluster, clusters) each, marked
+    /// used. They come from the bitmap row that starts at `band` (where
+    /// data near it is) and, when it is full, from other bitmap rows, then
+    /// from free uniform ranges turned into bitmap rows.
     fn take_data(&mut self, band: u64, count: u64) -> Result<Vec<(u64, u64)>> {
-        let (start, len, at) = self
+        let mut runs = Vec::new();
+        let (mut left, mut vcn) = (count, 0);
+        let mut tried = std::collections::HashSet::new();
+        while left > 0 {
+            let rows = self.bitmaps(ROOT_MEDIUM_ALLOCATOR)?;
+            let free = |at: &RowAt| le16(&self.pages[at.page].data[at.value..], 0x10);
+            let next = if !tried.contains(&band) && rows.iter().any(|r| r.0 == band) {
+                band
+            } else if let Some(r) = rows.iter().find(|r| !tried.contains(&r.0) && free(&r.2) > 0) {
+                r.0
+            } else {
+                self.unpack_free(ROOT_MEDIUM_ALLOCATOR)?
+            };
+            tried.insert(next);
+            runs.extend(self.take_from_row(next, &mut left, &mut vcn)?);
+        }
+        Ok(runs)
+    }
+
+    /// Takes free clusters of the medium allocator's bitmap row at `start`
+    /// for data, up to `left` (lowered by what it takes; `vcn` counts the
+    /// stream's clusters so far): as Windows places data, after the data
+    /// already in the row (the free clusters below it only when nothing is
+    /// left above), in runs that end at the stream's clusters 1, 64, 256
+    /// and multiples of 256.
+    fn take_from_row(&mut self, start: u64, left: &mut u64, vcn: &mut u64) -> Result<Vec<(u64, u64)>> {
+        let (_, len, at) = self
             .bitmaps(ROOT_MEDIUM_ALLOCATOR)?
             .into_iter()
-            .find(|(start, _, _)| *start == band)
-            .ok_or_else(|| format_err!("no allocator bitmap at {band:#x}"))?;
+            .find(|(s, _, _)| *s == start)
+            .ok_or_else(|| format_err!("no allocator bitmap at {start:#x}"))?;
         let v = &self.pages[at.page].data[at.value..at.value + at.len];
-        if (le16(v, 0x10) as u64) < count {
-            return Err(Error::Unsupported(
-                "no room for the data in its band (other bands are not used yet)".into(),
-            ));
-        }
         let used =
             |j: u64| v[ALLOCATOR_HEADER + (j / 8) as usize] >> (j % 8) & 1 != 0 || self.freed.contains(&(start + j));
-        // As Windows places data: after the data already in the row (the
-        // free clusters below it only when nothing is left above), in runs
-        // that end at the file's clusters 1, 64, 256 and multiples of 256.
         let after = (0..len).rev().find(|&j| used(j)).map_or(0, |j| j + 1);
         let mut runs: Vec<(u64, u64)> = Vec::new();
-        let mut left = count;
-        let mut vcn = 0;
         for (from, to) in [(after, len), (0, after)] {
             let mut j = from;
-            while left > 0 && j < to {
+            while *left > 0 && j < to {
                 if used(j) {
                     j += 1;
                     continue;
                 }
-                let boundary = match vcn {
+                let boundary = match *vcn {
                     0 => 1,
                     1..64 => 64,
-                    _ => (vcn / 256 + 1) * 256,
+                    _ => (*vcn / 256 + 1) * 256,
                 };
                 let mut n = 0;
-                while j + n < to && n < left && vcn + n < boundary && !used(j + n) {
+                while j + n < to && n < *left && *vcn + n < boundary && !used(j + n) {
                     n += 1;
                 }
                 runs.push((j, n));
-                left -= n;
-                vcn += n;
+                *left -= n;
+                *vcn += n;
                 j += n;
             }
         }
-        if left > 0 {
-            return Err(Error::Unsupported("no room for the data in its band".into()));
-        }
+        let taken: u64 = runs.iter().map(|r| r.1).sum();
         let v = self.value_mut(at);
         for &(j, n) in &runs {
             for k in j..j + n {
                 v[ALLOCATOR_HEADER + (k / 8) as usize] |= 1 << (k % 8);
             }
         }
-        let free = le16(v, 0x10) - count as u16;
+        let free = le16(v, 0x10).saturating_sub(taken as u16);
         v[0x10..0x12].copy_from_slice(&free.to_le_bytes());
         Ok(runs.into_iter().map(|(j, n)| (start + j, n)).collect())
+    }
+
+    /// Turns the first block of a free uniform row (kind 2, all free) into
+    /// a bitmap row of 0x4000 free clusters, as Windows keeps rows in use;
+    /// its start.
+    fn unpack_free(&mut self, allocator: usize) -> Result<u64> {
+        let rows = self.rows(Tree::Root(allocator), &|_| true)?;
+        let start = rows
+            .iter()
+            .map(|r| &self.pages[r.page].data[r.value..r.value + r.len])
+            .find(|v| {
+                v.len() == 0x18 && le16(v, 0x12) == 2 && le16(v, 0x10) == 0xffff && le64(v, 8).is_multiple_of(0x4000)
+            })
+            .map(|v| le64(v, 0))
+            .ok_or_else(|| Error::Unsupported("the volume is full".into()))?;
+        self.unpack(allocator, start)?;
+        Ok(start)
     }
 
     /// `n` free clusters of an allocator, aligned to `n`, marked used.
@@ -395,10 +428,11 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         self.release(ROOT_MEDIUM_ALLOCATOR, &free)
     }
 
-    /// Turns the block of a fully used uniform allocator row (kind 2, no
-    /// free clusters) that holds cluster `c` into a bitmap row of its
-    /// 0x4000 clusters, all used, so that clusters there can be freed: the
-    /// row becomes up to three (uniform before, the bitmap, uniform after).
+    /// Turns the block of a uniform allocator row (kind 2, all used or all
+    /// free) that holds cluster `c` into a bitmap row of its 0x4000
+    /// clusters, all used or all free, so that clusters there can be freed
+    /// or taken: the row becomes up to three (uniform before, the bitmap,
+    /// uniform after).
     fn unpack(&mut self, allocator: usize, c: u64) -> Result<()> {
         const BLOCK: u64 = 0x4000;
         let tree = Tree::Root(allocator);
@@ -407,7 +441,13 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         })?;
         let v = self.pages[at.page].data[at.value..at.value + at.len].to_vec();
         let (start, count) = (le64(&v, 0), le64(&v, 8));
-        if v.len() != 0x18 || le16(&v, 0x12) != 2 || le16(&v, 0x10) != 0 || start % BLOCK != 0 || count % BLOCK != 0 {
+        let all_free = le16(&v, 0x10) == 0xffff;
+        if v.len() != 0x18
+            || le16(&v, 0x12) != 2
+            || !(le16(&v, 0x10) == 0 || all_free)
+            || start % BLOCK != 0
+            || count % BLOCK != 0
+        {
             return Err(format_err!(
                 "cluster {c:#x} in an allocator row of kind {} with {} free (not a used uniform row)",
                 le16(&v, 0x12),
@@ -422,8 +462,11 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
             u[8..16].copy_from_slice(&n.to_le_bytes());
             row(&key(s, n), &u, 0)
         };
-        let mut bitmap = vec![0xffu8; ALLOCATOR_HEADER + (BLOCK / 8) as usize];
+        let mut bitmap = vec![if all_free { 0 } else { 0xff }; ALLOCATOR_HEADER + (BLOCK / 8) as usize];
         bitmap[..0x18].fill(0);
+        if all_free {
+            bitmap[0x10..0x12].copy_from_slice(&(BLOCK as u16).to_le_bytes());
+        }
         bitmap[0..8].copy_from_slice(&block.to_le_bytes());
         bitmap[8..16].copy_from_slice(&BLOCK.to_le_bytes());
         bitmap[0x12..0x14].copy_from_slice(&ALLOCATOR_BITMAP.to_le_bytes());
@@ -1788,8 +1831,13 @@ impl<D: WriteAt> Volume<D> {
         let file = self.file_at(path)?;
         check_name(new_name)?;
         let target = format!("{}/{new_name}", file.parent.trim_end_matches('/'));
+        if new_name == file.name {
+            return Ok(());
+        }
         match self.lookup(&target) {
             Err(Error::NotFound(_)) => {}
+            // The file itself: only the case of its name changes.
+            Ok(e) if e.name == file.name => {}
             Ok(_) => return Err(Error::Unsupported(format!("{target} exists"))),
             Err(e) => return Err(e),
         }
@@ -1893,6 +1941,11 @@ impl<D: WriteAt> Volume<D> {
         check_name(to_name)?;
         match self.lookup(to) {
             Err(Error::NotFound(_)) => {}
+            // The directory itself: only the case of its name changes.
+            Ok(Entry {
+                target: Target::Directory(o),
+                ..
+            }) if o == oid => {}
             Ok(_) => return Err(Error::Unsupported(format!("{to} exists"))),
             Err(e) => return Err(e),
         }

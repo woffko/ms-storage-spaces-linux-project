@@ -749,6 +749,13 @@ rows of thin spaces not allocated yet (M7).
   stream snapshots (every level's clusters freed), symbolic links and
   junctions are deleted too (Windows: healthy, no leak, recreated them).
   Not done: rewriting files with snapshots, cloning files.
+  `refs mount --rw` writes through the FUSE mount (inodes are paths; a
+  file is written back whole on close, up to 64 MiB); data takes other
+  allocator rows, then free uniform ranges, once its band is full. A
+  source tree of 1291 files (76 MB) copied, edited, moved and partly
+  deleted through it was identical to the local copy after a remount,
+  and on Windows every hash matched, refsutil leak and triage were as for
+  the untouched volume, and Windows deleted and copied trees there.
 
 ## Test infrastructure (continuous, feeds every stage)
 

@@ -418,14 +418,27 @@ refs cat /dev/sdb2 --path /db.mdf --snapshot nightly > db-nightly.mdf
 refs ls --space Data /dev/sdd /dev/sde    # ReFS inside a space
 refs mount --space Data /dev/sdd /dev/sde mnt    # options before the disks
 mkdir -p mnt && refs mount /dev/sdb2 mnt  # read-only FUSE mount, foreground
+refs mount --rw image.img mnt              # for writing (experimental)
 fusermount -u mnt
 ```
 
 The mount shows named streams as extended attributes `user.<name>`
 (`getfattr -d`; Linux limits them to 64 KiB, larger streams are read with
 `refs cat --stream`), symbolic links and junctions as symbolic links (an
-absolute target `C:\path` points into the mount) and hard links with one
-inode. Every metadata page is checked against its checksum; a volume that
+absolute target `C:\path` points into the mount) and hard-linked files
+with their link count (each name has its own inode).
+
+With `--rw` (one image, disk or partition; not `--space`) the mount
+writes through the same code as the writing commands below: creating,
+writing, truncating and deleting files (up to 64 MiB each: a file opened
+for writing is kept in memory and written back whole when it is closed or
+synced), directories, renames and moves, hard links, times (`touch`), the
+read-only attribute (`chmod a-w`) and named streams (`setfattr -n
+user.NAME`). Every change is one transaction with a new checkpoint, so a
+crash or a pulled cable leaves the volume as it was after the last
+completed change. Symbolic links cannot be made. The mount is served by
+one thread; it suits copying files to or from a Dev Drive, not heavy
+use. Every metadata page is checked against its checksum; a volume that
 fails is reported, not guessed at. The data of integrity streams
 (`Set-FileIntegrity`, or volumes formatted with integrity streams) is
 checked on every read too: damaged data is an error (EIO in the mount),

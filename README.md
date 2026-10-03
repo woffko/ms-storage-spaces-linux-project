@@ -95,6 +95,7 @@ are given) are read with `refs`, see `man contrib/man/refs.1`:
 refs ls /dev/sdb2 -lR
 refs cat /dev/sdb2 --path /src/main.c > main.c
 refs mount /dev/sdb2 /mnt/devdrive             # read-only, FUSE
+refs mount --rw devdrive.img /mnt/devdrive     # for writing (experimental)
 refs ls --space Data /dev/sdd /dev/sde --path /
 ```
 
