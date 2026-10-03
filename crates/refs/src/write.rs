@@ -1422,7 +1422,7 @@ impl<D: WriteAt> Volume<D> {
                 for s in streams {
                     insert_attribute(&mut rows, s);
                 }
-                record = record_with_rows(&record, &rows, le64(&record, 0x98))?;
+                record = record_with_rows(&record, &rows, le32(&record, 0x98))?;
             }
             if let Some(home) = home {
                 // A moved or linked file: the new record keeps the names,
@@ -1775,7 +1775,7 @@ impl<D: WriteAt> Volume<D> {
         record[0x38..0x40].copy_from_slice(&now.to_le_bytes());
         let mut rows: Vec<Vec<u8>> = names.iter().map(|(d, n)| link_row(*d, n)).collect();
         rows.extend(embedded_rows(&record)?);
-        let record = record_with_rows(&record, &rows, names.len() as u64)?;
+        let record = record_with_rows(&record, &rows, names.len() as u32)?;
         {
             let mut tx = Transaction::begin(&*self)?;
             tx.remove_row(Tree::Object(home), &|k| is_name_row(k, &name))?;
@@ -1832,7 +1832,7 @@ impl<D: WriteAt> Volume<D> {
             .map_or_else(|| stream.to_owned(), |r| utf16(&row_key(r)[0x10..]));
         rows.retain(|r| !is_stream_row(r, Some(stream)));
         insert_attribute(&mut rows, stream_row(&name, data));
-        let mut record = record_with_rows(&file.record, &rows, le64(&file.record, 0x98))?;
+        let mut record = record_with_rows(&file.record, &rows, le32(&file.record, 0x98))?;
         for at in [0x30, 0x38, 0x40] {
             record[at..at + 8].copy_from_slice(&now.to_le_bytes());
         }
@@ -1849,7 +1849,7 @@ impl<D: WriteAt> Volume<D> {
         if rows.len() == count {
             return Err(Error::NotFound(format!("{path}:{stream}")));
         }
-        let mut record = record_with_rows(&file.record, &rows, le64(&file.record, 0x98))?;
+        let mut record = record_with_rows(&file.record, &rows, le32(&file.record, 0x98))?;
         record[0x38..0x40].copy_from_slice(&now.to_le_bytes());
         self.store_record(&file, &record)
     }
@@ -2372,7 +2372,7 @@ fn resident_record(data: &[u8], now: u64, id: u64, common: u64) -> Vec<u8> {
     put64(&mut r, 0x58, data.len() as u64);
     put64(&mut r, 0x60, allocated as u64);
     put64(&mut r, 0x80, id);
-    put64(&mut r, 0x98, 1);
+    put32(&mut r, 0x98, 1);
     let h = NODE;
     put32(&mut r, h, 0x28);
     put32(&mut r, h + 4, (0x28 + attribute.len()) as u32);
@@ -2657,7 +2657,7 @@ fn directory_record(parent: u64, name_utf16: &[u8], now: u64, security: u64) -> 
         put64(&mut r, at, now);
     }
     put64(&mut r, 0x50, security);
-    put64(&mut r, 0x98, 1);
+    put32(&mut r, 0x98, 1);
     let h = NODE;
     put32(&mut r, h, 0x28);
     put32(&mut r, h + 4, rows as u32);
@@ -2750,8 +2750,9 @@ fn embedded_rows(record: &[u8]) -> Result<Vec<Vec<u8>>> {
     Ok(out)
 }
 
-/// A record with `rows` (in order) as its attribute node and `links` names.
-fn record_with_rows(record: &[u8], rows: &[Vec<u8>], links: u64) -> Result<Vec<u8>> {
+/// A record with `rows` (in order) as its attribute node and `links` names
+/// (a u32 at 0x98; 0x9c holds the last stream set id given out).
+fn record_with_rows(record: &[u8], rows: &[Vec<u8>], links: u32) -> Result<Vec<u8>> {
     let h = le32(record, 0) as usize;
     let used: usize = rows.iter().map(Vec::len).sum();
     let free = 4 * rows.len() % 8;
@@ -2759,7 +2760,7 @@ fn record_with_rows(record: &[u8], rows: &[Vec<u8>], links: u64) -> Result<Vec<u
     let mut r = record.get(..h).ok_or_else(|| format_err!("record header"))?.to_vec();
     r.resize(h + index + 4 * rows.len(), 0);
     r[0x20..0x28].copy_from_slice(&(rows.len() as u64).to_le_bytes());
-    r[0x98..0xa0].copy_from_slice(&links.to_le_bytes());
+    r[0x98..0x9c].copy_from_slice(&links.to_le_bytes());
     let put = |r: &mut Vec<u8>, at: usize, v: u32| r[at..at + 4].copy_from_slice(&v.to_le_bytes());
     put(&mut r, h, 0x28);
     put(&mut r, h + 4, (0x28 + used) as u32);
@@ -2836,7 +2837,7 @@ fn record_with_names(record: &[u8], mut names: Names, rows: Vec<Vec<u8>>) -> Res
     names.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| upcased(&a.1).cmp(&upcased(&b.1))));
     let mut all: Vec<Vec<u8>> = names.iter().map(|(d, n)| link_row(*d, n)).collect();
     all.extend(rows);
-    record_with_rows(record, &all, names.len() as u64)
+    record_with_rows(record, &all, names.len() as u32)
 }
 
 fn utf16_bytes(name: &str) -> Vec<u8> {

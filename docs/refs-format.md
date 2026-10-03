@@ -131,7 +131,9 @@ A directory's tree holds, keyed by a u16 row type at key 0:
     when the data is inline; 0x50 a security descriptor reference (files
     with the same descriptor share it; directories have their own); size
     at 0x58; allocated at 0x60; the file id at 0x80 (the key of its type
-    0x20 row); 0x98 1 (links); the attribute tree's node at 0xa8.
+    0x20 row); 0x98 the link count (u32); 0x9c the last stream set id
+    given out (u32, 0xf000 after the first named stream in clusters;
+    rewriting a record must keep it); the attribute tree's node at 0xa8.
     (**verified**: files `refs create` writes this way are read, changed
     and deleted by Windows, with the inherited permissions of their
     neighbours);

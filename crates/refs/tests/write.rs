@@ -839,7 +839,7 @@ fn moving_and_linking_files() {
     }
     let names = |vol: &Volume<_>, path: &str| {
         let record = vol.record(&vol.lookup(path).unwrap()).unwrap();
-        u64::from_le_bytes(record[0x98..0xa0].try_into().unwrap())
+        u32::from_le_bytes(record[0x98..0x9c].try_into().unwrap())
     };
     assert_eq!(names(&vol, "/third.txt"), 2);
     // Attributes and data through one name change the record both names
