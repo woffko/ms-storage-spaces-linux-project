@@ -57,7 +57,7 @@ fuzz_target!(|data: &[u8]| {
     let Ok(mut vol) = Volume::open(&overlay, OFFSET) else {
         return;
     };
-    let end = OFFSET + vol.boot.volume_size();
+    let end = OFFSET.saturating_add(vol.boot.volume_size());
     for op in ops.chunks(4).take(12) {
         let path = PATHS[usize::from(op[0]) % PATHS.len()];
         let arg = op.get(1..).unwrap_or(&[]);
