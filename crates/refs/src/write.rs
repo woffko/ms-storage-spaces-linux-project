@@ -563,13 +563,20 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
             let val = &self.pages[at.page].data[at.value..at.value + at.len];
             let count = refcount::count_of(val, v)
                 .ok_or_else(|| format_err!("reference count row without a count for cluster {v:#x}"))?;
+            let i = 0x1c + 2 * (v - le64(val, 0)) as usize;
             if count == 0 {
+                // Its last reference: free, its entry (flags the dedup
+                // engine set) cleared.
+                if le16(val, i) != 0 {
+                    self.value_mut(at)[i..i + 2].fill(0);
+                }
                 free.push(c);
                 continue;
             }
-            let i = 0x1c + 2 * (v - le64(val, 0)) as usize;
+            // One reference less; the flags stay.
             let val = self.value_mut(at);
-            val[i..i + 2].copy_from_slice(&(count - 1).to_le_bytes());
+            let raw = le16(val, i) - 1;
+            val[i..i + 2].copy_from_slice(&raw.to_le_bytes());
             let total = le32(val, 0x18).saturating_sub(1);
             val[0x18..0x1c].copy_from_slice(&total.to_le_bytes());
         }
@@ -685,10 +692,12 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
                     }
                     for &c in &clusters {
                         let i = 0x1c + 2 * (c - block) as usize;
-                        let count = le16(v, i)
-                            .checked_add(1)
-                            .ok_or_else(|| format_err!("cluster {c:#x}: too many references"))?;
-                        v[i..i + 2].copy_from_slice(&count.to_le_bytes());
+                        // The count is the low 14 bits; the flags stay.
+                        let raw = le16(v, i);
+                        if raw & refcount::COUNT_MASK == refcount::COUNT_MASK {
+                            return Err(Error::Unsupported(format!("cluster {c:#x}: too many references")));
+                        }
+                        v[i..i + 2].copy_from_slice(&(raw + 1).to_le_bytes());
                     }
                     let total = le32(v, 0x18) + clusters.len() as u32;
                     v[0x18..0x1c].copy_from_slice(&total.to_le_bytes());

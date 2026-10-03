@@ -644,7 +644,9 @@ rows of thin spaces not allocated yet (M7).
   a Dev Drive in a two-way mirror space of two disks (`-PoolDisks 2
   -Resiliency Mirror`, volume `r314mirror`) reads back as Windows listed
   it, through the library and the mount (`refs --space`). Open:
-  changing compressed files.
+  changing compressed files (Windows copies touched clusters on write
+  into ordinary containers and lowers the old ones' reference counts; the
+  last reference of a compacted cluster needs a sample).
 * B4 (research): write experiments on a small volume (scenario `small`,
   `tools/vm/Invoke-RefsSteps.ps1`, `tools/refs-diff.py`, `refs map` and
   `refs tree`) show what one change costs: copy-on-write pages up to both

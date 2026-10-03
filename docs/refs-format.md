@@ -351,6 +351,18 @@ that holds its place in the stream.
   0x400, ...).
 * Windows reported 376 leaked clusters on the compacted volume by itself
   (`refsutil leak`), the same after `refs` wrote a file on it.
+* The dedup engine also deduplicated the files (their text was the same
+  but for the last bytes) and marks the block reference counts: the low
+  14 bits of a count are the references beyond the first (what the
+  row's total sums), 0x8000 marks clusters it deduplicated (0x8027: 40
+  files), 0x4000 others it went through. Changing compressed files
+  (steps `delete`, `write`, `append` on that volume): deleting one lowered
+  the counts of its shared clusters (0x8027 to 0x8026; the compacted
+  container's rows in root 10 stayed as they were), and writing into one
+  or appending to one copied the touched clusters on write into an
+  ordinary data container (the overwritten cluster's run split around
+  it, the last partly used cluster moved), the old ones losing a
+  reference.
 
 ZSTD (`refsutil compression E: /c /f ZSTD` on a volume with
 `Enable-ReFSDedup -Type DedupAndCompress`: 30.3 MB of text into 4.92 MB)

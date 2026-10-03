@@ -4,7 +4,10 @@
 //! 16 bytes of the value. The value: 0x10 a u32 Windows changes with each
 //! transaction (its low byte 1), 0x14 the kind, 0x18 the total of the
 //! counts. Kind 1: a u16 per cluster from 0x1c (0x400 clusters, the value
-//! 0x820 bytes), the references beyond the first. Kind 0: every cluster of
+//! 0x820 bytes): its low 14 bits the references beyond the first (the
+//! total sums those), the top two flags the dedup engine sets
+//! (`Enable-ReFSDedup`: 0x8000 on clusters it deduplicated, 0x4000 on
+//! others it went through). Kind 0: every cluster of
 //! the range (any multiple of 0x400) has the same count, the u16 at 0x1c
 //! (again at 0x1e); the value is 0x20 bytes and the total 0. Windows packs
 //! rows whose clusters have one count into kind 0 rows, merging neighbours.
@@ -13,6 +16,8 @@ use crate::util::{le16, le32, le64};
 
 /// Clusters a kind 1 row counts.
 pub(crate) const BLOCK: u64 = 0x400;
+/// The references beyond the first in a count (the rest are flags).
+pub(crate) const COUNT_MASK: u16 = 0x3fff;
 /// The kinds (u32 at 0x14).
 pub(crate) const COUNTS: u32 = 1;
 pub(crate) const UNIFORM: u32 = 0;
@@ -32,9 +37,9 @@ pub(crate) fn count_of(value: &[u8], v: u64) -> Option<u16> {
     match le32(value, 0x14) {
         COUNTS => {
             let i = 0x1c + 2 * usize::try_from(v - first).ok()?;
-            value.get(i..i + 2).map(|b| le16(b, 0))
+            value.get(i..i + 2).map(|b| le16(b, 0) & COUNT_MASK)
         }
-        _ => Some(le16(value, 0x1c)),
+        _ => Some(le16(value, 0x1c) & COUNT_MASK),
     }
 }
 
