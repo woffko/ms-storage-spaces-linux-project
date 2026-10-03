@@ -22,6 +22,7 @@ use std::collections::HashMap;
 
 use storage_spaces::io::WriteAt;
 
+use crate::checksum::crc32c;
 use crate::error::{Error, Result, format_err};
 use crate::file::{LIVE_STREAM, Target, Times};
 use crate::node::Node;
@@ -1107,6 +1108,29 @@ impl<D: WriteAt> Volume<D> {
         })
     }
 
+    /// Turns integrity streams on or off for an empty file, as Windows
+    /// allows (Set-FileIntegrity): the attribute, and the checksum kind
+    /// of its inline $DATA (1, CRC32-C; 4 KiB clusters only for now).
+    pub fn set_integrity(&mut self, path: &str, on: bool) -> Result<()> {
+        let entry = self.lookup(path.trim_end_matches('/'))?;
+        if entry.size != 0 || matches!(entry.target, Target::Directory(_)) || self.cluster != 4096 {
+            return Err(Error::Unsupported(format!(
+                "{path}: integrity is set on empty files (of volumes with 4 KiB clusters) only"
+            )));
+        }
+        let record = self.record(&entry)?;
+        if inline_data(&record).is_none() {
+            return Err(Error::Unsupported(format!("{path}: no inline data")));
+        }
+        self.change_record(path, |v| {
+            if let Some(at) = inline_data(v) {
+                v[at - 2..at].copy_from_slice(&u16::from(on).to_le_bytes());
+                let a = (le32(v, 0x48) & !INTEGRITY) | if on { INTEGRITY } else { 0 };
+                v[0x48..0x4c].copy_from_slice(&a.to_le_bytes());
+            }
+        })
+    }
+
     /// Sets a file's attributes (the settable bits; the others stay).
     pub fn set_attributes(&mut self, path: &str, attributes: u32) -> Result<()> {
         self.change_record(path, |v| {
@@ -1118,14 +1142,39 @@ impl<D: WriteAt> Volume<D> {
     /// Overwrites bytes of a file's data where they are (as Windows does
     /// for streams without integrity checksums), then sets its modification
     /// and change times to `now` (FILETIME). The bytes must lie within the
-    /// file and, for data in extents, in written clusters; files of
-    /// integrity streams are refused (their data is copied on write).
+    /// file and, for data in extents, in written clusters. An integrity
+    /// stream's data is copied on write instead (the whole stream, with new
+    /// checksums, for now).
     pub fn overwrite(&mut self, path: &str, offset: u64, bytes: &[u8], now: u64) -> Result<()> {
         let entry = self.lookup(path)?;
         let file = self.open_file(&entry)?;
         let data = file
             .data
             .ok_or_else(|| Error::Unsupported(format!("{path}: no data stream")))?;
+        if let crate::file::Content::Extents(extents) = &data.content
+            && extents.iter().any(|x| x.checksums.is_some())
+        {
+            let end = offset
+                .checked_add(bytes.len() as u64)
+                .filter(|&e| e <= data.size)
+                .ok_or_else(|| Error::Unsupported(format!("{path}: writing beyond its {} bytes", data.size)))?;
+            if data.size > MAX_INTEGRITY as u64 {
+                return Err(Error::Unsupported(format!(
+                    "{path}: integrity streams of more than {MAX_INTEGRITY} bytes"
+                )));
+            }
+            let mut all = vec![0u8; data.size as usize];
+            let mut at = 0;
+            while at < all.len() {
+                let n = self.read_stream(&data, at as u64, &mut all[at..])?;
+                if n == 0 {
+                    break;
+                }
+                at += n;
+            }
+            all[offset as usize..end as usize].copy_from_slice(bytes);
+            return self.write_file(path, &all, now);
+        }
         let end = offset
             .checked_add(bytes.len() as u64)
             .filter(|&e| e <= data.size)
@@ -1195,6 +1244,9 @@ impl<D: WriteAt> Volume<D> {
         }
         let dir = self.directory_of(parent)?;
         let common = self.shared_security(dir)?;
+        // Files take integrity streams from their directory, as on Windows.
+        let own = self.own_row(dir)?;
+        let integrity = own.len() >= 0x4c && le32(&own, 0x48) & INTEGRITY != 0;
         {
             let mut tx = Transaction::begin(&*self)?;
             // The next file id, and the value every record of the
@@ -1217,7 +1269,13 @@ impl<D: WriteAt> Volume<D> {
             } else {
                 None
             };
-            let record = self.new_record(&mut tx, band, data, now, next_id, common)?;
+            let file = NewRecord {
+                now,
+                id: next_id,
+                security: common,
+                integrity,
+            };
+            let record = self.new_record(&mut tx, band, data, file)?;
             let utf16: Vec<u8> = name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
             // The file id row.
             let (key, value) = file_id_row(next_id, &utf16);
@@ -1244,13 +1302,26 @@ impl<D: WriteAt> Volume<D> {
         tx: &mut Transaction<'_, D>,
         band: Option<u64>,
         data: &[u8],
-        now: u64,
-        id: u64,
-        security: u64,
+        file: NewRecord,
     ) -> Result<Vec<u8>> {
+        let NewRecord {
+            now,
+            id,
+            security,
+            integrity,
+        } = file;
         let Some(band) = band.filter(|_| data.len() > MAX_INLINE) else {
-            return Ok(resident_record(data, now, id, security));
+            let mut record = resident_record(data, now, id, security);
+            if integrity {
+                set_integrity_bits(&mut record)?;
+            }
+            return Ok(record);
         };
+        if integrity && (self.cluster != 4096 || data.len() > MAX_INTEGRITY) {
+            return Err(Error::Unsupported(format!(
+                "integrity streams of more than {MAX_INTEGRITY} bytes, or on volumes of other than 4 KiB clusters"
+            )));
+        }
         let clusters = (data.len() as u64).div_ceil(self.cluster);
         let runs = tx.take_data(band, clusters)?;
         let mut at = 0usize;
@@ -1260,18 +1331,21 @@ impl<D: WriteAt> Volume<D> {
             let mut buf = vec![0u8; (n * self.cluster) as usize];
             buf[..len].copy_from_slice(&data[at..at + len]);
             self.dev.write_all_at(&buf, self.offset + lcn * self.cluster)?;
-            extents.push(((at as u64) / self.cluster, self.virtual_of(lcn)?, n));
+            let sums = if integrity {
+                buf.chunks(self.cluster as usize).map(crc32c).collect()
+            } else {
+                Vec::new()
+            };
+            extents.push(((at as u64) / self.cluster, self.virtual_of(lcn)?, n, sums));
             at += len;
         }
         self.dev.flush()?;
-        Ok(extent_record(
-            data.len() as u64,
-            clusters * self.cluster,
-            &extents,
-            now,
-            id,
-            security,
-        ))
+        let mut record = extent_record(data.len() as u64, clusters * self.cluster, &extents, now, id, security);
+        if integrity {
+            let a = le32(&record, 0x48) | INTEGRITY;
+            record[0x48..0x4c].copy_from_slice(&a.to_le_bytes());
+        }
+        Ok(record)
     }
 
     /// Replaces a file's whole content with `data` (appending, truncating
@@ -1303,14 +1377,12 @@ impl<D: WriteAt> Volume<D> {
         if !file.snapshots.is_empty() {
             return Err(Error::Unsupported(format!("{path}: snapshots")));
         }
-        if let Some(crate::file::Stream {
-            content: crate::file::Content::Extents(x),
-            ..
-        }) = &file.data
-            && x.iter().any(|x| x.checksums.is_some())
-        {
-            return Err(Error::Unsupported(format!("{path}: integrity stream")));
-        }
+        // Integrity streams stay so (their checksums are computed anew).
+        let integrity = le32(&old, 0x48) & INTEGRITY != 0
+            || matches!(&file.data, Some(crate::file::Stream {
+                content: crate::file::Content::Extents(x),
+                ..
+            }) if x.iter().any(|x| x.checksums.is_some()));
         if !runs.is_empty() && self.has_shared_clusters()? {
             return Err(Error::Unsupported(format!(
                 "{path}: the volume has shared (cloned or deduplicated) clusters"
@@ -1327,7 +1399,13 @@ impl<D: WriteAt> Volume<D> {
             // The old data clusters become free (kept until the commit).
             let clusters: Vec<u64> = runs.iter().flat_map(|&(lcn, n)| lcn..lcn + n).collect();
             tx.release(ROOT_MEDIUM_ALLOCATOR, &clusters)?;
-            let mut record = self.new_record(&mut tx, band, data, now, id, security)?;
+            let file = NewRecord {
+                now,
+                id,
+                security,
+                integrity,
+            };
+            let mut record = self.new_record(&mut tx, band, data, file)?;
             // Kept: creation and access times, attributes (but the bits
             // that describe the content).
             record[0x28..0x30].copy_from_slice(&old[0x28..0x30]);
@@ -2184,6 +2262,16 @@ impl<D: WriteAt> Volume<D> {
     }
 }
 
+/// Marks a record with inline data as an integrity stream: the attribute,
+/// and checksum kind 1 (CRC32-C) at 0x3a of the $DATA value.
+fn set_integrity_bits(record: &mut [u8]) -> Result<()> {
+    let at = inline_data(record).ok_or_else(|| format_err!("a record without inline data"))?;
+    record[at - 2..at].copy_from_slice(&1u16.to_le_bytes());
+    let a = le32(record, 0x48) | INTEGRITY;
+    record[0x48..0x4c].copy_from_slice(&a.to_le_bytes());
+    Ok(())
+}
+
 /// Where the inline data of a record (its single-instance $DATA row) starts
 /// in the record.
 fn inline_data(record: &[u8]) -> Option<usize> {
@@ -2199,6 +2287,11 @@ fn inline_data(record: &[u8]) -> Option<usize> {
 }
 
 const ROW_OWN: u16 = 0x10;
+/// The integrity stream attribute.
+const INTEGRITY: u32 = 0x8000;
+/// The largest integrity stream `refs` writes (its checksums stay in the
+/// record).
+const MAX_INTEGRITY: usize = 2 << 20;
 /// Rows of records kept apart from the names (files moved or linked).
 const ROW_RECORD: u16 = 0x40;
 /// The sparse file attribute.
@@ -2324,6 +2417,16 @@ fn upcased(name: &[u8]) -> Vec<u16> {
         .collect()
 }
 
+/// What a new record carries besides its data: its times (all four), file
+/// id, security reference (0x50) and whether it is an integrity stream.
+#[derive(Clone, Copy)]
+struct NewRecord {
+    now: u64,
+    id: u64,
+    security: u64,
+    integrity: bool,
+}
+
 /// A file by path: the directory's path, the name, the directory's object
 /// id, the record, the physical runs of its data, for a file whose record
 /// is a row of type 0x40 (moved or linked) its home directory, and whether
@@ -2383,7 +2486,14 @@ const MAX_CREATED: u64 = 64 << 20;
 /// the level set's header row (id 8) and the live level (id 0x1000) whose
 /// value is an extent node; `extents` are (first cluster in the file,
 /// first virtual cluster, clusters).
-fn extent_record(size: u64, allocated: u64, extents: &[(u64, u64, u64)], now: u64, id: u64, common: u64) -> Vec<u8> {
+fn extent_record(
+    size: u64,
+    allocated: u64,
+    extents: &[(u64, u64, u64, Vec<u32>)],
+    now: u64,
+    id: u64,
+    common: u64,
+) -> Vec<u8> {
     let multi = |len: usize, level: u64, parent: u64, header: u64| {
         let mut k = vec![0u8; 0x28];
         k[0..8].copy_from_slice(&(len as u64).to_le_bytes());
@@ -2403,9 +2513,17 @@ fn extent_record(size: u64, allocated: u64, extents: &[(u64, u64, u64)], now: u6
     // their first cluster in the file.
     const NODE: usize = 0x88;
     let n = extents.len();
+    // Integrity streams: a CRC32-C per cluster after each record (records
+    // padded to 8 bytes), checksum kind 1 at 0x16.
+    let integrity = extents.iter().any(|x| !x.3.is_empty());
+    let slots: Vec<usize> = extents
+        .iter()
+        .map(|x| (24 + 4 * x.3.len()).next_multiple_of(8))
+        .collect();
+    let used: usize = slots.iter().sum();
     // The node ends 8-aligned: free bytes before an odd key index.
     let free = 4 * n % 8;
-    let index = 0x28 + 24 * n + free;
+    let index = 0x28 + used + free;
     let mut v = vec![0u8; NODE + index + 4 * n];
     let put32 = |v: &mut Vec<u8>, at: usize, x: u32| v[at..at + 4].copy_from_slice(&x.to_le_bytes());
     let put64 = |v: &mut Vec<u8>, at: usize, x: u64| v[at..at + 8].copy_from_slice(&x.to_le_bytes());
@@ -2415,6 +2533,9 @@ fn extent_record(size: u64, allocated: u64, extents: &[(u64, u64, u64)], now: u6
     put32(&mut v, 0x0c, 0x200);
     put32(&mut v, 0x10, 0x200);
     put32(&mut v, 0x14, 2);
+    if integrity {
+        v[0x16] = 1;
+    }
     put64(&mut v, 0x20, n as u64);
     put32(&mut v, 0x2c, 0x28);
     put64(&mut v, 0x30, allocated);
@@ -2424,23 +2545,30 @@ fn extent_record(size: u64, allocated: u64, extents: &[(u64, u64, u64)], now: u6
     put64(&mut v, 0x50, 1);
     let h = NODE;
     put32(&mut v, h, 0x28);
-    put32(&mut v, h + 4, (0x28 + 24 * n) as u32);
+    put32(&mut v, h + 4, (0x28 + used) as u32);
     put32(&mut v, h + 8, free as u32);
     v[h + 0x0c..h + 0x10].copy_from_slice(&[0, 0x0e, 0, 0]);
     put32(&mut v, h + 0x10, index as u32);
     put32(&mut v, h + 0x14, n as u32);
     put32(&mut v, h + 0x20, (index + 4 * n) as u32);
-    for (i, &(vcn, vlcn, clusters)) in extents.iter().enumerate() {
-        let r = h + 0x28 + 24 * i;
-        put64(&mut v, r, vlcn);
-        v[r + 8..r + 12].copy_from_slice(&[0x50, 0, 0x18, 0]);
-        put32(&mut v, r + 0x0c, vcn as u32);
-        put32(&mut v, r + 0x14, clusters as u32);
+    let mut at = 0x28;
+    for (i, (vcn, vlcn, clusters, sums)) in extents.iter().enumerate() {
+        let r = h + at;
+        put64(&mut v, r, *vlcn);
+        let flags: u16 = if sums.is_empty() { 0x50 } else { 0xd0 };
+        v[r + 8..r + 10].copy_from_slice(&flags.to_le_bytes());
+        v[r + 10..r + 12].copy_from_slice(&((24 + 4 * sums.len()) as u16).to_le_bytes());
+        put32(&mut v, r + 0x0c, *vcn as u32);
+        put32(&mut v, r + 0x14, *clusters as u32);
+        for (k, s) in sums.iter().enumerate() {
+            put32(&mut v, r + 24 + 4 * k, *s);
+        }
         put32(
             &mut v,
             h + index + 4 * i,
-            (0x28 + 24 * i) as u32 | ((vcn.min(0xffff) as u32) << 16),
+            at as u32 | (((*vcn).min(0xffff) as u32) << 16),
         );
+        at += slots[i];
     }
     // Flag 1: the value embeds a node (as name rows embed records).
     let live_row = row(&multi(v.len(), LIVE_STREAM, 8, 0), &v, ROW_EMBEDS_NODE);

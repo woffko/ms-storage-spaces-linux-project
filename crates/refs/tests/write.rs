@@ -1076,3 +1076,48 @@ fn writing_named_streams() {
     assert_allocated(&vol, &skip, "streams");
     assert_pages_valid(&vol, &skip, "streams");
 }
+
+#[test]
+fn writing_integrity_streams() {
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 134_200_000_000_000_000;
+    let checksummed = |vol: &Volume<_>, path: &str| {
+        let file = vol.open_file(&vol.lookup(path).unwrap()).unwrap();
+        match file.data.unwrap().content {
+            refs::Content::Extents(x) => x.iter().all(|x| x.checksums.is_some()),
+            refs::Content::Inline(_) => false,
+        }
+    };
+    // As Set-FileIntegrity does: on an empty file, then data with a
+    // CRC32-C per cluster (the reader checks them).
+    vol.create_file("/i.bin", b"", now).unwrap();
+    vol.set_integrity("/i.bin", true).unwrap();
+    assert_eq!(vol.lookup("/i.bin").unwrap().attributes & 0x8000, 0x8000);
+    let mut data: Vec<u8> = (0..10_000u32).map(|i| (i * 7 % 253) as u8).collect();
+    vol.write_file("/i.bin", &data, now).unwrap();
+    assert!(checksummed(&vol, "/i.bin"));
+    assert_eq!(read_all(&vol, "/i.bin"), data);
+    // Overwritten: copied with new checksums.
+    vol.overwrite("/i.bin", 5000, b"XYZ", now).unwrap();
+    data[5000..5003].copy_from_slice(b"XYZ");
+    assert!(checksummed(&vol, "/i.bin"));
+    assert_eq!(read_all(&vol, "/i.bin"), data);
+    // Small again: inline, still an integrity stream.
+    vol.write_file("/i.bin", b"small", now).unwrap();
+    assert_eq!(vol.lookup("/i.bin").unwrap().attributes & 0x8000, 0x8000);
+    vol.write_file("/i.bin", &data, now).unwrap();
+    assert!(checksummed(&vol, "/i.bin"));
+    for err in [
+        vol.set_integrity("/i.bin", false).unwrap_err(),
+        vol.write_file("/i.bin", &vec![0; 3 << 20], now).unwrap_err(),
+    ] {
+        assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
+    }
+    let fresh = Volume::open(&overlay, offset).unwrap();
+    assert_eq!(read_all(&fresh, "/i.bin"), data);
+    assert_allocated(&vol, &skip, "integrity");
+    assert_pages_valid(&vol, &skip, "integrity");
+}

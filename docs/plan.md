@@ -728,7 +728,11 @@ rows of thin spaces not allocated yet (M7).
   Directories are renamed, moved (not below themselves) and deleted
   when empty, with Windows' rows. Named streams up to 1 KiB are written
   and deleted in the record (Windows read them and went on changing
-  them). Next: integrity streams, named streams in clusters.
+  them). Integrity streams (CRC32-C per cluster, up to 2 MiB) are
+  written, turned on for empty files and inherited from directories;
+  Windows read them, checking every cluster, and wrote on. Next: named
+  streams in clusters, deleting files with them, larger integrity
+  streams (extent maps in pages), CRC-64 on 64 KiB clusters.
 
 ## Test infrastructure (continuous, feeds every stage)
 

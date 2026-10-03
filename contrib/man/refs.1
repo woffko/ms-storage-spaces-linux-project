@@ -193,7 +193,9 @@ in
 .B set
 Change a file's times (UTC, "YYYY-MM-DD hh:mm:ss" or a FILETIME number)
 or attributes (the bits users can set: read-only 1, hidden 2, system 4,
-archive 0x20, ...). Experimental: only with
+archive 0x20, ...), or with
+.B \-\-integrity on
+turn integrity streams on for an empty file. Experimental: only with
 .BR \-\-yes ,
 on a volume not attached anywhere else. Like every command that writes,
 it writes the way Windows does (copy on write, then a new checkpoint),
@@ -204,8 +206,9 @@ Replace bytes of a file with the content of
 .I local-file
 at byte
 .IR offset ,
-where they are (within the file's size; not in sparse ranges or
-integrity streams), and set its modification and change times to now.
+where they are (within the file's size; not in sparse ranges; an
+integrity stream is copied with new checksums), and set its
+modification and change times to now.
 Experimental; only with
 .BR \-\-yes .
 .TP
@@ -238,8 +241,8 @@ Replace a file's content with that of
 or with
 .B \-\-append
 add it to the end; the file keeps its creation time, attributes,
-permissions and named streams (up to 64 MiB; not files with snapshots,
-streams in clusters or integrity streams). With
+permissions and named streams (up to 64 MiB, 2 MiB for integrity
+streams; not files with snapshots or streams in clusters). With
 .BI \-\-stream " name"
 it writes that named stream instead (up to 1 KiB, kept in the file's
 record), and

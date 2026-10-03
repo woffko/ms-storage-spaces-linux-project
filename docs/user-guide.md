@@ -456,7 +456,7 @@ refs link devdrive.img --path /archive/log.txt --to /notes/log.txt --yes
 ```
 
 `refs overwrite` replaces bytes inside a file (not beyond its end, not in
-sparse ranges, not in integrity streams) where they are, as Windows does,
+sparse ranges; integrity streams are copied) where they are, as Windows does,
 and sets the modification and change times to now. `refs create` makes a
 file (up to 1 KiB kept in its record, up to 64 MiB in clusters near the
 data of the files around it) with a printable ASCII name, in a directory
@@ -472,7 +472,11 @@ block-cloned or deduplicated clusters. `refs mkdir` creates a directory;
 link` gives a file another name (a hard link); changing a hard-linked
 file through one name changes it for all of them. `refs write --stream
 NAME` writes a named stream (an alternate data stream, up to 1 KiB for
-now) and `refs delete --stream NAME` deletes one.
+now) and `refs delete --stream NAME` deletes one. `refs set --integrity
+on` turns integrity streams on for an empty file (as Set-FileIntegrity
+does); its data is then written with a checksum per cluster (up to 2 MiB,
+volumes of 4 KiB clusters), and files created in a directory with
+integrity streams have them too.
 
 It writes the way Windows does (copy on write, then a new checkpoint), so
 an interruption leaves the volume as it was before.

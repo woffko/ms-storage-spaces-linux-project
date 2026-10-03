@@ -386,6 +386,17 @@ table's rows for a text diff):
   the record (the set's header row and its live level with the extents).
   `refs` writes and deletes streams kept in the record (**verified**:
   Windows' rows but for the order of rewritten rows).
+* Integrity streams (steps `integrity`, `append`, `write`):
+  Set-FileIntegrity on an empty file sets attribute 0x8000 and checksum
+  kind 1 at 0x3a of its inline $DATA value. Data then goes to clusters
+  with a CRC32-C of every whole cluster (zeros past the end) after each
+  extent record (flags 0xd0, the record's length at 0x0a: 24 + 4 per
+  cluster; records padded to 8 bytes in the node) and kind 1 at 0x16 of
+  the $DATA value. Overwriting copies on write: the changed cluster goes
+  to a new place with its own record, the old one is freed. `refs`
+  writes the same records and checksums (**verified**: Windows read the
+  data, checking it, and went on writing); it copies a whole stream of
+  up to 2 MiB on an overwrite, on volumes of 4 KiB clusters.
 * Creating a file (step `create`) adds two rows to its directory: the
   name row (type 0x30) with the embedded record, and a row of type 0x20
   (key: 0x20, flags 0x8000, the file id as u64 at 8; value: the name's

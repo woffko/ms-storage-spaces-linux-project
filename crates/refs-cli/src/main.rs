@@ -111,14 +111,17 @@ enum Command {
         /// ...); the ones Windows does not let users set stay.
         #[arg(long, value_parser = parse_number)]
         attributes: Option<u64>,
+        /// Turn integrity streams on or off (empty files only).
+        #[arg(long, value_parser = ["on", "off"])]
+        integrity: Option<String>,
         /// Write (without it, only print what would change).
         #[arg(long)]
         yes: bool,
     },
     /// Overwrite bytes of a file with the content of a local file
     /// (experimental: writes the volume, only with --yes; within the file's
-    /// size, not into sparse ranges or integrity streams). Sets the
-    /// modification and change times to now.
+    /// size, not into sparse ranges; an integrity stream is copied on
+    /// write). Sets the modification and change times to now.
     Overwrite {
         /// The image, disk or partition.
         device: PathBuf,
@@ -196,8 +199,8 @@ enum Command {
     },
     /// Replace a file's content (or a named stream's) with a local file's,
     /// or append it (experimental: writes the volume, only with --yes; up
-    /// to 64 MiB; not files with snapshots, streams in clusters or
-    /// integrity streams).
+    /// to 64 MiB, 2 MiB for integrity streams; not files with snapshots or
+    /// streams in clusters).
     Write {
         /// The image, disk or partition.
         device: PathBuf,
@@ -861,6 +864,7 @@ fn main() -> Result<()> {
             changed,
             accessed,
             attributes,
+            integrity,
             yes,
         } => {
             let file = std::fs::OpenOptions::new()
@@ -894,12 +898,18 @@ fn main() -> Result<()> {
             if let Some(a) = attributes {
                 writeln!(out, "{path}: attributes {:#x} -> {a:#x} (settable bits)", e.attributes)?;
             }
+            if let Some(i) = &integrity {
+                writeln!(out, "{path}: integrity streams {i}")?;
+            }
             if !yes {
                 writeln!(out, "nothing written (--yes writes)")?;
                 return Ok(());
             }
             if times != e.times {
                 vol.set_times(&path, &times)?;
+            }
+            if let Some(i) = &integrity {
+                vol.set_integrity(&path, i == "on")?;
             }
             if let Some(a) = attributes {
                 vol.set_attributes(&path, a as u32)?;
