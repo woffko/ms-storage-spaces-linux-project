@@ -121,10 +121,17 @@ A directory's tree holds, keyed by a u16 row type at key 0:
   like a file record, see below; a junction's reparse point is there);
 * 0x30: one row per name, the UTF-16LE name at key + 4; key flags at
   key + 2 decide the value:
-  * **1, embedded record**: the value is the file's record (times at
-    0x28 created, 0x30 modified, 0x38 changed, 0x40 accessed; attributes
-    at 0x48; size at 0x58; allocated at 0x60; the attribute tree's node
-    header at the offset in its first u32);
+  * **1, embedded record**: the value is the file's record: the
+    attribute tree's descriptor (0x00: offset of the node header, 0xa8;
+    0x20: number of attribute rows), times at 0x28 created, 0x30
+    modified, 0x38 changed, 0x40 accessed; attributes at 0x48; 0x4c 8
+    when the data is inline; 0x50 a security descriptor reference (files
+    with the same descriptor share it; directories have their own); size
+    at 0x58; allocated at 0x60; the file id at 0x80 (the key of its type
+    0x20 row); 0x98 1 (links); the attribute tree's node at 0xa8.
+    (**verified**: files `refs create` writes this way are read, changed
+    and deleted by Windows, with the inherited permissions of their
+    neighbours);
   * **2, index entry** (84 bytes): ordinal at 0, home directory at 8,
     times at 0x10..0x30, allocated at 0x30, size at 0x38, attributes at
     0x40. With ReFS's directory bit 0x10000000 in the attributes, the
@@ -139,6 +146,25 @@ volume was written back (**verified** after reattaching; a listing taken
 while the volume is still attached can show older directory times,
 because ReFS updates them lazily).
 
+### Leaf pages and rows (as written)
+
+A node's header (at the descriptor's offset): 0x00 start of the row area,
+0x04 end of the rows, 0x08 free bytes (holes left by removed rows
+included), 0x0c level, 0x0d flags (2 on leaves), 0x10 start of the key
+index, 0x14 rows, 0x20 end of the key index. Rows grow from the start of
+the row area, unordered; the key index (u32 entries: the row's offset |
+0xffff0000) sits at the end of the page, in key order, and grows down. A
+table's descriptor (page + 0x50, or a record's start) counts the table's
+rows at 0x20. A row: u32 size (8-aligned), u16 key offset (0x10), u16
+key length, u16 flags (1 on name rows whose value embeds a record), u16
+value offset (8-aligned), u16 value length. (**verified**: rows `refs`
+inserts this way are found by Windows.)
+
+A directory's rows sort by type, then: file id rows (0x20) by id, name
+rows (0x30) by name compared without case (NTFS-like: upcased UTF-16
+units; the key flags at 2 do not count). (**verified** on the names of
+the corpus; new names are ASCII for now.)
+
 ## File records
 
 A file record (and a directory's own row) is a node whose rows are the
@@ -148,8 +174,11 @@ for multi-instance $DATA a sub-stream id at 0x10 (0x1000 the live
 stream). Attributes `refs` reads (**verified**: every file of the corpus
 reads back with Windows' SHA-256):
 
-* **$DATA inline** (0x80000001, 0x80): stream size at value 0x20, the
-  bytes from value 0x3c;
+* **$DATA inline** (0x80000001, 0x80; the key starts with the value's
+  length as u64): 0x04 0x30 plus the allocated size, 0x08 0x0c, 0x0c
+  0x30, allocated size at 0x18 and 0x30 (the size rounded up to 8 when
+  created), stream size at 0x20, valid length at 0x28, 2 at 0x38, the
+  bytes from 0x3c;
 * **$DATA in extents** (0x80000002, 0x000e0080): one row per *level* (see
   below), the live stream's level id 0x1000 at key 0x10; stream size at
   value 0x38; the value is a node whose leaf entries are raw extent

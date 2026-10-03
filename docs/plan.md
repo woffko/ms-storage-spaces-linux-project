@@ -666,9 +666,14 @@ rows of thin spaces not allocated yet (M7).
   `triage /g` as on the untouched volume, no ReFS events. `refs
   overwrite`: data overwritten where it is (as Windows does for streams
   without integrity), inline data inside the record, then the times
-  committed; Windows read the expected bytes. Next: creating, renaming
-  and deleting files (a new name row with an embedded record and a file
-  id row, type 0x20, in the directory; the directory's own times).
+  committed; Windows read the expected bytes. `refs create`: a file with
+  up to 1 KiB of inline data (a file id row and a name row with its
+  record inserted in key order, the directory's own times; the security
+  descriptor reference of a neighbouring file); Windows read the files,
+  showed the inherited permissions, appended to one, deleted another.
+  Limits for now: directories of one page with room at its end, ASCII
+  names. Next: deleting and renaming, then data in extents (allocating
+  data clusters), directories, compacting and splitting pages.
 
 ## Test infrastructure (continuous, feeds every stage)
 

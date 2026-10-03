@@ -309,3 +309,63 @@ fn overwriting_data_in_place() {
     assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
     assert!(overlay.written_pages().is_empty());
 }
+
+#[test]
+fn creating_files() {
+    let (image, manifest, skip) = load("r314basic4k");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 133_100_000_000_000_000;
+    let mut listed = manifest["entries"].as_array().unwrap().clone();
+    for (path, data) in [
+        ("/new file.txt", b"made on Linux\n".to_vec()),
+        ("/names/Zebra", Vec::new()),
+        ("/deep/a/b/aa.bin", vec![0xa5; 1000]),
+    ] {
+        vol.create_file(path, &data, now).unwrap();
+        let e = vol.lookup(path).unwrap();
+        assert_eq!(
+            (e.size, e.attributes, e.times.modified, e.times.created),
+            (data.len() as u64, 0x20, now, now),
+            "{path}"
+        );
+        assert_eq!(read_all(&vol, path), data, "{path}");
+        let hex: String = refs::checksum::sha256(&data)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        listed.push(serde_json::json!({
+            "path": path.trim_start_matches('/'), "kind": "file", "attributes": 0x20,
+            "created": now, "written": now, "size": data.len(), "sha256": hex,
+        }));
+    }
+    // The directories written to got the new times.
+    for dir in ["", "names", "deep/a/b"] {
+        for e in listed.iter_mut().filter(|e| e["path"] == dir) {
+            e["written"] = now.into();
+        }
+    }
+    let mut changed = manifest.clone();
+    changed["entries"] = listed.into();
+    assert_allocated(&vol, &skip, "created");
+    let fresh = Volume::open(&overlay, offset).unwrap();
+    let problems: Vec<String> = common::compare(&fresh, &changed)
+        .into_iter()
+        // Windows shows a directory's times from its entry in the parent,
+        // which ReFS updates lazily; only the directory's own row is set.
+        .filter(|p| !(p.starts_with("names: written") || p.starts_with("deep/a/b: written")))
+        .collect();
+    assert!(problems.is_empty(), "{problems:?}");
+    // Refused before anything is written.
+    let written = overlay.written_pages().len();
+    for (path, why) in [
+        ("/many/new.txt", "a directory of several pages"),
+        ("/new file.txt", "an existing name"),
+        ("/кириллица2.txt", "a name that is not ASCII"),
+    ] {
+        let err = vol.create_file(path, b"x", now).unwrap_err();
+        assert!(matches!(err, refs::Error::Unsupported(_)), "{why}: {err}");
+    }
+    assert_eq!(overlay.written_pages().len(), written);
+}

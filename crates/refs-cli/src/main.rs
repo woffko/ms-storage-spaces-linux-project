@@ -135,6 +135,22 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Create a file holding the content of a local file (experimental:
+    /// writes the volume, only with --yes; up to 1 KiB, a printable ASCII
+    /// name, a directory of one page with room left).
+    Create {
+        /// The image, disk or partition.
+        device: PathBuf,
+        #[arg(long)]
+        offset: Option<u64>,
+        #[arg(long)]
+        path: String,
+        /// The content (default: empty).
+        #[arg(long)]
+        from: Option<PathBuf>,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Every cluster the volume uses, by physical cluster: superblocks,
     /// checkpoints, the pages of each tree, the data runs of each file
     /// (for format work: what changed between two images).
@@ -349,6 +365,14 @@ fn tree_pages<D: ReadAt>(
         }
     }
     Ok(())
+}
+
+/// The time now as FILETIME.
+fn now() -> u64 {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    (since.as_nanos() / 100) as u64 + 116_444_736_000_000_000
 }
 
 /// "YYYY-MM-DD hh:mm:ss" (UTC; a "T" between, a trailing "Z" allowed) or
@@ -777,12 +801,36 @@ fn main() -> Result<()> {
                 writeln!(out, "nothing written (--yes writes)")?;
                 return Ok(());
             }
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_nanos() as u64
-                / 100
-                + 116_444_736_000_000_000;
-            vol.overwrite(&path, at, &bytes, now)?;
+            vol.overwrite(&path, at, &bytes, now())?;
+            writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
+        }
+        Command::Create {
+            device,
+            offset,
+            path,
+            from,
+            yes,
+        } => {
+            let bytes = match &from {
+                Some(f) => std::fs::read(f).with_context(|| format!("cannot read {}", f.display()))?,
+                None => Vec::new(),
+            };
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(yes)
+                .open(&device)
+                .with_context(|| format!("cannot open {}", device.display()))?;
+            let offset = match offset {
+                Some(o) => o,
+                None => *find_volumes(&file)?.first().context("no ReFS volume on the device")?,
+            };
+            let mut vol = Volume::open(file, offset)?;
+            writeln!(out, "{path}: {} bytes", bytes.len())?;
+            if !yes {
+                writeln!(out, "nothing written (--yes writes)")?;
+                return Ok(());
+            }
+            vol.create_file(&path, &bytes, now())?;
             writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
         }
         Command::Tree { source, root, object } => {

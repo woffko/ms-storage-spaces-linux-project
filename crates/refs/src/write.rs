@@ -277,6 +277,69 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         Ok(())
     }
 
+    /// The keys of a page's rows.
+    fn keys(&self, page: usize) -> Result<Vec<Vec<u8>>> {
+        Node::at(&self.pages[page].data, PAGE_HEADER_SIZE)?
+            .rows()
+            .map(|r| r.map(|r| r.key.to_vec()))
+            .collect()
+    }
+
+    /// Inserts a row into a leaf page (in key order, by `before`: whether
+    /// the new row goes before an existing key), in the free space between
+    /// the rows and the key index at the page's end, and counts it in the
+    /// table's descriptor.
+    fn insert(&mut self, page: usize, row: &[u8], before: &dyn Fn(&[u8]) -> bool) -> Result<()> {
+        let d = &self.pages[page].data;
+        let h = PAGE_HEADER_SIZE + le32(d, PAGE_HEADER_SIZE) as usize;
+        let (end, free, index, count) = (
+            le32(d, h + 4) as usize,
+            le32(d, h + 8) as usize,
+            le32(d, h + 0x10) as usize,
+            le32(d, h + 0x14) as usize,
+        );
+        if d[h + 0x0c] != 0 {
+            return Err(Error::Unsupported("inserting into an index node".into()));
+        }
+        let size = row.len().next_multiple_of(8);
+        if h + end + size + 4 > h + index || free < size + 4 {
+            return Err(Error::Unsupported(
+                "no room at the end of the page (compacting it is not done yet)".into(),
+            ));
+        }
+        // Where in the key index the row goes.
+        let node = Node::at(d, PAGE_HEADER_SIZE)?;
+        let mut pos = count;
+        for (i, r) in node.rows().enumerate() {
+            if before(r?.key) {
+                pos = i;
+                break;
+            }
+        }
+        let mut i = Some(page);
+        while let Some(j) = i {
+            self.pages[j].dirty = true;
+            i = self.pages[j].parent.map(|p| p.0);
+        }
+        let d = &mut self.pages[page].data;
+        d[h + end..h + end + row.len()].copy_from_slice(row);
+        d[h + end + row.len()..h + end + size].fill(0);
+        d.copy_within(h + index..h + index + 4 * pos, h + index - 4);
+        let entry = 0xffff_0000u32 | end as u32;
+        d[h + index - 4 + 4 * pos..h + index + 4 * pos].copy_from_slice(&entry.to_le_bytes());
+        let put = |d: &mut Vec<u8>, at: usize, v: u32| d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        put(d, h + 4, (end + size) as u32);
+        put(d, h + 8, (free - size - 4) as u32);
+        put(d, h + 0x10, (index - 4) as u32);
+        put(d, h + 0x14, (count + 1) as u32);
+        // The table's row count (in the descriptor of its root page).
+        let root = self.roots[&self.pages[page].tree];
+        let d = &mut self.pages[root].data;
+        let rows = le64(d, PAGE_HEADER_SIZE + 0x20) + 1;
+        d[PAGE_HEADER_SIZE + 0x20..PAGE_HEADER_SIZE + 0x28].copy_from_slice(&rows.to_le_bytes());
+        Ok(())
+    }
+
     /// Writes the changed pages and the new checkpoint.
     pub fn commit(mut self) -> Result<()> {
         let vol = self.vol;
@@ -497,6 +560,113 @@ impl<D: WriteAt> Volume<D> {
         })
     }
 
+    /// Creates a file with `data` (up to 1 KiB, kept in its record) and
+    /// all four times `now`, as Windows does: a name row with the record
+    /// and a file id row in the directory, whose times become `now`. For
+    /// now the directory must fit in one page with room left at its end,
+    /// and the name must be ASCII.
+    pub fn create_file(&mut self, path: &str, data: &[u8], now: u64) -> Result<()> {
+        let trimmed = path.trim_end_matches('/');
+        let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
+        if name.is_empty()
+            || name.len() > 255
+            || name == "."
+            || name == ".."
+            || !name
+                .bytes()
+                .all(|b| (0x20..0x7f).contains(&b) && !b"\\/:*?\"<>|".contains(&b))
+        {
+            return Err(Error::Unsupported(format!(
+                "{name:?}: names of printable ASCII only, for now"
+            )));
+        }
+        if data.len() > 1024 {
+            return Err(Error::Unsupported("files of more than 1 KiB (data in extents)".into()));
+        }
+        match self.lookup(trimmed) {
+            Err(Error::NotFound(_)) => {}
+            Ok(_) => return Err(Error::Unsupported(format!("{path} exists"))),
+            Err(e) => return Err(e),
+        }
+        let dir = self.directory_of(parent)?;
+        let common = self.shared_security(dir)?;
+        {
+            let mut tx = Transaction::new(&*self);
+            let root = tx.root(Tree::Object(dir))?;
+            // The next file id, and the value every record of the
+            // directory carries at 0x50.
+            let keys = tx.keys(root)?;
+            let next_id = keys
+                .iter()
+                .filter(|k| k.len() >= 16 && le16(k, 0) == ROW_FILE_ID)
+                .map(|k| le64(k, 8))
+                .max()
+                .unwrap_or(1)
+                + 1;
+
+            let record = resident_record(data, now, next_id, common);
+            let utf16: Vec<u8> = name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+            // The file id row.
+            let mut key = vec![0u8; 24];
+            key[0..4].copy_from_slice(&[0x20, 0, 0, 0x80]);
+            key[8..16].copy_from_slice(&next_id.to_le_bytes());
+            let mut value = vec![0u8; 12];
+            value[8..10].copy_from_slice(&12u16.to_le_bytes());
+            value[10..12].copy_from_slice(&(utf16.len() as u16).to_le_bytes());
+            value.extend(&utf16);
+            tx.insert(root, &row(&key, &value, 0), &|k| directory_key_order(&key, k).is_lt())?;
+            // The name row with the record.
+            let mut key = vec![ROW_NAME as u8, 0, 1, 0];
+            key.extend(&utf16);
+            tx.insert(root, &row(&key, &record, 1), &|k| directory_key_order(&key, k).is_lt())?;
+            // The directory's own times.
+            let own = tx.find(Tree::Object(dir), &|k| k.len() >= 2 && le16(k, 0) == ROW_OWN)?;
+            let v = tx.value_mut(own);
+            for at in [0x30, 0x38, 0x40] {
+                v[at..at + 8].copy_from_slice(&now.to_le_bytes());
+            }
+            tx.commit()?;
+        }
+        self.load()
+    }
+
+    /// The security descriptor reference (record 0x50) a new file in
+    /// directory `dir` takes: that of a file beside it, else of the first
+    /// file found from the root down (files Windows creates by default
+    /// share one).
+    fn shared_security(&self, dir: u64) -> Result<u64> {
+        let mut dirs = std::collections::VecDeque::from([dir, ROOT_DIRECTORY]);
+        let mut seen = 0;
+        while let Some(d) = dirs.pop_front() {
+            seen += 1;
+            if seen > 256 {
+                break;
+            }
+            for e in self.read_dir(d)? {
+                match &e.target {
+                    Target::Embedded(record) if record.len() >= 0x58 && le64(record, 0x50) != 0 => {
+                        return Ok(le64(record, 0x50));
+                    }
+                    Target::Directory(child) if e.attributes & 0x400 == 0 && e.attributes & 0x4 == 0 => {
+                        dirs.push_back(*child)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Err(Error::Unsupported("no file to share a security descriptor with".into()))
+    }
+
+    fn directory_of(&self, parent: &str) -> Result<u64> {
+        if parent.trim_matches('/').is_empty() {
+            return Ok(ROOT_DIRECTORY);
+        }
+        match self.lookup(parent)?.target {
+            Target::Directory(oid) => Ok(oid),
+            _ => Err(Error::NotFound(format!("directory {parent}"))),
+        }
+    }
+
     /// Changes the record of a file whose record is embedded in its
     /// directory entry, in one transaction.
     fn change_record(&mut self, path: &str, change: impl FnOnce(&mut [u8])) -> Result<()> {
@@ -543,4 +713,114 @@ fn inline_data(record: &[u8]) -> Option<usize> {
         }
     }
     None
+}
+
+const ROW_OWN: u16 = 0x10;
+const ROW_FILE_ID: u16 = 0x20;
+const ROW_NAME: u16 = 0x30;
+
+/// A row: header (size, key offset and length, flags, value offset and
+/// length), the key and the value, each 8-aligned.
+fn row(key: &[u8], value: &[u8], flags: u16) -> Vec<u8> {
+    let voff = (0x10 + key.len()).next_multiple_of(8);
+    let size = (voff + value.len()).next_multiple_of(8);
+    let mut r = vec![0u8; size];
+    r[0..4].copy_from_slice(&(size as u32).to_le_bytes());
+    r[4..6].copy_from_slice(&0x10u16.to_le_bytes());
+    r[6..8].copy_from_slice(&(key.len() as u16).to_le_bytes());
+    r[8..10].copy_from_slice(&flags.to_le_bytes());
+    r[10..12].copy_from_slice(&(voff as u16).to_le_bytes());
+    r[12..14].copy_from_slice(&(value.len() as u16).to_le_bytes());
+    r[0x10..0x10 + key.len()].copy_from_slice(key);
+    r[voff..voff + value.len()].copy_from_slice(value);
+    r
+}
+
+/// The record of a file whose data is inline, as Windows writes it: the
+/// attribute tree's descriptor, the times, attributes (archive), sizes,
+/// the file id, and one row: the single-instance $DATA with the bytes.
+fn resident_record(data: &[u8], now: u64, id: u64, common: u64) -> Vec<u8> {
+    let allocated = data.len().next_multiple_of(8);
+    // The $DATA value.
+    let mut value = vec![0u8; 0x3c + allocated];
+    value[4..8].copy_from_slice(&((0x30 + allocated) as u32).to_le_bytes());
+    value[8..12].copy_from_slice(&0x0cu32.to_le_bytes());
+    value[12..16].copy_from_slice(&0x30u32.to_le_bytes());
+    value[0x18..0x20].copy_from_slice(&(allocated as u64).to_le_bytes());
+    value[0x20..0x28].copy_from_slice(&(data.len() as u64).to_le_bytes());
+    value[0x28..0x30].copy_from_slice(&(data.len() as u64).to_le_bytes());
+    value[0x30..0x38].copy_from_slice(&(allocated as u64).to_le_bytes());
+    value[0x38..0x3c].copy_from_slice(&2u32.to_le_bytes());
+    value[0x3c..0x3c + data.len()].copy_from_slice(data);
+    let mut key = vec![0u8; 16];
+    key[0..8].copy_from_slice(&(value.len() as u64).to_le_bytes());
+    key[8..12].copy_from_slice(&0x8000_0001u32.to_le_bytes());
+    key[12..16].copy_from_slice(&0x80u32.to_le_bytes());
+    let attribute = row(&key, &value, 0);
+    // The record: descriptor and file fields (0xa8 bytes), then the node
+    // (header, the row, 4 free bytes, the key index).
+    const NODE: usize = 0xa8;
+    let index = 0x28 + attribute.len() + 4;
+    let mut r = vec![0u8; NODE + index + 4];
+    let put32 = |r: &mut Vec<u8>, at: usize, v: u32| r[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    let put64 = |r: &mut Vec<u8>, at: usize, v: u64| r[at..at + 8].copy_from_slice(&v.to_le_bytes());
+    put32(&mut r, 0, NODE as u32);
+    r[4..8].copy_from_slice(&[0x28, 0, 1, 0]);
+    put32(&mut r, 8, 1);
+    put32(&mut r, 0x0c, 0x1e0);
+    put32(&mut r, 0x10, 0x1e0);
+    put32(&mut r, 0x14, 2);
+    put64(&mut r, 0x20, 1);
+    for at in [0x28, 0x30, 0x38, 0x40] {
+        put64(&mut r, at, now);
+    }
+    put32(&mut r, 0x48, 0x20);
+    put32(&mut r, 0x4c, 8);
+    put64(&mut r, 0x50, common);
+    put64(&mut r, 0x58, data.len() as u64);
+    put64(&mut r, 0x60, allocated as u64);
+    put64(&mut r, 0x80, id);
+    put64(&mut r, 0x98, 1);
+    let h = NODE;
+    put32(&mut r, h, 0x28);
+    put32(&mut r, h + 4, (0x28 + attribute.len()) as u32);
+    put32(&mut r, h + 8, 4);
+    r[h + 0x0c..h + 0x10].copy_from_slice(&[0, 2, 0, 0]);
+    put32(&mut r, h + 0x10, index as u32);
+    put32(&mut r, h + 0x14, 1);
+    put32(&mut r, h + 0x20, (index + 4) as u32);
+    r[h + 0x28..h + 0x28 + attribute.len()].copy_from_slice(&attribute);
+    put32(&mut r, h + index, 0xffff_0028);
+    r
+}
+
+/// The order of a directory's rows: by type, file id rows by id, name rows
+/// by name compared without case (UTF-16 units after upcasing).
+fn directory_key_order(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    let (ta, tb) = (le16(a, 0), le16(b, 0));
+    if ta != tb {
+        return ta.cmp(&tb);
+    }
+    match ta {
+        ROW_NAME if a.len() >= 4 && b.len() >= 4 => upcased(&a[4..]).cmp(&upcased(&b[4..])),
+        ROW_FILE_ID | 0x40 if a.len() >= 16 && b.len() >= 16 => le64(a, 8).cmp(&le64(b, 8)),
+        _ => a.cmp(b),
+    }
+}
+
+fn upcased(name: &[u8]) -> Vec<u16> {
+    name.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| {
+            let u = u16::from_le_bytes(*c);
+            match char::from_u32(u as u32).map(|c| c.to_uppercase()) {
+                Some(mut up) if up.len() == 1 => {
+                    let c = up.next().unwrap() as u32;
+                    if c <= 0xffff { c as u16 } else { u }
+                }
+                _ => u,
+            }
+        })
+        .collect()
 }

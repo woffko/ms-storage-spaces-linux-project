@@ -17,7 +17,7 @@ against pools created by Windows.
 > and single parity spaces, fixed and thin (`attach --rw`); pool management
 > (`spaces pool|space|disk`); reading ReFS 3.x volumes (`refs`, new).**
 > The pool disks are written only for spaces attached read-write and by
-> management commands given `--yes`; `refs` writes only with `refs set|overwrite --yes`.
+> management commands given `--yes`; `refs` writes only with `refs set|overwrite|create --yes`.
 
 ## What works
 
@@ -44,7 +44,7 @@ against pools created by Windows.
 | Creating tiered spaces (SSD mirror over HDD simple or parity) | `spaces tier`, `spaces space create --tier` |
 | Creating dual parity spaces; writing tiered spaces | not yet |
 | ReFS 3.x volumes (Dev Drives, data volumes, inside a space): files, sparse, block-cloned and deduplicated files, named streams, stream snapshots, links, attributes; integrity streams checked on every read | `refs` reads and mounts read-only (FUSE); verified on ReFS 3.14 |
-| Writing ReFS: times and attributes of files, overwriting file data | `refs set`, `refs overwrite` with `--yes` (experimental); Windows takes the result as healthy |
+| Writing ReFS: times and attributes of files, overwriting file data, creating small files | `refs set`, `refs overwrite`, `refs create` with `--yes` (experimental); Windows takes the result as healthy |
 | ReFS compression, encryption; ReFS 1.x/2.x; other ReFS writes | not yet |
 
 ## Quick start
