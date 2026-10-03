@@ -47,6 +47,8 @@ pub struct Volume<D> {
     pub page_size: u64,
     pub volume_guid: [u8; 16],
     pub checkpoint: Checkpoint,
+    /// The clusters of both checkpoint copies (the superblock's list).
+    pub checkpoint_lcns: Vec<u64>,
     /// Clusters per container, and each container's first physical cluster.
     pub clusters_per_container: u64,
     containers: BTreeMap<u64, u64>,
@@ -106,6 +108,7 @@ impl<D: ReadAt> Volume<D> {
             clusters_per_container: 0,
             containers: BTreeMap::new(),
             objects: BTreeMap::new(),
+            checkpoint_lcns: Vec::new(),
         };
         // The superblock: the primary, then the two copies at the end.
         let mut supb = None;
@@ -134,6 +137,7 @@ impl<D: ReadAt> Volume<D> {
         let mut best: Option<(u64, u64, Vec<u8>)> = None;
         for i in 0..count {
             let lcn = le64(&supb, list + 8 * i);
+            vol.checkpoint_lcns.push(lcn);
             if lcn >= total_clusters {
                 continue;
             }

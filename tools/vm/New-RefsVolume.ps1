@@ -23,6 +23,8 @@ Scenarios:
           identical files deduplicated by refsutil, and then the volume
           compressed by refsutil (-Compression LZ4 or ZSTD, with
           -CompressionLevel and -ChunkSize; NONE leaves it uncompressed)
+  small   a few files (resident, in extents, in a subdirectory): the base
+          of write experiments (tools/vm/Invoke-RefsSteps.ps1)
   empty   the freshly formatted volume only
 
 With -PoolDisks N the volume is made inside a space instead: N dynamic
@@ -32,7 +34,7 @@ the GPT and the Dev Drive; the manifest's "pool" names them.
 #>
 param(
     [Parameter(Mandatory)] [string] $Name,
-    [ValidateSet('basic', 'features', 'empty')] [string] $Scenario = 'basic',
+    [ValidateSet('basic', 'features', 'small', 'empty')] [string] $Scenario = 'basic',
     [ValidateSet('NONE', 'LZ4', 'ZSTD')] [string] $Compression = 'NONE',
     [int] $CompressionLevel = 0,
     [long] $ChunkSize = 0,
@@ -157,7 +159,7 @@ public static class RefsGen {
 '@
     function New-File([string] $rel, [long] $size) {
         $p = Join-Path $drive $rel
-        New-Item -ItemType Directory -Force (Split-Path $p) | Out-Null
+        [IO.Directory]::CreateDirectory((Split-Path $p)) | Out-Null
         [RefsGen]::Write($p, [RefsGen]::Seed($rel), 0, $size, $false)
     }
 
@@ -170,6 +172,13 @@ public static class RefsGen {
         $out = & cmd /c "$what 2>&1"
         if ($LASTEXITCODE) { throw "$what failed: $out" }
         $out
+    }
+
+    if ($Scenario -eq 'small') {
+        New-File 'small.txt' 100
+        New-File 'mid.bin' 102400
+        New-File 'dir\inner.txt' 3000
+        New-File 'last.txt' 10
     }
 
     if ($Scenario -eq 'features') {
@@ -277,7 +286,7 @@ public static class RefsGen {
     $part = Get-Partition -DiskNumber $disk.Number | Where-Object Type -eq 'Basic'
     if (-not $part.DriveLetter) { $part | Add-PartitionAccessPath -AssignDriveLetter; $part = Get-Partition -DiskNumber $disk.Number -PartitionNumber $part.PartitionNumber }
     $drive = "$($part.DriveLetter):\"
-    $last = @{ basic = 'gone\new_name.txt'; features = 'last.txt' }[$Scenario]
+    $last = @{ basic = 'gone\new_name.txt'; features = 'last.txt'; small = 'last.txt' }[$Scenario]
     if ($last -and -not (Test-Path -LiteralPath (Join-Path $drive $last))) { throw 'the last writes are missing after reattaching' }
     # (Get-FileHash of Windows PowerShell 5.1 cannot open "file:stream".)
     function Get-StreamHash([string] $path, [string] $stream) {

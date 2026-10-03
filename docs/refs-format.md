@@ -219,6 +219,38 @@ times: a 5 MiB file of zeros became 1280 one-cluster runs of one cluster.
 Nothing else is needed to read them (**verified**: identical text and
 random files deduplicated, and the zero file).
 
+## Writing (research for Track B4)
+
+Not written by `refs` yet. What Windows writes, from the write
+experiments (`tools/vm/Invoke-RefsSteps.ps1` changes a volume one step at
+a time and keeps an image after each; `tools/refs-diff.py` lists the
+changed clusters with what `refs map` says they are; `refs tree` prints a
+table's rows for a text diff):
+
+* The checkpoint roots, in the order of the literature (Prade, Gross and
+  Dewald, "Forensic analysis of the resilient file system (ReFS) version
+  3.4", DFRWS 2020) and consistent with what the experiments show: 0
+  object table, 1 medium allocator, 2 container allocator, 3 schema
+  table, 4 parent-child table, 5 object table copy, 6 block reference
+  counts, 7 and 8 container table and copy, 9 schema copy, 10 container
+  index, 11 integrity state, 12 small allocator (roots 7, 8 and 12 name
+  physical clusters; root 6 is empty on a volume without clones; roots 3
+  and 9 hold 29 rows each on a new volume).
+* Every transaction, also attaching a volume and detaching it unchanged,
+  writes copies of the changed B+-tree pages to free clusters (copy on
+  write, up to the object table and its copy), MLog pages (a control area
+  near cluster 0x30 and records further on, both with the signature
+  `MLog`) and both checkpoints, each with a higher clock (0x60). Changing
+  a file's time rewrites the page of its directory, the object table and
+  its copy, both allocators and the internal objects 0x500, 0x501, 0x701
+  and 0x705.
+* Allocator rows (roots 1, 2) are bitmaps of a cluster range with a count
+  of free clusters; allocating a 16 KiB page sets four bits and lowers
+  the count by four.
+* Object table rows carry, before their page reference, a counter pair
+  that the checkpoint (0x70) and MLog records carry as well; it grows with
+  every transaction (the log's sequence number, presumably).
+
 ## Not read yet
 
 Compression (LZ4/ZSTD: `refsutil compression` and the ReFS dedup jobs of

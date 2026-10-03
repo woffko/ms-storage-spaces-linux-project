@@ -88,6 +88,27 @@ enum Command {
         #[arg(long)]
         allow_other: bool,
     },
+    /// Every cluster the volume uses, by physical cluster: superblocks,
+    /// checkpoints, the pages of each tree, the data runs of each file
+    /// (for format work: what changed between two images).
+    #[command(hide = true)]
+    Map {
+        #[command(flatten)]
+        source: Source,
+    },
+    /// Every row of a checkpoint root's tree or of an object's tree, in hex
+    /// (for format work).
+    #[command(hide = true)]
+    Tree {
+        #[command(flatten)]
+        source: Source,
+        /// The checkpoint root (0 to 12).
+        #[arg(long, conflicts_with = "object")]
+        root: Option<usize>,
+        /// The object id (hex with 0x, or decimal).
+        #[arg(long, value_parser = parse_number)]
+        object: Option<u64>,
+    },
     /// The raw attribute rows of a file's record, in hex (for format work).
     #[command(hide = true)]
     Rows {
@@ -195,6 +216,100 @@ fn time(filetime: u64) -> String {
         rem % 3600 / 60,
         rem % 60
     )
+}
+
+/// Prints "LCN COUNT WHAT" for every cluster the volume uses.
+fn map(vol: &Volume<Device>, out: &mut impl Write) -> Result<()> {
+    let total = vol.boot.volume_size() / vol.cluster;
+    let per_page = vol.page_size / vol.cluster;
+    for (lcn, what) in [
+        (refs::volume::SUPERBLOCK_LCN, "superblock"),
+        (total - 2, "superblock copy"),
+        (total - 3, "superblock copy"),
+    ] {
+        writeln!(out, "{lcn:#x} 1 {what}")?;
+    }
+    for &lcn in &vol.checkpoint_lcns {
+        let current = if lcn == vol.checkpoint.lcn { " (current)" } else { "" };
+        writeln!(out, "{lcn:#x} {per_page} checkpoint{current}")?;
+    }
+    for (i, r) in vol.checkpoint.roots.iter().enumerate() {
+        tree_pages(vol, r, matches!(i, 7 | 8 | 12), &format!("root {i}"), 0, out)?;
+    }
+    for oid in vol.object_ids().collect::<Vec<_>>() {
+        let r = vol.object(oid)?.clone();
+        tree_pages(vol, &r, false, &format!("object {oid:#x}"), 0, out)?;
+    }
+    let mut dirs = vec![(refs::volume::ROOT_DIRECTORY, String::from("/"))];
+    while let Some((oid, prefix)) = dirs.pop() {
+        for e in vol.read_dir(oid)? {
+            let path = format!("{prefix}{}", e.name);
+            if let Target::Directory(child) = e.target
+                && e.attributes & 0x400 == 0
+            {
+                dirs.push((child, format!("{path}/")));
+            }
+            let Ok(file) = vol.open_file(&e) else {
+                continue;
+            };
+            let named = file
+                .streams
+                .iter()
+                .chain(&file.snapshots)
+                .map(|(n, s)| (format!(":{n}"), s));
+            for (name, s) in
+                std::iter::once((String::new(), file.data.as_ref())).chain(named.map(|(n, s)| (n, Some(s))))
+            {
+                let Some(refs::Stream {
+                    content: Content::Extents(extents),
+                    ..
+                }) = s
+                else {
+                    continue;
+                };
+                for x in extents.iter().filter(|x| x.written) {
+                    let lcn = vol.translate(x.vlcn)?;
+                    writeln!(out, "{lcn:#x} {} data {path}{name} vcn {}", x.clusters, x.vcn)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The pages of the tree below `r`, each cluster on its own line.
+fn tree_pages(
+    vol: &Volume<Device>,
+    r: &refs::page::PageRef,
+    physical: bool,
+    what: &str,
+    level: usize,
+    out: &mut impl Write,
+) -> Result<()> {
+    if level > 16 {
+        bail!("{what}: deeper than 16 levels");
+    }
+    for &lcn in r.lcns.iter().take((vol.page_size / vol.cluster) as usize) {
+        let at = if physical { lcn } else { vol.translate(lcn)? };
+        writeln!(out, "{at:#x} 1 page {what} depth {level}")?;
+    }
+    let page = vol.read_page(r, physical)?;
+    let node = refs::node::Node::at(&page, refs::page::PAGE_HEADER_SIZE)?;
+    if !node.is_leaf() {
+        for row in node.rows() {
+            let child = refs::page::PageRef::parse(row?.value)?;
+            tree_pages(vol, &child, physical, what, level + 1, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_number(s: &str) -> std::result::Result<u64, String> {
+    match s.strip_prefix("0x") {
+        Some(h) => u64::from_str_radix(h, 16),
+        None => s.parse(),
+    }
+    .map_err(|e| e.to_string())
 }
 
 fn hex(b: &[u8]) -> String {
@@ -487,6 +602,26 @@ fn main() -> Result<()> {
         } => {
             let vol = open_volume(&source)?;
             fuse::serve(vol, &mountpoint, allow_other)?;
+        }
+        Command::Tree { source, root, object } => {
+            let vol = open_volume(&source)?;
+            let (r, physical) = match (root, object) {
+                (Some(i), _) => (
+                    vol.checkpoint.roots.get(i).context("no such root")?.clone(),
+                    matches!(i, 7 | 8 | 12),
+                ),
+                (_, Some(oid)) => (vol.object(oid)?.clone(), false),
+                _ => bail!("--root or --object"),
+            };
+            vol.walk(&r, physical, &mut |row| {
+                writeln!(out, "key {}", hex(row.key)).map_err(refs::Error::Io)?;
+                writeln!(out, "  = {}", hex(row.value)).map_err(refs::Error::Io)?;
+                Ok(())
+            })?;
+        }
+        Command::Map { source } => {
+            let vol = open_volume(&source)?;
+            map(&vol, &mut out)?;
         }
         Command::Rows { source, path, bytes } => {
             let vol = open_volume(&source)?;

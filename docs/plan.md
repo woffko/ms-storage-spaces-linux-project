@@ -630,6 +630,14 @@ rows of thin spaces not allocated yet (M7).
   -Resiliency Mirror`, volume `r314mirror`) reads back as Windows listed
   it, through the library and the mount (`refs --space`). Open:
   compression.
+* B4 (research): write experiments on a small volume (scenario `small`,
+  `tools/vm/Invoke-RefsSteps.ps1`, `tools/refs-diff.py`, `refs map` and
+  `refs tree`) show what one change costs: copy-on-write pages up to both
+  object tables, both allocators, internal objects, MLog records and both
+  checkpoints (docs/refs-format.md, "Writing"). Next: the meaning of the
+  allocator, object table and checkpoint fields, the MLog layout and
+  whether Windows replays it over a checkpoint written without records;
+  then a first write (a file's time) that Windows takes as clean.
 
 ## Test infrastructure (continuous, feeds every stage)
 
