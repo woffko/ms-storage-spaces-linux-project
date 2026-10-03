@@ -337,11 +337,14 @@ table's rows for a text diff):
   writes a stream without integrity checksums where it is (the extents
   stay) and commits the new times with copy on write.
 * Block reference counts (root 6): rows keyed by a range of virtual
-  clusters (first, count; 0x400 clusters each seen) whose values count
-  references per cluster (u16 each, 2 for a cluster two files share);
-  empty on volumes without block clones or deduplication. `refs` frees
-  no cluster inside such a range (deleting a file whose clusters lie
-  there is refused) and frees others as on any volume.
+  clusters (first, count; 0x400 clusters each seen); value: the key, a
+  u64 at 0x10, the sum of the counts (u32 at 0x18), then from 0x1c a u16
+  per cluster counting its references beyond the first (three files
+  sharing a cluster: 2; 0 for a cluster one file has alone); empty on
+  volumes without block clones or deduplication. `refs` neither frees
+  nor overwrites in place a cluster with a count (deleting such a file is
+  refused, as is overwriting such clusters, which would change the other
+  files) and handles clusters of count 0 as on any volume.
 * Moving a file to another directory, or giving it a second name (steps
   `move`, `link`): its record leaves its name row and becomes a row of
   type 0x40 of the directory it was made in (its home; key 0x40, 0x8000,

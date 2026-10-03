@@ -492,13 +492,17 @@ fn deleting_and_renaming_files() {
     vol.delete_file("/sizes/size_65537.bin", now).unwrap();
     assert_allocated(&vol, &skip, "freed from a uniform row");
     assert_pages_valid(&vol, &skip, "freed from a uniform row");
-    // Refused: cloned clusters, an existing target name.
+    // Refused: cloned clusters (deleting, or overwriting them where they
+    // are, which would change the other copies), an existing target name.
+    let copy2 = read_all(&vol, "/clones/copy2.bin");
     for err in [
         vol.delete_file("/clones/copy1.bin", now).unwrap_err(),
+        vol.overwrite("/clones/copy1.bin", 4096, b"changed", now).unwrap_err(),
         vol.rename("/sizes/size_0.bin", "size_1000.bin", now).unwrap_err(),
     ] {
         assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
     }
+    assert_eq!(read_all(&vol, "/clones/copy2.bin"), copy2);
 }
 
 #[test]

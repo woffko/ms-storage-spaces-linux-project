@@ -1268,6 +1268,23 @@ impl<D: WriteAt> Volume<D> {
                 if covered < end {
                     return Err(Error::Unsupported(format!("{path}: writing into a sparse range")));
                 }
+                // Clusters other files share (block clones) are not written
+                // where they are: that would change those files too.
+                let mut touched = Vec::new();
+                for x in extents {
+                    let (start, stop) = (x.vcn * cluster, (x.vcn + x.clusters) * cluster);
+                    let (from, to) = (offset.max(start), end.min(stop));
+                    if from < to {
+                        let first = x.vlcn + (from - start) / cluster;
+                        let last = x.vlcn + (to - 1 - start) / cluster;
+                        touched.push((self.translate(first)?, last - first + 1));
+                    }
+                }
+                if self.refcounted(&touched)? {
+                    return Err(Error::Unsupported(format!(
+                        "{path}: shared (cloned or deduplicated) clusters are not overwritten in place"
+                    )));
+                }
                 for x in extents {
                     let (start, stop) = (x.vcn * cluster, (x.vcn + x.clusters) * cluster);
                     let (from, to) = (offset.max(start), end.min(stop));
@@ -1754,29 +1771,33 @@ impl<D: WriteAt> Volume<D> {
         self.load()
     }
 
-    /// Whether any of these physical runs lies in a range the block
-    /// reference count table (root 6: rows keyed by first virtual cluster
-    /// and count) covers: clusters files may share (block clones,
-    /// deduplication), which `refs` does not free yet.
+    /// Whether any cluster of these physical runs has other references
+    /// (block clones, deduplication): the block reference count table
+    /// (root 6) has rows keyed by first virtual cluster and count whose
+    /// values hold, from 0x1c, a u16 per cluster counting the references
+    /// beyond the first (0: one file's alone).
     fn refcounted(&self, runs: &[(u64, u64)]) -> Result<bool> {
-        let mut ranges = Vec::new();
+        let mut rows = Vec::new();
         self.walk(&self.checkpoint.roots[6].clone(), false, &mut |row| {
             if row.key.len() >= 16 {
-                ranges.push((le64(row.key, 0), le64(row.key, 8)));
+                rows.push((le64(row.key, 0), le64(row.key, 8), row.value.to_vec()));
             }
             Ok(())
         })?;
-        if ranges.is_empty() {
+        if rows.is_empty() {
             return Ok(false);
         }
         for &(lcn, n) in runs {
             for c in lcn..lcn + n {
                 let v = self.virtual_of(c)?;
-                if ranges
-                    .iter()
-                    .any(|&(first, count)| first <= v && v < first.saturating_add(count))
-                {
-                    return Ok(true);
+                for (first, count, value) in &rows {
+                    if *first <= v && v < first.saturating_add(*count) {
+                        let at = 0x1c + 2 * (v - first) as usize;
+                        // A count it does not hold: taken as shared.
+                        if value.get(at..at + 2).is_none_or(|b| b != [0, 0]) {
+                            return Ok(true);
+                        }
+                    }
                 }
             }
         }

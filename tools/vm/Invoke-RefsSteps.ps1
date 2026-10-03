@@ -22,6 +22,7 @@ volume before the first step: step-0-base.vhdx).
   stream|PATH|NAME|LEN  write named stream NAME: LEN bytes 0x77
   unstream|PATH|NAME    delete named stream NAME
   integrity|PATH|on     turn integrity streams on (or off) for a file
+  copy|PATH|NEWPATH     copy a file (block-cloned by Windows 11 on ReFS)
 Run on the Windows test VM only.
 #>
 param(
@@ -75,6 +76,7 @@ foreach ($step in ($Steps.Split(';') | Where-Object { $_ })) {
             }
             'unstream' { Remove-Item -LiteralPath $p -Stream $a[2] }
             'integrity' { Set-FileIntegrity -FileName $p -Enable ($a[2] -eq 'on') }
+            'copy' { Copy-Item -LiteralPath $p (Join-Path $drive $a[2]) }
             default { throw "unknown step $step" }
         }
         Write-VolumeCache -DriveLetter $part.DriveLetter
