@@ -436,8 +436,9 @@ kept in an unlinked temporary file, in `$REFS_TMPDIR` or the system's
 temporary directory; when it is closed or synced, what was written goes
 to the volume as Windows writes it: changed bytes where they are,
 appended data in new runs, a shortened file's tail freed, the touched
-clusters of an integrity stream copied on write; a file in its record or
-a new or truncated file is written whole), copies (a whole file copied
+clusters of an integrity stream copied on write; a file in its record,
+a new or truncated file and a file Windows compressed are written
+whole), copies (a whole file copied
 into an empty one with copy_file_range, as coreutils 9 `cp` and file
 managers copy, becomes a block clone that shares the clusters, as
 `Copy-Item` makes on a Dev Drive), directories, renames and moves, hard
@@ -489,7 +490,8 @@ refs clone devdrive.img --path /archive/big.iso --to /notes/big.iso --yes
 
 `refs overwrite` replaces bytes inside a file (not beyond its end, not in
 sparse ranges; the clusters of integrity streams it touches are copied
-on write) where they are, as Windows does,
+on write, a compressed file of up to 64 MiB is copied whole) where they
+are, as Windows does,
 and sets the modification and change times to now. `refs create` makes a
 file (up to 1 KiB kept in its record; larger ones in clusters near the
 data of the files around it, read from the local file piece by piece,
@@ -501,7 +503,11 @@ file or directory within its directory and `refs delete` deletes a file
 and files with stream snapshots) or an empty directory; deleting a
 file whose clusters other files share (block clones, deduplication)
 lowers their reference counts and frees only clusters no other file
-has. `refs mkdir` creates a directory;
+has. A file Windows compressed is changed by writing it whole into
+ordinary clusters (Windows copies only the clusters it touches); its
+compressed clusters lose a reference each, and those no file references
+any more are left for Windows' dedup job to reclaim, as Windows leaves
+them. `refs mkdir` creates a directory;
 `refs write` replaces a file's content (or appends to it with
 `--append`), keeping its creation time, attributes and permissions.
 New data goes into the volume's data containers; when they are full
@@ -535,7 +541,8 @@ streams, and files Windows compressed with LZ4 or ZSTD (`Enable-ReFSDedup
 -Type DedupAndCompress`, `refsutil compression`; checked unit by unit)
 (verified on ReFS 3.14 volumes made by Windows 11). Not read yet:
 encrypted files, ReFS 1.x/2.x and 3.4 to 3.13. Compressed files are
-not changed by `refs` (the writing commands refuse them).
+changed by writing them whole, see above; their named streams, if
+compressed, are not changed.
 
 ## Troubleshooting
 

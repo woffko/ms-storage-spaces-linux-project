@@ -46,9 +46,9 @@ against pools created by Windows.
 | Creating tiered spaces (SSD mirror over HDD simple or parity) | `spaces tier`, `spaces space create --tier` |
 | Creating dual parity spaces; writing tiered spaces | not yet |
 | ReFS 3.x volumes (Dev Drives, data volumes, inside a space): files, sparse, block-cloned, deduplicated and compressed (LZ4, ZSTD) files, named streams, stream snapshots, links, attributes; integrity streams checked on every read | `refs` reads and mounts read-only (FUSE); verified on ReFS 3.14 |
-| Writing ReFS: files (up to 64 GiB each, changed in place as Windows changes them), directories, renames and moves, hard links, times and attributes, named streams, integrity streams, files with stream snapshots, block clones (`refs clone`, whole-file copies through the mount; clones of sparse files stay sparse), deleting block-cloned and deduplicated files; a read-write FUSE mount; `mount -t ReFS` and udisks2 through `mount.ReFS` | `refs set|overwrite|write|create|rename|move|link|clone|delete|mkdir --yes`, `refs mount --rw` (experimental); Windows takes the result as healthy (refsutil leak and triage) |
+| Writing ReFS: files (up to 64 GiB each, changed in place as Windows changes them), directories, renames and moves, hard links, times and attributes, named streams, integrity streams, files with stream snapshots, block clones (`refs clone`, whole-file copies through the mount; clones of sparse files stay sparse), deleting block-cloned and deduplicated files, changing and deleting compressed files (written whole into ordinary clusters); a read-write FUSE mount; `mount -t ReFS` and udisks2 through `mount.ReFS` | `refs set|overwrite|write|create|rename|move|link|clone|delete|mkdir --yes`, `refs mount --rw` (experimental); Windows takes the result as healthy (refsutil leak and triage) |
 | Checking ReFS | `refs check` (pages, allocators, shared clusters) |
-| ReFS: changing compressed files, encryption; ReFS 1.x/2.x and 3.4-3.13 (no Windows at hand makes them); making stream snapshots | not yet |
+| ReFS: encryption; ReFS 1.x/2.x and 3.4-3.13 (no Windows at hand makes them); making stream snapshots | not yet |
 
 ## Quick start
 
@@ -171,7 +171,7 @@ refs ls --space Data /dev/sdd /dev/sde --path /
 
 ReFS is a separate track: reading ReFS 3.x and mounting it (done for ReFS
 3.14, with snapshots and deduplicated files), writing (done for the
-operations above, each checked on Windows; reading compression),
+operations above, each checked on Windows),
 then older versions, which need older Windows to make samples.
 Details in [docs/plan.md](docs/plan.md).
 

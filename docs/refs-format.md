@@ -331,24 +331,29 @@ container. Files keep their extents; a cluster's data is in the unit
 that holds its place in the stream.
 
 * The compacted container's row in the container table: class 0xa (u32
-  at 0x14), the kept clusters at 0x24, the format at 0x30 (1 LZ4, 2
+  at 0x14), the clusters of the container files reference at 0x20 (602
+  here), the kept clusters at 0x24, the format at 0x30 (1 LZ4, 2
   ZSTD; 3 LZ4 on QuickAssist hardware by forefst's notes), the unit size
   at 0x34 (0x10000), and in place of the physical start and clusters
   the *virtual* cluster of the compressed bytes (0x130000: container
   0x26) and their clusters (0x1628).
 * Root 10 (empty before) has rows keyed (container id u64, sequence u32,
-  type u32), the key the first 16 bytes of the value. Type 3: from 0x30
+  type u32), the key the first 16 bytes of the value, then a u64, the
+  container's first virtual cluster and its clusters (0x28: a value that
+  changes, a kernel address by its look). Type 3: from 0x30
   a bitmap of the container's 0x4000 clusters, those kept; a cluster's
   place in the stream is the number of kept clusters before it (15 224
-  of 16 384 here). Type 7, one per range of the stream (two here, 476
+  of 16 384 here). Type 5: from 0x30 a bitmap of the clusters files
+  reference, as many as the row's count at 0x20 (**verified** on every
+  compressed volume and step below: the bits are exactly the clusters
+  the files' extents name). Type 7, one per range of the stream (two here, 476
   units each): 0x10 the range's first byte in the stream and 0x18 its
   bytes, 0x20 the first of its compressed bytes (from the start of the
   container's compressed bytes) and 0x28 their bytes, 0x30 flags (2:
   checksums; 1 on the last range), 0x34 the units, 0x38 the offset
   (0x40) of a u32 per unit where its compressed bytes end, 0x3c the
   checksum kind (1: a CRC32-C of each unit's compressed bytes, a u32 per
-  unit after the ends). Type 5: a summary not needed to read (0x3ff,
-  0x400, ...).
+  unit after the ends).
 * Windows reported 376 leaked clusters on the compacted volume by itself
   (`refsutil leak`), the same after `refs` wrote a file on it.
 * The dedup engine also deduplicated the files (their text was the same
@@ -357,17 +362,30 @@ that holds its place in the stream.
   row's total sums), 0x8000 marks clusters it deduplicated (0x8027: 40
   files), 0x4000 others it went through. When a flagged cluster's last
   reference goes, Windows sets its entry to 0x4000 (0x8001 counts down
-  to 0x8000, then 0x4000), in compacted containers too, whose rows in
-  root 10 stay as they were (after Windows deleted every compressed
-  file only the u32 at 0x20 of the container's row changed, 0x25a to
-  0x175). `refs` does the same when it frees. Changing compressed files
+  to 0x8000, then 0x4000), in compacted containers too. A compacted
+  cluster's last reference also clears its bit in the type 5 bitmap and
+  lowers the row's count at 0x20 in both container tables; the kept
+  bitmap, the ranges and the compressed bytes stay (after Windows deleted
+  every compressed file: 602 to 373, the clusters the 3 files left
+  reference). Changing compressed files
   (steps `delete`, `write`, `append` on that volume): deleting one lowered
-  the counts of its shared clusters (0x8027 to 0x8026; the compacted
-  container's rows in root 10 stayed as they were), and writing into one
+  the counts of its shared clusters (0x8027 to 0x8026; nothing else
+  changed: each of its clusters had other references), and writing into one
   or appending to one copied the touched clusters on write into an
   ordinary data container (the overwritten cluster's run split around
   it, the last partly used cluster moved), the old ones losing a
-  reference.
+  reference (one of them its last: 602 to 601, its bit cleared).
+* `refs` frees compacted clusters the same way, and changes a compressed
+  file by writing it whole into ordinary clusters, as for a block-cloned
+  one (**verified**: on a copy of that volume `refs` overwrote 3 bytes of
+  one file, appended to a second, cut a third to 100 000 bytes, cloned a
+  fourth and deleted a fifth: Windows read every file with the expected
+  SHA-256, `refsutil leak` found the volume's 376 and triage nothing, and
+  Windows then changed compressed files itself; on another copy `refs`
+  deleted all 40 text files: the block reference count table, the
+  container table and root 10 came out as Windows wrote them when it
+  deleted those files, leak 376 as on Windows' image; before the type 5
+  bit was cleared Windows counted each such cluster as leaked).
 
 ZSTD (`refsutil compression E: /c /f ZSTD` on a volume with
 `Enable-ReFSDedup -Type DedupAndCompress`: 30.3 MB of text into 4.92 MB)
@@ -378,10 +396,12 @@ units a read needs, checking their CRC32-C, and keeps the last few; LZ4
 with its own decoder, ZSTD with the `ruzstd` crate after checking the
 frame's window and content size), and
 `refs check` looks for their compressed clusters in the medium
-allocator instead of the files' runs (**verified**: all 40 LZ4 and all
-20 ZSTD files read with Windows' SHA-256, a damaged unit is refused). Changing a file with
-compressed data is refused; new data never goes into a compacted
-container (its class is neither 0 nor 1).
+allocator instead of the files' runs, and compares the clusters files
+reference with the type 5 bitmap and the row's count (**verified**: all
+40 LZ4 and all 20 ZSTD files read with Windows' SHA-256, a damaged unit
+is refused, every Windows image above checks clean). New data never
+goes into a compacted container (its class is neither 0 nor 1); named
+streams in one are not changed.
 
 ### Deduplication and block cloning
 
@@ -717,9 +737,7 @@ created, which lost the directory's contents).
 
 ## Not read yet
 
-Compression (LZ4/ZSTD: `refsutil compression` and the ReFS dedup jobs of
-Windows 11 26340 deduplicate but do not compress, so there are no samples
-yet; Microsoft documents compression for Windows Server 2025), extended attributes, EFS, the USN
-journal, snapshots of named streams (read by the same rules, no sample),
+LZ4 on QuickAssist hardware (format 3 is decoded as LZ4, no sample),
+extended attributes, EFS, the USN journal, snapshots of named streams (read by the same rules, no sample),
 volumes before ReFS 3.10 (104-byte references are parsed but untested)
 and ReFS 1.x/2.x.

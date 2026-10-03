@@ -6,7 +6,7 @@
 
 mod common;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -1673,31 +1673,91 @@ fn changing_files_with_snapshots() {
 }
 
 #[test]
-fn compressed_files_are_read_not_changed() {
-    // Files whose data Windows compressed (in a compacted container) read
-    // through their units; changing them is refused for now, and the
-    // volume checks clean.
+fn changing_compressed_files() {
+    // Files whose data Windows compressed (in a compacted container): a
+    // change copies the whole file into ordinary clusters, its old
+    // clusters losing a reference each; the container's row counts the
+    // compacted clusters files still reference and its bitmap in root 10
+    // marks them (`check` compares both). After every text file is gone,
+    // the reference counts of the container are those Windows left when
+    // it deleted them (step `delete` of r314cmp).
     let (image, manifest, skip) = load("r314compress");
     let offset = manifest["partition_offset"].as_u64().unwrap();
     let overlay = Overlay::new(&image);
     let mut vol = Volume::open(&overlay, offset).unwrap();
     let now = 135_800_000_000_000_000;
     assert_eq!(vol.check(&skip).unwrap().problems, Vec::<String>::new());
-    let data = read_all(&vol, "/text/t5.txt");
-    assert_eq!(data.len(), 1_586_214);
-    for err in [
-        vol.delete_file("/text/t5.txt", now).unwrap_err(),
-        vol.write_file("/text/t5.txt", b"new content, longer than an inline file", now)
-            .unwrap_err(),
-        vol.overwrite("/text/t5.txt", 10, b"x", now).unwrap_err(),
-        vol.clone_file("/text/t5.txt", "/copy.txt", now).unwrap_err(),
-    ] {
-        assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
+    let id = vol.compressed_runs()[0].0;
+    assert_eq!(compacted_referenced(&vol, id), 602);
+    let [t5, t6, t7, t8] = ["t5", "t6", "t7", "t8"].map(|t| read_all(&vol, &format!("/text/{t}.txt")));
+    assert_eq!(t5.len(), 1_586_214);
+
+    vol.overwrite("/text/t5.txt", 10, b"xyz", now).unwrap();
+    let mut want = t5.clone();
+    want[10..13].copy_from_slice(b"xyz");
+    assert_eq!(read_all(&vol, "/text/t5.txt"), want);
+    assert_eq!(read_all(&vol, "/text/t6.txt"), t6);
+    assert_pages_valid(&vol, &skip, "compressed file overwritten");
+
+    let mut longer = t6.clone();
+    longer.extend_from_slice(b"appended");
+    vol.write_file("/text/t6.txt", &longer, now).unwrap();
+    vol.write_file("/text/t7.txt", &t7[..100_000], now).unwrap();
+    vol.clone_file("/text/t8.txt", "/copy.txt", now).unwrap();
+    assert_eq!(read_all(&vol, "/text/t6.txt"), longer);
+    assert_eq!(read_all(&vol, "/text/t7.txt"), &t7[..100_000]);
+    assert_eq!(read_all(&vol, "/copy.txt"), t8);
+    assert_eq!(read_all(&vol, "/text/t8.txt"), t8);
+    assert_pages_valid(&vol, &skip, "compressed files appended, truncated, cloned");
+
+    let text = vol.lookup("/text").unwrap();
+    let refs::Target::Directory(dir) = text.target else {
+        panic!("/text")
+    };
+    for e in vol.read_dir(dir).unwrap() {
+        vol.delete_file(&format!("/text/{}", e.name), now).unwrap();
     }
-    // Other files change as on any volume.
-    vol.create_file("/new.bin", &vec![7u8; 100_000], now).unwrap();
-    assert_eq!(read_all(&vol, "/text/t5.txt"), data);
-    assert_pages_valid(&vol, &skip, "compressed volume written");
+    vol.delete_file("/copy.txt", now).unwrap();
+    assert_pages_valid(&vol, &skip, "compressed files deleted");
+    assert_eq!(compacted_referenced(&vol, id), 373);
+    assert_eq!(
+        compacted_counts(&vol, id),
+        BTreeMap::from([(0, 1558), (0x4000, 14801), (0x8000, 25)])
+    );
+}
+
+/// The clusters files reference in compacted container `id`, as its row
+/// in the container table counts them (u32 at 0x20).
+fn compacted_referenced<D: ReadAt>(vol: &Volume<D>, id: u64) -> u32 {
+    let mut found = None;
+    vol.walk(&vol.checkpoint.roots[7].clone(), true, &mut |row| {
+        if u64::from_le_bytes(row.key[..8].try_into().unwrap()) == id {
+            found = Some(u32::from_le_bytes(row.value[0x20..0x24].try_into().unwrap()));
+        }
+        Ok(())
+    })
+    .unwrap();
+    found.unwrap()
+}
+
+/// How many clusters of compacted container `id` have each reference
+/// count entry (flags included) in the block reference count table.
+fn compacted_counts<D: ReadAt>(vol: &Volume<D>, id: u64) -> BTreeMap<u16, u64> {
+    let shift = 64 - vol.clusters_per_container.leading_zeros();
+    let mut counts = BTreeMap::new();
+    vol.walk(&vol.checkpoint.roots[6].clone(), false, &mut |row| {
+        let v = row.value;
+        let u64_at = |o: usize| u64::from_le_bytes(v[o..o + 8].try_into().unwrap());
+        let (first, n) = (u64_at(0), u64_at(8));
+        let kind = u32::from_le_bytes(v[0x14..0x18].try_into().unwrap());
+        for j in (0..n).filter(|j| (first + j) >> shift == id) {
+            let at = if kind == 1 { 0x1c + 2 * j as usize } else { 0x1c };
+            *counts.entry(u16::from_le_bytes([v[at], v[at + 1]])).or_default() += 1;
+        }
+        Ok(())
+    })
+    .unwrap();
+    counts
 }
 
 #[test]

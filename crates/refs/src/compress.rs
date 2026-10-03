@@ -6,14 +6,19 @@
 //! container means finding its place in that stream and decompressing the
 //! unit that holds it.
 //!
-//! * The container table row: class 0xa (u32 at 0x14), the compression
-//!   format at 0x30 (1 LZ4 blocks, 2 ZSTD frames, 3 LZ4 on QuickAssist
-//!   hardware), the unit size at 0x34, and in place of the physical start
-//!   the *virtual* cluster where the compressed bytes are, and their
-//!   clusters.
-//! * Root 10 rows keyed (container id u64, sequence u32, type u32): type 3
-//!   from 0x30 a bitmap of the container's clusters kept (a cluster's place
-//!   in the stream is the number of kept clusters before it); type 7 a
+//! * The container table row: class 0xa (u32 at 0x14), the clusters files
+//!   still reference at 0x20 (Windows lowers it as their last references
+//!   go), the clusters kept at 0x24, the compression format at 0x30 (1 LZ4
+//!   blocks, 2 ZSTD frames, 3 LZ4 on QuickAssist hardware), the unit size
+//!   at 0x34, and in place of the physical start the *virtual* cluster
+//!   where the compressed bytes are, and their clusters.
+//! * Root 10 rows keyed (container id u64, sequence u32, type u32), the
+//!   key the first 16 bytes of the value, then a u64, the container's first
+//!   virtual cluster and its clusters: type 3 from 0x30 a bitmap of the
+//!   container's clusters kept (a cluster's place in the stream is the
+//!   number of kept clusters before it); type 5 from 0x30 a bitmap of
+//!   those files reference (as many as the container table row counts;
+//!   Windows clears a cluster's bit with its last reference); type 7 a
 //!   range of the stream: 0x10 its start and 0x18 its length (bytes of the
 //!   stream), 0x20 the start of its compressed bytes and 0x28 their length,
 //!   0x30 flags (2: a checksum per unit), 0x34 the units, 0x38 the offset of
@@ -30,6 +35,12 @@ use crate::util::{le16, le32, le64};
 
 /// The container table's class of a compacted container.
 pub(crate) const COMPACTED: u32 = 0xa;
+/// Where its row counts the clusters files reference (u32).
+pub(crate) const REFERENCED: usize = 0x20;
+/// The root 10 row type of the bitmap of those clusters, and where the
+/// bitmaps of root 10 rows start.
+pub(crate) const REFERENCED_MAP: u32 = 5;
+pub(crate) const BITMAP: usize = 0x30;
 
 /// A compacted container, as the container table describes it.
 #[derive(Debug, Clone)]
@@ -39,6 +50,10 @@ pub(crate) struct Compacted {
     pub(crate) data: u64,
     pub(crate) clusters: u64,
     pub(crate) format: u32,
+    /// Its clusters files reference (the row's count, and the bitmap of
+    /// root 10).
+    pub(crate) referenced: u32,
+    pub(crate) referenced_map: Vec<u8>,
     /// Bytes of the stream a unit holds.
     pub(crate) unit: u64,
     /// Its clusters kept (the stream's order) and the ranges of the stream.
@@ -68,23 +83,25 @@ impl Compacted {
             data: le64(v, v.len() - 16),
             clusters: le64(v, v.len() - 8),
             format: le32(v, 0x30),
+            referenced: le32(v, REFERENCED),
+            referenced_map: Vec::new(),
             unit: u64::from(le32(v, 0x34)),
             kept: Vec::new(),
             ranges: Vec::new(),
         })
     }
 
-    /// Adds a root 10 row of the container (types 3 and 7; others are not
-    /// needed to read).
+    /// Adds a root 10 row of the container (types 3, 5 and 7; others are
+    /// not known).
     pub(crate) fn add_row(&mut self, kind: u32, v: &[u8], clusters: u64) -> Result<()> {
+        let bitmap = || {
+            v.get(BITMAP..BITMAP + clusters.div_ceil(8) as usize)
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| format_err!("compacted container bitmap of {} bytes", v.len()))
+        };
         match kind {
-            3 => {
-                let bytes = clusters.div_ceil(8) as usize;
-                self.kept = v
-                    .get(0x30..0x30 + bytes)
-                    .ok_or_else(|| format_err!("kept-cluster bitmap of {} bytes", v.len()))?
-                    .to_vec();
-            }
+            3 => self.kept = bitmap()?,
+            REFERENCED_MAP => self.referenced_map = bitmap()?,
             7 => {
                 if v.len() < 0x40 {
                     return Err(format_err!("compressed range row of {} bytes", v.len()));

@@ -1,5 +1,7 @@
 //! The ReFS writer on hostile metadata: the small fixture of
-//! crates/refs/tests (a clean log, no shared clusters), its stored bytes
+//! crates/refs/tests (a clean log, no shared clusters) or, when the first
+//! byte has its top bit set, the one whose text files Windows compressed
+//! and deduplicated, its stored bytes
 //! patched by the start of the input (as in refs_volume), then the
 //! operations the rest of the input picks (times, attributes, overwriting,
 //! creating, writing, changing in place, renaming, moving, linking,
@@ -17,11 +19,15 @@ use libfuzzer_sys::fuzz_target;
 use refs::{Times, Volume};
 use storage_spaces::io::{Overlay, SparseImage};
 
-static BASE: LazyLock<SparseImage> = LazyLock::new(|| {
-    SparseImage::read_from(&include_bytes!("../../crates/refs/tests/fixtures/r314small/disk.fixture")[..]).unwrap()
+static BASES: LazyLock<[SparseImage; 2]> = LazyLock::new(|| {
+    [
+        &include_bytes!("../../crates/refs/tests/fixtures/r314small/disk.fixture")[..],
+        &include_bytes!("../../crates/refs/tests/fixtures/r314compress/disk.fixture")[..],
+    ]
+    .map(|f| SparseImage::read_from(f).unwrap())
 });
 const OFFSET: u64 = 16 << 20;
-const PATHS: [&str; 12] = [
+const PATHS: [&str; 14] = [
     "/small.txt",
     "/mid.bin",
     "/last.txt",
@@ -34,13 +40,15 @@ const PATHS: [&str; 12] = [
     "/dir/moved",
     "/linked",
     "/cloned",
+    "/text/t1.txt",
+    "/text/t2.txt",
 ];
 
 fuzz_target!(|data: &[u8]| {
     let Some((&patches, rest)) = data.split_first() else {
         return;
     };
-    let mut image = BASE.clone();
+    let mut image = BASES[usize::from(patches >> 7)].clone();
     let ranges = image.ranges();
     let stored: u64 = ranges.iter().map(|r| r.1 as u64).sum();
     let (patch_bytes, ops) = rest.split_at((usize::from(patches % 8) * 8).min(rest.len()));

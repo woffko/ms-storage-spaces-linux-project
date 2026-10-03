@@ -533,14 +533,76 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
     fn free_data(&mut self, clusters: &[u64]) -> Result<()> {
         let virtuals = clusters
             .iter()
-            .map(|&c| Ok((c, self.vol.virtual_of(c)?)))
+            .map(|&c| self.vol.virtual_of(c))
             .collect::<Result<Vec<_>>>()?;
+        let last = self.unreference(&virtuals)?;
+        let free: Vec<u64> = clusters
+            .iter()
+            .zip(last)
+            .filter(|&(_, last)| last)
+            .map(|(&c, _)| c)
+            .collect();
+        self.release(ROOT_MEDIUM_ALLOCATOR, &free)
+    }
+
+    /// Lets go of a file's clusters in compacted (compressed) containers
+    /// (virtual clusters), as Windows does: one reference less where the
+    /// block reference count table counts more, and for each last
+    /// reference its bit cleared in the container's bitmap of referenced
+    /// clusters (root 10) and one cluster less in the count of its row in
+    /// both container tables. The compressed bytes stay where they are.
+    fn free_compacted(&mut self, clusters: &[u64]) -> Result<()> {
+        use crate::compress::{BITMAP, COMPACTED, REFERENCED, REFERENCED_MAP};
+        let last = self.unreference(clusters)?;
+        let cpc = self.vol.clusters_per_container;
+        let shift = 64 - cpc.leading_zeros();
+        let mut released: std::collections::BTreeMap<u64, Vec<u64>> = std::collections::BTreeMap::new();
+        for (&v, last) in clusters.iter().zip(last) {
+            if last {
+                released.entry(v >> shift).or_default().push(v & (cpc - 1));
+            }
+        }
+        for (id, gone) in released {
+            let row = self.find(Tree::Root(crate::volume::ROOT_CONTAINER_INDEX), &|k| {
+                k.len() >= 16 && le64(k, 0) == id && le32(k, 12) == REFERENCED_MAP
+            })?;
+            let map = self.value_mut(row);
+            for &c in &gone {
+                let (at, bit) = (BITMAP + (c / 8) as usize, 1u8 << (c % 8));
+                match map.get_mut(at) {
+                    Some(b) if *b & bit != 0 => *b &= !bit,
+                    _ => {
+                        return Err(format_err!(
+                            "compacted container {id:#x}: cluster {c:#x} not in its bitmap of referenced clusters"
+                        ));
+                    }
+                }
+            }
+            let n = gone.len() as u32;
+            for table in [crate::volume::ROOT_CONTAINERS, crate::volume::ROOT_CONTAINERS_COPY] {
+                let row = self.find(Tree::Root(table), &|k| k.len() >= 8 && le64(k, 0) == id)?;
+                let v = self.value_mut(row);
+                let left = (v.len() >= 0x30 && le32(v, 0x14) == COMPACTED)
+                    .then(|| le32(v, REFERENCED).checked_sub(n))
+                    .flatten()
+                    .ok_or_else(|| format_err!("compacted container {id:#x}: {n} clusters less than its row counts"))?;
+                v[REFERENCED..REFERENCED + 4].copy_from_slice(&left.to_le_bytes());
+            }
+        }
+        Ok(())
+    }
+
+    /// One reference less to each of `virtuals` in the block reference
+    /// count table (see `free_data`); for each, whether it was the last
+    /// one. An entry the dedup engine flagged becomes 0x4000 with its last
+    /// reference, as Windows leaves it.
+    fn unreference(&mut self, virtuals: &[u64]) -> Result<Vec<bool>> {
         let mut rows = self.refcount_rows()?;
         if rows.is_empty() {
-            return self.release(ROOT_MEDIUM_ALLOCATOR, clusters);
+            return Ok(vec![true; virtuals.len()]);
         }
         let mut blocks = std::collections::BTreeSet::new();
-        for &(_, v) in &virtuals {
+        for &v in virtuals {
             if let Some(at) = refcount_row(&rows, v) {
                 let val = &self.pages[at.page].data[at.value..at.value + at.len];
                 if le32(val, 0x14) != refcount::COUNTS && le16(val, 0x1c) > 0 {
@@ -554,10 +616,10 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
             }
             rows = self.refcount_rows()?;
         }
-        let mut free = Vec::with_capacity(clusters.len());
-        for &(c, v) in &virtuals {
+        let mut last = Vec::with_capacity(virtuals.len());
+        for &v in virtuals {
             let Some(at) = refcount_row(&rows, v) else {
-                free.push(c);
+                last.push(true);
                 continue;
             };
             let val = &self.pages[at.page].data[at.value..at.value + at.len];
@@ -565,13 +627,11 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
                 .ok_or_else(|| format_err!("reference count row without a count for cluster {v:#x}"))?;
             let i = 0x1c + 2 * (v - le64(val, 0)) as usize;
             if count == 0 {
-                // Its last reference: free; an entry the dedup engine
-                // flagged becomes 0x4000, as Windows leaves it.
                 let raw = le16(val, i);
                 if raw & !refcount::COUNT_MASK != 0 && raw != refcount::PROCESSED {
                     self.value_mut(at)[i..i + 2].copy_from_slice(&refcount::PROCESSED.to_le_bytes());
                 }
-                free.push(c);
+                last.push(true);
                 continue;
             }
             // One reference less; the flags stay.
@@ -580,8 +640,9 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
             val[i..i + 2].copy_from_slice(&raw.to_le_bytes());
             let total = le32(val, 0x18).saturating_sub(1);
             val[0x18..0x1c].copy_from_slice(&total.to_le_bytes());
+            last.push(false);
         }
-        self.release(ROOT_MEDIUM_ALLOCATOR, &free)
+        Ok(last)
     }
 
     /// The block reference count table's rows, by first cluster: (first,
@@ -1734,11 +1795,12 @@ impl<D: WriteAt> Volume<D> {
     /// for streams without integrity checksums), then sets its modification
     /// and change times to `now` (FILETIME). The bytes must lie within the
     /// file and, for data in extents, in written clusters. An integrity
-    /// stream's data is copied on write instead (the whole stream, with new
-    /// checksums, for now).
+    /// stream's touched clusters are copied on write instead (with new
+    /// checksums), and a compressed file's data (in a compacted container)
+    /// is copied whole into ordinary clusters.
     pub fn overwrite(&mut self, path: &str, offset: u64, bytes: &[u8], now: u64) -> Result<()> {
-        // Its runs inside the volume, none in a compressed container.
-        self.file_at(path)?;
+        // Its runs inside the volume.
+        let compressed = !self.file_at(path)?.compacted.is_empty();
         let entry = self.lookup(path)?;
         let file = self.open_file(&entry)?;
         let data = file
@@ -1746,7 +1808,7 @@ impl<D: WriteAt> Volume<D> {
             .ok_or_else(|| Error::Unsupported(format!("{path}: no data stream")))?;
         // With stream snapshots: through the live level (in place only
         // where it has the clusters; the snapshots' stay as they are).
-        if !file.snapshots.is_empty() {
+        if !file.snapshots.is_empty() && !compressed {
             let end = offset
                 .checked_add(bytes.len() as u64)
                 .filter(|&e| e <= data.size)
@@ -1767,8 +1829,10 @@ impl<D: WriteAt> Volume<D> {
                 "{path}: overwriting this file with snapshots"
             )));
         }
-        if let crate::file::Content::Extents(extents) = &data.content
-            && extents.iter().any(|x| x.checksums.is_some())
+        // Compressed data (in compacted containers) and integrity streams:
+        // copied on write.
+        if compressed
+            || matches!(&data.content, crate::file::Content::Extents(x) if x.iter().any(|x| x.checksums.is_some()))
         {
             let end = offset
                 .checked_add(bytes.len() as u64)
@@ -1777,7 +1841,7 @@ impl<D: WriteAt> Volume<D> {
             // The clusters it touches, copied on write; the whole stream
             // when that does not apply.
             let fa = self.file_at(path)?;
-            if !fa.snapshots && !fa.reparse && data.size > MAX_INLINE as u64 {
+            if !compressed && !fa.snapshots && !fa.reparse && data.size > MAX_INLINE as u64 {
                 let patch = Patch {
                     size: data.size,
                     at: offset,
@@ -1789,7 +1853,7 @@ impl<D: WriteAt> Volume<D> {
             }
             if data.size > MAX_INTEGRITY_COPY {
                 return Err(Error::Unsupported(format!(
-                    "{path}: overwriting integrity streams of more than {MAX_INTEGRITY_COPY} bytes"
+                    "{path}: overwriting integrity streams or compressed files of more than {MAX_INTEGRITY_COPY} bytes"
                 )));
             }
             let mut all = vec![0u8; data.size as usize];
@@ -2579,6 +2643,10 @@ impl<D: WriteAt> Volume<D> {
     /// (`write_file_from`). The bytes outside `dirty` must be the file's.
     pub fn update_file(&mut self, path: &str, data: &dyn Source, dirty: &[(u64, u64)], now: u64) -> Result<()> {
         let fa = self.file_at(path)?;
+        // Compressed data: the whole file copied on write.
+        if !fa.compacted.is_empty() {
+            return self.write_file_from(path, data, now);
+        }
         let entry = self.lookup(path.trim_end_matches('/'))?;
         let file = self.open_file(&entry)?;
         let new_size = data.len();
@@ -2704,9 +2772,11 @@ impl<D: WriteAt> Volume<D> {
     /// Replaces a file's whole content with `data` (appending, truncating
     /// and growing alike), as a new record that keeps the file's id,
     /// creation and access times, attributes and security; its modification
-    /// and change times become `now`. Files with named streams, snapshots,
-    /// integrity checksums or a reparse point are refused for now, and so
-    /// are files with data clusters on volumes with shared clusters.
+    /// and change times become `now`. Named streams stay; integrity streams
+    /// get new checksums; a file with stream snapshots changes in its live
+    /// level; a reparse point is refused. The old clusters lose a reference
+    /// each (shared ones stay for the other files; compressed ones, in a
+    /// compacted container, stay where they are).
     pub fn write_file(&mut self, path: &str, data: &[u8], now: u64) -> Result<()> {
         self.write_file_from(path, &data, now)
     }
@@ -2719,7 +2789,7 @@ impl<D: WriteAt> Volume<D> {
         }
         // A file with stream snapshots: everything written to its live level.
         let fa = self.file_at(path)?;
-        if fa.snapshots && !fa.reparse && data.len() > MAX_INLINE as u64 {
+        if fa.snapshots && !fa.reparse && fa.compacted.is_empty() && data.len() > MAX_INLINE as u64 {
             let file = self.open_file(&self.lookup(path)?)?;
             if let Some(stream) = file.data
                 && self.update_live_level(path, fa, &stream, data, &[(0, data.len())], now)?
@@ -2847,6 +2917,7 @@ impl<D: WriteAt> Volume<D> {
             dir,
             record: old,
             runs,
+            compacted,
             home,
             snapshots,
             reparse,
@@ -2873,6 +2944,7 @@ impl<D: WriteAt> Volume<D> {
             // The old data clusters become free (kept until the commit).
             let clusters = clusters_of(&runs);
             tx.free_data(&clusters)?;
+            tx.free_compacted(&clusters_of(&compacted))?;
             if let Some(shared) = shared {
                 tx.add_references(shared)?;
             }
@@ -2974,15 +3046,19 @@ impl<D: WriteAt> Volume<D> {
             record,
             mut runs,
             stream_runs,
+            mut compacted,
+            stream_compacted,
             ..
         } = file;
         runs.extend(stream_runs);
+        compacted.extend(stream_compacted);
         let id = le64(&record, 0x80);
         {
             let mut tx = Transaction::begin(&*self)?;
             // Its data clusters become free (kept until the commit).
             let clusters = clusters_of(&runs);
             tx.free_data(&clusters)?;
+            tx.free_compacted(&clusters_of(&compacted))?;
             tx.remove_row(Tree::Object(dir), &|k| is_name_row(k, &name))?;
             tx.remove_row(Tree::Object(dir), &|k| {
                 k.len() >= 16 && le16(k, 0) == ROW_FILE_ID && le64(k, 8) == id
@@ -3448,6 +3524,11 @@ impl<D: WriteAt> Volume<D> {
                 .filter(|r| of_set(r) && le64(row_key(r), 0x38) >= LIVE_STREAM)
             {
                 for x in self.extents(row_value(r))?.iter().filter(|x| x.written) {
+                    if self.is_compacted(x.vlcn) {
+                        return Err(Error::Unsupported(format!(
+                            "{path}:{stream}: a stream in a compressed container"
+                        )));
+                    }
                     let lcn = self.translate(x.vlcn)?;
                     clusters.extend(lcn..lcn + x.clusters);
                 }
@@ -3553,9 +3634,12 @@ impl<D: WriteAt> Volume<D> {
             mut record,
             mut runs,
             stream_runs,
+            mut compacted,
+            stream_compacted,
             ..
         } = file;
         runs.extend(stream_runs);
+        compacted.extend(stream_compacted);
         let id = le64(&record, 0x80);
         let (mut names, rows) = record_names(&record)?;
         let old = (dir, utf16_bytes(&name));
@@ -3572,6 +3656,7 @@ impl<D: WriteAt> Volume<D> {
             if last {
                 let clusters = clusters_of(&runs);
                 tx.free_data(&clusters)?;
+                tx.free_compacted(&clusters_of(&compacted))?;
                 tx.remove_row(Tree::Object(home), &|k| k == key)?;
                 tx.remove_row(Tree::Object(home), &|k| {
                     k.len() >= 16 && le16(k, 0) == ROW_FILE_ID && le64(k, 8) == id
@@ -3601,6 +3686,8 @@ impl<D: WriteAt> Volume<D> {
         // every level maps (the live one, and those snapshots keep), and the
         // pages of extent maps kept outside the record.
         let (mut runs, mut stream_runs) = (Vec::new(), Vec::new());
+        let (mut compacted, mut stream_compacted) = (Vec::new(), Vec::new());
+        let cpc = self.clusters_per_container;
         for r in embedded_rows(&record)? {
             let key = row_key(&r);
             let data_level = key.len() >= 0x18
@@ -3612,9 +3699,21 @@ impl<D: WriteAt> Volume<D> {
                 let to = if data_level { &mut runs } else { &mut stream_runs };
                 for x in self.extents(row_value(&r))?.iter().filter(|x| x.written) {
                     if self.is_compacted(x.vlcn) {
-                        return Err(Error::Unsupported(format!(
-                            "{path}: data in a compressed (compacted) container"
-                        )));
+                        // Within its container.
+                        if x.clusters > cpc - (x.vlcn & (cpc - 1)) {
+                            return Err(format_err!(
+                                "{path}: a run of {} clusters at {:#x}, past its compressed container",
+                                x.clusters,
+                                x.vlcn
+                            ));
+                        }
+                        let to = if data_level {
+                            &mut compacted
+                        } else {
+                            &mut stream_compacted
+                        };
+                        to.push((x.vlcn, x.clusters));
+                        continue;
                     }
                     to.push((self.translate(x.vlcn)?, x.clusters));
                 }
@@ -3633,6 +3732,9 @@ impl<D: WriteAt> Volume<D> {
             }
             sum = sum.saturating_add(n);
         }
+        for &(_, n) in compacted.iter().chain(&stream_compacted) {
+            sum = sum.saturating_add(n);
+        }
         if sum > 2 * total {
             return Err(format_err!(
                 "{path}: runs of {sum} clusters, more than the volume holds"
@@ -3645,6 +3747,8 @@ impl<D: WriteAt> Volume<D> {
             record,
             runs,
             stream_runs,
+            compacted,
+            stream_compacted,
             home,
             snapshots: !file.snapshots.is_empty(),
             reparse: file.reparse.is_some(),
@@ -4154,6 +4258,11 @@ struct FileAt {
     record: Vec<u8>,
     runs: Vec<(u64, u64)>,
     stream_runs: Vec<(u64, u64)>,
+    /// Runs of its data and of its named streams in compacted
+    /// (compressed) containers: virtual clusters, there are no physical
+    /// ones.
+    compacted: Vec<(u64, u64)>,
+    stream_compacted: Vec<(u64, u64)>,
     home: Option<u64>,
     snapshots: bool,
     reparse: bool,

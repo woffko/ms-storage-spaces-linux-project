@@ -610,7 +610,7 @@ rows of thin spaces not allocated yet (M7).
   every checksum so that patched pages reach the parsers). The format is in
   `docs/refs-format.md`. Open: ReFS 3.4 to 3.13 (no images yet: they need
   Windows 10 or Server 2016 to 2022).
-* B2 (done but changing compressed files): `refs mount` (FUSE, read-only;
+* B2 (done): `refs mount` (FUSE, read-only;
   streams as extended attributes, links and junctions as symbolic links,
   hard links as one inode, directory listings cached), checked against Windows' listing of
   every corpus volume by `tools/refs-mount-check.sh`; `refs --space` reads
@@ -635,7 +635,7 @@ rows of thin spaces not allocated yet (M7).
   64 KiB units compressed one by one with a CRC32-C each, described by
   rows of root 10 (docs/refs-format.md, "Compression"). `refs` reads such
   files (all 40 with Windows' SHA-256; fixture `r314compress`, damaged
-  units refused) and refuses to change them. ZSTD (`refsutil compression
+  units refused). ZSTD (`refsutil compression
   E: /c /f ZSTD`): a ZSTD frame per unit, read with the `ruzstd` crate
   (all 20 files of fixture `r314zstd` with Windows' SHA-256).
   Integrity streams: the data checksums (CRC32-C per 4 KiB
@@ -643,10 +643,14 @@ rows of thin spaces not allocated yet (M7).
   are checked on every read, damaged data is refused. ReFS inside a space:
   a Dev Drive in a two-way mirror space of two disks (`-PoolDisks 2
   -Resiliency Mirror`, volume `r314mirror`) reads back as Windows listed
-  it, through the library and the mount (`refs --space`). Open:
-  changing compressed files (Windows copies touched clusters on write
-  into ordinary containers and lowers the old ones' reference counts; the
-  last reference of a compacted cluster needs a sample).
+  it, through the library and the mount (`refs --space`). Changing
+  compressed files (2026-10-04): Windows copies the touched clusters on
+  write into ordinary containers; a compacted cluster's last reference
+  clears its bit in the container's bitmap of referenced clusters (root
+  10, type 5) and lowers the count at 0x20 of its row. `refs` writes a
+  changed compressed file whole and frees its compacted clusters so; on
+  Windows the changed and the emptied volume kept the original's leak
+  count, and the emptied one matched Windows' own deletion row for row.
 * B4 (done for everything above, each change checked on Windows; the
   record of that work follows): write experiments on a small volume
   (scenario `small`, `tools/vm/Invoke-RefsSteps.ps1`, `tools/refs-diff.py`,
@@ -1076,7 +1080,7 @@ and on spaces exposed by stage 1.
 4. B4 write support: copy-on-write B+-tree updates, allocators, refcounts,
    checkpoints, logging; validated by Windows `chkdsk` / `refsutil`. Done
    (a read-write FUSE mount, clones, integrity streams, files with stream
-   snapshots), except changing compressed files.
+   snapshots, compressed files).
 
 ## Risks
 

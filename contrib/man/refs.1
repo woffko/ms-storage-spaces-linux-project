@@ -245,7 +245,8 @@ at byte
 .IR offset ,
 where they are (within the file's size; not in sparse ranges; the
 clusters of an integrity stream it touches are copied on write with new
-checksums, as Windows does), and set its
+checksums, as Windows does; a file Windows compressed, up to 64 MiB, is
+copied whole into ordinary clusters), and set its
 modification and change times to now.
 Experimental; only with
 .BR \-\-yes .
@@ -295,7 +296,8 @@ permissions and named streams (as large as
 .B create
 takes, 2 GiB for integrity
 streams; a file with stream snapshots changes in its live level, the
-snapshots staying as they were; not files Windows compressed). With
+snapshots staying as they were; a file Windows compressed is written
+whole into ordinary clusters). With
 .BI \-\-stream " name"
 it writes that named stream instead (small ones stay in the file's
 record), and
@@ -312,7 +314,7 @@ shows it): attach it to Windows once and remove it safely first.
 Verified against Windows on ReFS 3.14 volumes with 4 KiB and 64 KiB
 clusters, CRC-64 and SHA-256 metadata checksums and integrity streams.
 Other ReFS 3.x versions are read by the same rules but were not verified.
-Compressed files, encrypted files and ReFS 1.x and 2.x are not read yet;
+Encrypted files and ReFS 1.x and 2.x are not read yet;
 stream snapshots are read by
 .B cat
 but not shown in the mount.

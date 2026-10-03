@@ -126,8 +126,8 @@ enum Command {
     /// Overwrite bytes of a file with the content of a local file
     /// (experimental: writes the volume, only with --yes; within the file's
     /// size, not into sparse ranges; an integrity stream's clusters it
-    /// touches are copied on write). Sets the modification and change
-    /// times to now.
+    /// touches are copied on write, a compressed file is copied whole).
+    /// Sets the modification and change times to now.
     Overwrite {
         /// The image, disk or partition.
         device: PathBuf,

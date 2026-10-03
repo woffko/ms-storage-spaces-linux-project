@@ -14,7 +14,10 @@
 //! * The pages only the older checkpoint references and that are still
 //!   allocated are counted (Windows frees them with its next checkpoint).
 //! * Compacted (compressed) containers: their compressed clusters are used
-//!   in the medium allocator (the files' runs there are not looked up).
+//!   in the medium allocator, the clusters files reference there are those
+//!   of the container's bitmap of referenced clusters (root 10) and as
+//!   many as its row in the container table counts, and those several
+//!   files map are counted as shared.
 
 use std::collections::BTreeMap;
 
@@ -247,8 +250,11 @@ impl<D: ReadAt> Volume<D> {
                 }
             }
         }
-        // Files: their clusters, and who else maps them.
+        // Files: their clusters, and who else maps them (in compacted
+        // containers: by virtual cluster, the first file and whether
+        // another maps it too).
         let mut runs: Vec<(u64, u64, String)> = Vec::new();
+        let mut compacted: BTreeMap<u64, (String, bool)> = BTreeMap::new();
         let mut records = std::collections::HashSet::new();
         let mut dirs = vec![(ROOT_DIRECTORY, String::new())];
         while let Some((oid, path)) = dirs.pop() {
@@ -293,6 +299,10 @@ impl<D: ReadAt> Volume<D> {
                             // clusters stand for them (checked below).
                             if self.is_compacted(x.vlcn) {
                                 report.data_clusters += x.clusters;
+                                for v in x.vlcn..x.vlcn.saturating_add(x.clusters.min(self.clusters_per_container)) {
+                                    let e = compacted.entry(v).or_insert_with(|| (name.clone(), false));
+                                    e.1 |= e.0 != name;
+                                }
                                 continue;
                             }
                             match self.translate(x.vlcn) {
@@ -342,6 +352,52 @@ impl<D: ReadAt> Volume<D> {
                 .find(|(first, count, _)| *first <= v && v < first + count)
                 .is_some_and(|(_, _, value)| refcount::count_of(value, v).is_some_and(|c| c > 0))
         };
+        let shift = 64 - self.clusters_per_container.leading_zeros();
+        for (id, c) in &self.compacted {
+            let first = u128::from(*id) << shift;
+            let last = (first + (1u128 << shift) - 1).min(u128::from(u64::MAX));
+            let mine = compacted.range(u64::try_from(first).unwrap_or(u64::MAX)..=last as u64);
+            let referenced = mine.clone().count() as u64;
+            if referenced != u64::from(c.referenced) {
+                report.problem(format!(
+                    "compacted container {id:#x}: files reference {referenced} of its clusters, its row counts {}",
+                    c.referenced
+                ));
+            }
+            // Its bitmap of the clusters files reference (root 10).
+            if c.referenced_map.is_empty() {
+                report.problem(format!(
+                    "compacted container {id:#x}: no bitmap of the clusters files reference"
+                ));
+            } else if let Some(i) = (0..self.clusters_per_container).find(|&i| {
+                let bit = c
+                    .referenced_map
+                    .get((i / 8) as usize)
+                    .is_some_and(|b| b >> (i % 8) & 1 != 0);
+                bit != compacted.contains_key(&((first as u64) | i))
+            }) {
+                report.problem(format!(
+                    "compacted container {id:#x}: cluster {i:#x} {}",
+                    if compacted.contains_key(&((first as u64) | i)) {
+                        "referenced by a file, not in its bitmap of referenced clusters"
+                    } else {
+                        "in its bitmap of referenced clusters, referenced by no file"
+                    }
+                ));
+            }
+            for (&v, (name, _)) in mine.filter(|(_, (_, shared))| *shared) {
+                let counted = refcounts
+                    .iter()
+                    .find(|(first, count, _)| *first <= v && v < first + count)
+                    .is_some_and(|(_, _, value)| refcount::count_of(value, v).is_some_and(|c| c > 0));
+                if !counted {
+                    report.problem(format!(
+                        "{name}: compressed cluster {v:#x} also mapped by another file, without a reference count"
+                    ));
+                    break;
+                }
+            }
+        }
         let mut last: Option<(u64, String)> = None;
         for (lcn, n, name) in &runs {
             report.data_clusters += n;
