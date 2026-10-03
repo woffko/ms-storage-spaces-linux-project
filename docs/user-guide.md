@@ -435,11 +435,14 @@ writing, truncating and deleting files (a file opened for writing is
 kept in an unlinked temporary file, in `$REFS_TMPDIR` or the system's
 temporary directory; when it is closed or synced, what was written goes
 to the volume as Windows writes it: changed bytes where they are,
-appended data in new runs, a shortened file's tail freed; a file in its
-record, an integrity stream or a new or truncated file is written
-whole), directories, renames and moves, hard links, times (`touch`), the
-read-only attribute (`chmod a-w`) and named streams (`setfattr -n
-user.NAME`). Every change is one transaction with a new checkpoint, so a
+appended data in new runs, a shortened file's tail freed, the touched
+clusters of an integrity stream copied on write; a file in its record or
+a new or truncated file is written whole), copies (a whole file copied
+into an empty one with copy_file_range, as coreutils 9 `cp` and file
+managers copy, becomes a block clone that shares the clusters, as
+`Copy-Item` makes on a Dev Drive), directories, renames and moves, hard
+links, times (`touch`), the read-only attribute (`chmod a-w`) and named
+streams (`setfattr -n user.NAME`). Every change is one transaction with a new checkpoint, so a
 crash or a pulled cable leaves the volume as it was after the last
 completed change. Symbolic links cannot be made. The mount is served by
 one thread; it suits copying files to or from a Dev Drive, not heavy

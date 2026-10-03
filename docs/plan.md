@@ -796,7 +796,9 @@ rows of thin spaces not allocated yet (M7).
   into); rows written with 0 there made Windows free a clone's clusters
   as unshared before that was found. Windows read clones of plain files
   and integrity streams, wrote into them and deleted the sources, with
-  `refs check` and `refsutil leak` clean.
+  `refs check` and `refsutil leak` clean. The read-write mount clones
+  whole files copied with copy_file_range (Windows read such a clone and
+  deleted its source).
 
 ## Test infrastructure (continuous, feeds every stage)
 

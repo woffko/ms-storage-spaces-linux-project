@@ -194,6 +194,8 @@ With
 the mount writes: files (written back when closed, the changed parts
 in place as Windows changes them; the size limit is that of
 .BR create ),
+block clones (a whole file copied into an empty one with
+copy_file_range),
 directories, renames, hard links, times, the read-only attribute and
 named streams, each change one transaction as the writing commands make
 it. Experimental. The helper

@@ -23,9 +23,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use fuser::{
-    BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, INodeNo, LockOwner,
-    MountOption, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
-    ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
+    BsdFileFlags, Config, CopyFileRangeFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, INodeNo,
+    LockOwner, MountOption, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
+    ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
 use refs::{Entry, File as RefsFile, Target, Times, Volume};
 use storage_spaces::io::WriteAt;
@@ -877,6 +877,96 @@ impl Filesystem for RefsFs {
         }
         p.dirty = true;
         reply.written(data.len() as u32)
+    }
+
+    /// A whole file copied into an empty one (as `cp` and file managers
+    /// copy with copy_file_range) becomes a block clone, as Windows'
+    /// Copy-Item makes on a Dev Drive: the copy shares the clusters until
+    /// one of them changes. Other ranges are copied through the files'
+    /// buffers, a MiB at a time.
+    fn copy_file_range(
+        &self,
+        _req: &Request,
+        ino_in: INodeNo,
+        _fh_in: FileHandle,
+        offset_in: u64,
+        ino_out: INodeNo,
+        _fh_out: FileHandle,
+        offset_out: u64,
+        len: u64,
+        _flags: CopyFileRangeFlags,
+        reply: ReplyWrite,
+    ) {
+        let r = (|| -> Result<u32, Errno> {
+            if !self.writable {
+                return Err(Errno::EROFS);
+            }
+            let (src, dst) = (self.path(ino_in.0)?, self.path(ino_out.0)?);
+            let (buffered, src_dirty, dst_len) = {
+                let s = self.state.lock().unwrap();
+                let dst = s.pending.get(&ino_out.0).ok_or(Errno::EBADF)?;
+                let src = s.pending.get(&ino_in.0);
+                (src.map(|p| p.len), src.is_some_and(|p| p.dirty), dst.len)
+            };
+            let size = match buffered {
+                Some(len) => len,
+                None => {
+                    let vol = self.vol.read().unwrap();
+                    self.file(&vol, &src)?.data.as_ref().map_or(0, |s| s.size)
+                }
+            };
+            if ino_in != ino_out
+                && (offset_in, offset_out, dst_len) == (0, 0, 0)
+                && len >= size
+                && size > 0
+                && size <= u64::from(u32::MAX)
+                && !src_dirty
+            {
+                self.write_back(ino_out.0)?;
+                if self.change(&dst, |v| v.clone_file(&src, &dst, now())).is_ok() {
+                    // The copy's buffer: its new content, nothing to write.
+                    let vol = self.vol.read().unwrap();
+                    let mut p = self.content(&vol, &dst)?;
+                    drop(vol);
+                    let mut s = self.state.lock().unwrap();
+                    p.handles = s.pending.get(&ino_out.0).map_or(1, |old| old.handles);
+                    s.pending.insert(ino_out.0, p);
+                    return Ok(size as u32);
+                }
+            }
+            let n = len.min(1 << 20).min(size.saturating_sub(offset_in));
+            if offset_out.saturating_add(n) > MAX_WRITTEN {
+                return Err(Errno::EFBIG);
+            }
+            let data = match self.state.lock().unwrap().pending.get(&ino_in.0) {
+                Some(p) => Some(p.read_at(offset_in, n as u32)?),
+                None => None,
+            };
+            let data = match data {
+                Some(d) => d,
+                None => {
+                    let vol = self.vol.read().unwrap();
+                    let file = self.file(&vol, &src)?;
+                    let mut buf = vec![0u8; n as usize];
+                    if let Some(stream) = &file.data {
+                        let got = vol
+                            .read_stream(stream, offset_in, &mut buf)
+                            .map_err(|e| errno(&src, e))?;
+                        buf.truncate(got);
+                    }
+                    buf
+                }
+            };
+            let mut s = self.state.lock().unwrap();
+            let p = s.pending.get_mut(&ino_out.0).ok_or(Errno::EBADF)?;
+            p.write_at(offset_out, &data)?;
+            p.dirty = true;
+            Ok(data.len() as u32)
+        })();
+        match r {
+            Ok(n) => reply.written(n),
+            Err(e) => reply.error(e),
+        }
     }
 
     fn flush(&self, _req: &Request, ino: INodeNo, _fh: FileHandle, _lock_owner: LockOwner, reply: ReplyEmpty) {
