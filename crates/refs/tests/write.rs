@@ -252,3 +252,60 @@ fn setting_times_and_attributes_commits_copy_on_write() {
         assert_allocated(&vol, &skip, name);
     }
 }
+
+fn read_all<D: ReadAt>(vol: &Volume<D>, path: &str) -> Vec<u8> {
+    let data = vol.open_file(&vol.lookup(path).unwrap()).unwrap().data.unwrap();
+    let mut buf = vec![0u8; data.size as usize];
+    assert_eq!(vol.read_stream(&data, 0, &mut buf).unwrap(), buf.len());
+    buf
+}
+
+#[test]
+fn overwriting_data_in_place() {
+    let (image, mut manifest, skip) = load("r314basic4k");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 133_000_000_000_000_000;
+    // In extents (across a cluster boundary), and inline in the record.
+    for (path, at, len) in [("/sizes/size_65537.bin", 4000, 3000), ("/sizes/size_100.bin", 10, 20)] {
+        let mut expected = read_all(&vol, path);
+        let inline = matches!(
+            vol.open_file(&vol.lookup(path).unwrap()).unwrap().data.unwrap().content,
+            refs::Content::Inline(_)
+        );
+        assert_eq!(inline, path.ends_with("100.bin"), "{path}: where its data is");
+        let bytes = vec![0x77u8; len];
+        expected[at..at + len].copy_from_slice(&bytes);
+        vol.overwrite(path, at as u64, &bytes, now).unwrap();
+        assert_eq!(read_all(&vol, path), expected, "{path}");
+        let times = vol.lookup(path).unwrap().times;
+        assert_eq!((times.modified, times.changed), (now, now), "{path}");
+        let listed = path.trim_start_matches('/');
+        for e in manifest["entries"].as_array_mut().unwrap() {
+            if e["path"] == listed {
+                let hex: String = refs::checksum::sha256(&expected)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                e["sha256"] = hex.into();
+                e["written"] = now.into();
+            }
+        }
+    }
+    assert_allocated(&vol, &skip, "r314basic4k");
+    let fresh = Volume::open(&overlay, offset).unwrap();
+    assert!(
+        common::compare(&fresh, &manifest).is_empty(),
+        "only the two files changed"
+    );
+    // Beyond the end, and an integrity stream: refused, nothing written.
+    let err = vol.overwrite("/sizes/size_100.bin", 95, &[1; 10], now).unwrap_err();
+    assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
+    let (image, manifest, _) = load("r314integ");
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, manifest["partition_offset"].as_u64().unwrap()).unwrap();
+    let err = vol.overwrite("/sizes/size_16385.bin", 0, &[1; 10], now).unwrap_err();
+    assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
+    assert!(overlay.written_pages().is_empty());
+}

@@ -252,6 +252,14 @@ table's rows for a text diff):
 * Object table rows carry, before their page reference, a counter pair
   that the checkpoint (0x70) and MLog records carry as well; it grows with
   every transaction (the log's sequence number, presumably).
+* Overwriting data (`Invoke-RefsSteps.ps1` step `write`): Windows
+  writes a stream without integrity checksums where it is (the extents
+  stay) and commits the new times with copy on write.
+* Creating a file (step `create`) adds two rows to its directory: the
+  name row (type 0x30) with the embedded record, and a row of type 0x20
+  (key: 0x20, flags 0x8000, the file id as u64 at 8; value: the name's
+  offset 0x0c and length at 8 and 0x0a, the UTF-16 name) that maps the
+  file id to its name; the directory's own row gets new times.
 * **First write Windows accepted** (2026-10-03): on a cleanly detached
   volume, a file's modification time changed in place in its directory
   page, with the page's checksum stored again in the object table rows

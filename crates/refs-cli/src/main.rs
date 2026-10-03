@@ -115,6 +115,26 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Overwrite bytes of a file with the content of a local file
+    /// (experimental: writes the volume, only with --yes; within the file's
+    /// size, not into sparse ranges or integrity streams). Sets the
+    /// modification and change times to now.
+    Overwrite {
+        /// The image, disk or partition.
+        device: PathBuf,
+        #[arg(long)]
+        offset: Option<u64>,
+        #[arg(long)]
+        path: String,
+        /// Byte offset in the file.
+        #[arg(long, value_parser = parse_number)]
+        at: u64,
+        /// The bytes to write.
+        #[arg(long)]
+        from: PathBuf,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Every cluster the volume uses, by physical cluster: superblocks,
     /// checkpoints, the pages of each tree, the data runs of each file
     /// (for format work: what changed between two images).
@@ -731,6 +751,38 @@ fn main() -> Result<()> {
             if let Some(a) = attributes {
                 vol.set_attributes(&path, a as u32)?;
             }
+            writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
+        }
+        Command::Overwrite {
+            device,
+            offset,
+            path,
+            at,
+            from,
+            yes,
+        } => {
+            let bytes = std::fs::read(&from).with_context(|| format!("cannot read {}", from.display()))?;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(yes)
+                .open(&device)
+                .with_context(|| format!("cannot open {}", device.display()))?;
+            let offset = match offset {
+                Some(o) => o,
+                None => *find_volumes(&file)?.first().context("no ReFS volume on the device")?,
+            };
+            let mut vol = Volume::open(file, offset)?;
+            writeln!(out, "{path}: {} bytes at {at}", bytes.len())?;
+            if !yes {
+                writeln!(out, "nothing written (--yes writes)")?;
+                return Ok(());
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos() as u64
+                / 100
+                + 116_444_736_000_000_000;
+            vol.overwrite(&path, at, &bytes, now)?;
             writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
         }
         Command::Tree { source, root, object } => {

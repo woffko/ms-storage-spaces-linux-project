@@ -438,7 +438,12 @@ with `--yes`, otherwise it prints what would change):
 ```sh
 refs set devdrive.img --path /notes.txt --modified "2024-02-29 12:00:00" --yes
 refs set /dev/sdb2 --path /notes.txt --attributes 0x21 --yes   # read-only, archive
+refs overwrite devdrive.img --path /data.bin --at 4096 --from patch.bin --yes
 ```
+
+`refs overwrite` replaces bytes inside a file (not beyond its end, not in
+sparse ranges, not in integrity streams) where they are, as Windows does,
+and sets the modification and change times to now.
 
 It writes the way Windows does (copy on write, then a new checkpoint), so
 an interruption leaves the volume as it was before. Files whose record
@@ -452,7 +457,7 @@ symbolic links and junctions, attributes and times, volumes with 4 KiB
 and 64 KiB clusters, CRC-64 or SHA-256 metadata checksums and integrity
 streams (verified on ReFS 3.14 volumes made by Windows 11). Not read yet:
 compressed files, encrypted files, ReFS 1.x/2.x; writing ReFS beyond
-times and attributes is not supported yet.
+times, attributes and overwriting is not supported yet.
 
 ## Troubleshooting
 

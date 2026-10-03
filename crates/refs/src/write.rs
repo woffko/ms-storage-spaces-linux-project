@@ -435,6 +435,68 @@ impl<D: WriteAt> Volume<D> {
         })
     }
 
+    /// Overwrites bytes of a file's data where they are (as Windows does
+    /// for streams without integrity checksums), then sets its modification
+    /// and change times to `now` (FILETIME). The bytes must lie within the
+    /// file and, for data in extents, in written clusters; files of
+    /// integrity streams are refused (their data is copied on write).
+    pub fn overwrite(&mut self, path: &str, offset: u64, bytes: &[u8], now: u64) -> Result<()> {
+        let entry = self.lookup(path)?;
+        let file = self.open_file(&entry)?;
+        let data = file
+            .data
+            .ok_or_else(|| Error::Unsupported(format!("{path}: no data stream")))?;
+        let end = offset
+            .checked_add(bytes.len() as u64)
+            .filter(|&e| e <= data.size)
+            .ok_or_else(|| Error::Unsupported(format!("{path}: writing beyond its {} bytes", data.size)))?;
+        let inline = match &data.content {
+            crate::file::Content::Inline(_) => true,
+            crate::file::Content::Extents(extents) => {
+                let cluster = self.cluster;
+                let mut covered = offset;
+                for x in extents {
+                    let (start, stop) = (x.vcn * cluster, (x.vcn + x.clusters) * cluster);
+                    if stop <= offset || start >= end {
+                        continue;
+                    }
+                    if !x.written || start > covered {
+                        return Err(Error::Unsupported(format!(
+                            "{path}: writing into a sparse or unwritten range"
+                        )));
+                    }
+                    if x.checksums.is_some() {
+                        return Err(Error::Unsupported(format!("{path}: integrity stream")));
+                    }
+                    covered = covered.max(stop);
+                }
+                if covered < end {
+                    return Err(Error::Unsupported(format!("{path}: writing into a sparse range")));
+                }
+                for x in extents {
+                    let (start, stop) = (x.vcn * cluster, (x.vcn + x.clusters) * cluster);
+                    let (from, to) = (offset.max(start), end.min(stop));
+                    if from >= to {
+                        continue;
+                    }
+                    let lcn = self.translate(x.vlcn + (from - start) / cluster)?;
+                    let at = self.offset + lcn * cluster + (from - start) % cluster;
+                    self.dev
+                        .write_all_at(&bytes[(from - offset) as usize..(to - offset) as usize], at)?;
+                }
+                self.dev.flush()?;
+                false
+            }
+        };
+        self.change_record(path, |v| {
+            if inline && let Some(at) = inline_data(v) {
+                v[at + offset as usize..at + end as usize].copy_from_slice(bytes);
+            }
+            v[0x30..0x38].copy_from_slice(&now.to_le_bytes());
+            v[0x38..0x40].copy_from_slice(&now.to_le_bytes());
+        })
+    }
+
     /// Changes the record of a file whose record is embedded in its
     /// directory entry, in one transaction.
     fn change_record(&mut self, path: &str, change: impl FnOnce(&mut [u8])) -> Result<()> {
@@ -467,4 +529,18 @@ impl<D: WriteAt> Volume<D> {
         }
         self.load()
     }
+}
+
+/// Where the inline data of a record (its single-instance $DATA row) starts
+/// in the record.
+fn inline_data(record: &[u8]) -> Option<usize> {
+    let base = record.as_ptr() as usize;
+    let node = Node::at(record, 0).ok()?;
+    for row in node.rows() {
+        let row = row.ok()?;
+        if le32(row.key, 8) == 0x8000_0001 && le32(row.key, 12) & 0xffff == 0x80 {
+            return Some(row.value.as_ptr() as usize - base + 0x3c);
+        }
+    }
+    None
 }

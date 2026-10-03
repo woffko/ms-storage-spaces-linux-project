@@ -663,7 +663,12 @@ rows of thin spaces not allocated yet (M7).
   old checkpoint reaches is written before the new checkpoint, the
   checkpoints alternate. On Windows: a volume changed by `refs set`
   attached healthy with the new times and attributes, `refsutil leak` and
-  `triage /g` as on the untouched volume, no ReFS events.
+  `triage /g` as on the untouched volume, no ReFS events. `refs
+  overwrite`: data overwritten where it is (as Windows does for streams
+  without integrity), inline data inside the record, then the times
+  committed; Windows read the expected bytes. Next: creating, renaming
+  and deleting files (a new name row with an embedded record and a file
+  id row, type 0x20, in the directory; the directory's own times).
 
 ## Test infrastructure (continuous, feeds every stage)
 
