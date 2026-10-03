@@ -37,7 +37,7 @@ const TTL: Duration = Duration::from_secs(1);
 
 /// The largest file the mount writes (a file is rewritten whole; the
 /// volume may take less: its extent map must fit one page).
-const MAX_WRITTEN: u64 = 4 << 30;
+const MAX_WRITTEN: u64 = 64 << 30;
 
 /// Linux's open(2) and setxattr(2) flags.
 const O_TRUNC: i32 = 0o1000;

@@ -145,7 +145,7 @@ enum Command {
         yes: bool,
     },
     /// Create a file holding the content of a local file (experimental:
-    /// writes the volume, only with --yes; up to 4 GiB; a printable ASCII
+    /// writes the volume, only with --yes; up to 64 GiB; a printable ASCII
     /// name).
     Create {
         /// The image, disk or partition.
@@ -204,7 +204,7 @@ enum Command {
     },
     /// Replace a file's content (or a named stream's) with a local file's,
     /// or append it (experimental: writes the volume, only with --yes; up
-    /// to 4 GiB, 256 MiB for integrity streams; not files with
+    /// to 64 GiB, 2 GiB for integrity streams; not files with
     /// snapshots).
     Write {
         /// The image, disk or partition.

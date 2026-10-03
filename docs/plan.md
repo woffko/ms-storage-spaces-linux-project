@@ -758,10 +758,12 @@ rows of thin spaces not allocated yet (M7).
   the untouched volume, and Windows deleted and copied trees there.
   Files are written from a source piece by piece (`write_file_from`,
   `create_file_from`; the mount keeps open files in temporary files), up
-  to 4 GiB (integrity streams 256 MiB), their extent maps in as many
+  to 64 GiB (integrity streams 2 GiB), their extent maps in as many
   pages as the record's index names (keys (last cluster, 1), key deltas;
   Windows read a 1.2 GB file and a 64 MB integrity stream written so and
-  appended to both). Found on
+  appended to both), and beyond that below an index page, as Windows
+  keeps larger maps (Windows read a clone of its sparse file of 25 000
+  records so, and a 5 GB file `refs` wrote). Found on
   the way: an extent map with a record past cluster 0xffff must leave
   node flag 8 out and put 0xffff in its key index entries (Windows drops
   the file otherwise), and data must not go into containers Windows has

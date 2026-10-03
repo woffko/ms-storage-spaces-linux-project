@@ -340,6 +340,19 @@ fn setting_times_and_attributes_commits_copy_on_write() {
     }
 }
 
+/// Data of zeros (refused before it is read).
+struct Zeros(u64);
+
+impl refs::write::Source for Zeros {
+    fn len(&self) -> u64 {
+        self.0
+    }
+    fn read_into(&self, _offset: u64, buf: &mut [u8]) -> refs::Result<()> {
+        buf.fill(0);
+        Ok(())
+    }
+}
+
 /// The pages a file's extent map takes (0 when it is in the record),
 /// and its index node's flags there.
 fn map_pages<D: ReadAt>(vol: &Volume<D>, path: &str) -> (u32, u8) {
@@ -1199,7 +1212,7 @@ fn writing_integrity_streams() {
     assert!(checksummed(&vol, "/i.bin"));
     for err in [
         vol.set_integrity("/i.bin", false).unwrap_err(),
-        vol.write_file("/i.bin", &vec![0; 257 << 20], now).unwrap_err(),
+        vol.write_file_from("/i.bin", &Zeros((2 << 30) + 1), now).unwrap_err(),
     ] {
         assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
     }
@@ -1888,6 +1901,67 @@ fn rows_of_one_count() {
     let used = used(&vol, 1);
     assert!(clusters.iter().all(|c| !used.contains(c)), "all copies' clusters free");
     assert_allocated(&vol, &skip, "all copies deleted");
+}
+
+#[test]
+fn extent_maps_with_an_index_page() {
+    // A map of more pages than the record's index names: Windows' sparse
+    // file of 25 000 blocks (100 leaves below an index page, the value's
+    // node at level 2 naming it). Its clone gets such a map too.
+    let (image, manifest, skip) = load("r314sparsemap");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 135_600_000_000_000_000;
+    let level = |vol: &Volume<_>, path: &str| {
+        let record = vol.record(&vol.lookup(path).unwrap()).unwrap();
+        let node = Node::at(&record, 0).unwrap();
+        node.rows()
+            .map(|r| r.unwrap())
+            .find(|r| r.key.len() >= 0x18 && r.key[8..12] == [2, 0, 0, 0x80] && r.value.len() > 0x88)
+            .map(|r| r.value[0x88 + 0x0c])
+            .unwrap()
+    };
+    let extents = |vol: &Volume<_>, path: &str| {
+        let file = vol.open_file(&vol.lookup(path).unwrap()).unwrap();
+        let refs::Content::Extents(x) = file.data.unwrap().content else {
+            panic!("inline")
+        };
+        x.iter().map(|x| (x.vcn, x.vlcn, x.clusters)).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        (level(&vol, "/holes.bin"), map_pages(&vol, "/holes.bin")),
+        (2, (101, 0x07))
+    );
+    let source = extents(&vol, "/holes.bin");
+    assert_eq!(source.len(), 25_000);
+    let used_before = used(&vol, 1);
+    vol.clone_file("/holes.bin", "/copy.bin", now).unwrap();
+    assert_eq!(extents(&vol, "/copy.bin"), source);
+    // Sparse, as the source: attribute 0x200, the clusters it has.
+    let copy = vol.lookup("/copy.bin").unwrap();
+    assert_eq!(copy.attributes & 0x200, 0x200);
+    let record = vol.record(&copy).unwrap();
+    assert_eq!(
+        u64::from_le_bytes(record[0x60..0x68].try_into().unwrap()),
+        25_000 * 4096
+    );
+    assert_eq!(level(&vol, "/copy.bin"), 2);
+    let (map, flags) = map_pages(&vol, "/copy.bin");
+    assert!(map > 23 && flags == 0x07, "{map} pages, flags {flags:#x}");
+    assert_eq!(reference_counts(&vol).1, 25_000);
+    assert_pages_valid(&vol, &skip, "cloned with an index page");
+    vol.delete_file("/copy.bin", now).unwrap();
+    // Newly used clusters are the tables' pages (copied on write), none
+    // of the clone's map pages.
+    let tables: BTreeSet<u64> = pages(&vol, &skip).into_iter().map(|p| p.0).collect();
+    let left: Vec<u64> = used(&vol, 1)
+        .difference(&used_before)
+        .copied()
+        .filter(|c| !tables.contains(c))
+        .collect();
+    assert!(left.is_empty(), "{left:x?}");
+    assert_pages_valid(&vol, &skip, "clone deleted");
 }
 
 #[test]

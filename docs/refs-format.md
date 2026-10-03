@@ -544,6 +544,22 @@ table's rows for a text diff):
   integrity stream (5 pages) written so, appended to both (records added
   to the last page, with deltas against base 0x472ff, the rest kept), and
   `refs` read its result.
+* Maps of more pages than the record's index holds (Windows' sparse file
+  of 25 000 blocks of 4 KiB with holes between: 25 000 records): the
+  value's node is at level 2 (flags 7) with one row, no key, row flag 2,
+  naming an index page (level 1, flags 0x0d: key deltas against its
+  first key less 1) whose rows name the leaves, keyed (last cluster the
+  leaf maps, 1), the last one keyless; 0x18 of the value counts all the
+  pages (101: the index page and 100 leaves of 248 records, 450 in the
+  last). A leaf's key deltas are against the last cluster the leaf
+  before maps (its key in the index), 0 for the first. `refs` writes
+  maps that do not fit the record so (one index page: about 190 leaves).
+  A sparse file's value has 0x30 the size in whole clusters, 0x48 the
+  clusters allocated, bit 31 of 0x50 set, and its record attribute 0x200
+  and the allocated size; a clone of one is sparse too (**verified**:
+  Windows read a clone `refs` made of that file, with a map of an index
+  page and 44 leaves, wrote into it and deleted the source; without the
+  sparse fields it took the clone for corrupt and removed it).
 * Creating a file (step `create`) adds two rows to its directory: the
   name row (type 0x30) with the embedded record, and a row of type 0x20
   (key: 0x20, flags 0x8000, the file id as u64 at 8; value: the name's
