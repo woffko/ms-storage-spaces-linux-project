@@ -93,6 +93,14 @@ refs \- read Microsoft ReFS volumes on Linux
 .I path
 .RB [ \-\-yes ]
 .br
+.B refs clone
+.I device
+.B \-\-path
+.I file
+.B \-\-to
+.I path
+.RB [ \-\-yes ]
+.br
 .B refs write
 .I device
 .B \-\-path
@@ -263,6 +271,16 @@ Create a directory. Experimental; only with
 .BR move ", " link
 Move a file or directory into another directory, or give a file another
 name (a hard link). Experimental; only with
+.BR \-\-yes .
+.TP
+.B clone
+Copy a file as a block clone, as
+.B Copy\-Item
+does on a Dev Drive: the copy (a new name, or an empty file) shares the
+file's clusters, each counted once more in the block reference count
+table; changing either copy later leaves the other as it was. The data
+only (not named streams); small files are copied; both files must be
+integrity streams or neither. Experimental; only with
 .BR \-\-yes .
 .TP
 .B write

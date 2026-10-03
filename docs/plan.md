@@ -748,7 +748,7 @@ rows of thin spaces not allocated yet (M7).
   does (overwriting shared clusters in place is refused). Files with
   stream snapshots (every level's clusters freed), symbolic links and
   junctions are deleted too (Windows: healthy, no leak, recreated them).
-  Not done: rewriting files with snapshots, cloning files.
+  Not done: rewriting files with snapshots.
   `refs mount --rw` writes through the FUSE mount (inodes are paths; a
   file is written back whole on close, up to 64 MiB); data takes other
   allocator rows, then free uniform ranges, once its band is full. A
@@ -788,7 +788,15 @@ rows of thin spaces not allocated yet (M7).
   `refs`, which takes that checkpoint's slot; they leaked before (8
   clusters more in `refsutil leak` after writing a volume Windows had
   just written, none since). `refs write --append` changes the file in
-  place.
+  place; integrity streams are changed as Windows changes them (touched
+  clusters copied on write). Block clones (`refs clone`,
+  Volume::clone_file): the copy shares the clusters, counted in the block
+  reference count table, whose rows have a kind at 0x14 (1: a count per
+  cluster, 0: one count for a range of blocks, which Windows packs rows
+  into); rows written with 0 there made Windows free a clone's clusters
+  as unshared before that was found. Windows read clones of plain files
+  and integrity streams, wrote into them and deleted the sources, with
+  `refs check` and `refsutil leak` clean.
 
 ## Test infrastructure (continuous, feeds every stage)
 

@@ -18,7 +18,7 @@
 //! clusters. No log records are written: the commit keeps the log's
 //! sequence number, which Windows takes as nothing to replay.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use storage_spaces::io::WriteAt;
 
@@ -27,6 +27,7 @@ use crate::error::{Error, Result, format_err};
 use crate::file::{Entry, LIVE_STREAM, Target, Times};
 use crate::node::Node;
 use crate::page::{PAGE_HEADER_SIZE, PageRef, store_reference};
+use crate::refcount;
 use crate::util::{le16, le32, le64, utf16};
 use crate::volume::{ROOT_DIRECTORY, ROOT_OBJECTS, Volume};
 
@@ -526,38 +527,185 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
     /// Frees a file's data clusters, minding block clones: a cluster the
     /// block reference count table (root 6) counts further references for
     /// loses one there (its count and the row's total at 0x18, as Windows
-    /// does; the row stays) and stays allocated; the others become free.
+    /// does; the row stays; a row of one count for its range first becomes
+    /// rows of counts where clusters lose one) and stays allocated; the
+    /// others become free.
     fn free_data(&mut self, clusters: &[u64]) -> Result<()> {
-        const REFCOUNTS: usize = 6;
-        let rows = self.rows(Tree::Root(REFCOUNTS), &|_| true)?;
+        let virtuals = clusters
+            .iter()
+            .map(|&c| Ok((c, self.vol.virtual_of(c)?)))
+            .collect::<Result<Vec<_>>>()?;
+        let mut rows = self.refcount_rows()?;
+        if rows.is_empty() {
+            return self.release(ROOT_MEDIUM_ALLOCATOR, clusters);
+        }
+        let mut blocks = std::collections::BTreeSet::new();
+        for &(_, v) in &virtuals {
+            if let Some(at) = refcount_row(&rows, v) {
+                let val = &self.pages[at.page].data[at.value..at.value + at.len];
+                if le32(val, 0x14) != refcount::COUNTS && le16(val, 0x1c) > 0 {
+                    blocks.insert(v & !(refcount::BLOCK - 1));
+                }
+            }
+        }
+        if !blocks.is_empty() {
+            for block in blocks {
+                self.unpack_refcounts(block)?;
+            }
+            rows = self.refcount_rows()?;
+        }
         let mut free = Vec::with_capacity(clusters.len());
-        for &c in clusters {
-            let v = self.vol.virtual_of(c)?;
-            let hit = rows.iter().copied().find(|r| {
-                let val = &self.pages[r.page].data[r.value..r.value + r.len];
-                val.len() >= 0x1c && le64(val, 0) <= v && v < le64(val, 0).saturating_add(le64(val, 8))
-            });
-            let Some(at) = hit else {
+        for &(c, v) in &virtuals {
+            let Some(at) = refcount_row(&rows, v) else {
                 free.push(c);
                 continue;
             };
-            let first = le64(&self.pages[at.page].data[at.value..], 0);
-            let i = 0x1c + 2 * (v - first) as usize;
             let val = &self.pages[at.page].data[at.value..at.value + at.len];
-            if val.get(i..i + 2).is_none() {
-                return Err(format_err!("reference count row without a count for cluster {v:#x}"));
-            }
-            let count = le16(val, i);
+            let count = refcount::count_of(val, v)
+                .ok_or_else(|| format_err!("reference count row without a count for cluster {v:#x}"))?;
             if count == 0 {
                 free.push(c);
                 continue;
             }
+            let i = 0x1c + 2 * (v - le64(val, 0)) as usize;
             let val = self.value_mut(at);
             val[i..i + 2].copy_from_slice(&(count - 1).to_le_bytes());
             let total = le32(val, 0x18).saturating_sub(1);
             val[0x18..0x1c].copy_from_slice(&total.to_le_bytes());
         }
         self.release(ROOT_MEDIUM_ALLOCATOR, &free)
+    }
+
+    /// The block reference count table's rows, by first cluster: (first,
+    /// past the last, where).
+    fn refcount_rows(&mut self) -> Result<Vec<(u64, u64, RowAt)>> {
+        const REFCOUNTS: usize = 6;
+        let mut rows: Vec<(u64, u64, RowAt)> = self
+            .rows(Tree::Root(REFCOUNTS), &|_| true)?
+            .into_iter()
+            .filter_map(|r| {
+                let (first, n) = refcount::range(&self.pages[r.page].data[r.value..r.value + r.len])?;
+                Some((first, first.saturating_add(n), r))
+            })
+            .collect();
+        rows.sort_by_key(|r| r.0);
+        Ok(rows)
+    }
+
+    /// Turns the row of one count for a range (kind 0) that holds `block`
+    /// into a row of counts for that block, the rest of its range staying
+    /// in rows of one count before and after it (none to do for a row of
+    /// counts).
+    fn unpack_refcounts(&mut self, block: u64) -> Result<()> {
+        const REFCOUNTS: usize = 6;
+        let tree = Tree::Root(REFCOUNTS);
+        let at = self.find(tree, &|k| {
+            k.len() >= 16 && le64(k, 0) <= block && block < le64(k, 0).saturating_add(le64(k, 8))
+        })?;
+        let val = self.pages[at.page].data[at.value..at.value + at.len].to_vec();
+        if le32(&val, 0x14) == refcount::COUNTS {
+            return Ok(());
+        }
+        let (first, n) =
+            refcount::range(&val).ok_or_else(|| format_err!("reference count row of {} bytes", val.len()))?;
+        let (count, stamp) = (le16(&val, 0x1c), le32(&val, 0x10));
+        if !first.is_multiple_of(refcount::BLOCK) || !n.is_multiple_of(refcount::BLOCK) {
+            return Err(format_err!(
+                "reference count row ({first:#x}, {n:#x}) not of whole blocks"
+            ));
+        }
+        let old = val[..16].to_vec();
+        self.remove_quiet(at.page, &|k| k == old.as_slice())?;
+        let mut rows = vec![refcount::counts_value(block, count, stamp)];
+        if block > first {
+            rows.push(refcount::uniform_value(first, block - first, count, stamp));
+        }
+        let end = block + refcount::BLOCK;
+        if end < first + n {
+            rows.push(refcount::uniform_value(end, first + n - end, count, stamp));
+        }
+        for v in rows {
+            self.insert_sorted(tree, &row_keyed_by_value(&v, 16), &u64_key_order)?;
+        }
+        Ok(())
+    }
+
+    /// One more reference to each cluster of `runs` (virtual cluster,
+    /// clusters) in the block reference count table (root 6), as a block
+    /// clone counts them: rows of 0x400 clusters keyed (first cluster,
+    /// 0x400), the value the key again, a u32 Windows changes with each
+    /// transaction (0x10, low byte 1) and the u32 1 (0x14; Windows ignores
+    /// a row with 0 there: new rows take the others' values, else
+    /// REFCOUNT_STAMP), the total of the counts (u32 at 0x18) and a u16
+    /// per cluster from 0x1c, the references beyond the first. A table's
+    /// first row gives its node key deltas (flag 8), as Windows has it.
+    fn add_references(&mut self, runs: &[(u64, u64)]) -> Result<()> {
+        const REFCOUNTS: usize = 6;
+        const BLOCK: u64 = 0x400;
+        let tree = Tree::Root(REFCOUNTS);
+        let existing = self.rows(tree, &|_| true)?;
+        let stamp = existing
+            .iter()
+            .filter(|r| r.len >= 0x20)
+            .map(|r| le32(&self.pages[r.page].data[r.value..], 0x10))
+            .min()
+            .unwrap_or(REFCOUNT_STAMP);
+        if existing.is_empty() {
+            let root = self.root(tree)?;
+            self.mark(root);
+            let d = &mut self.pages[root].data;
+            let h = PAGE_HEADER_SIZE + le32(d, PAGE_HEADER_SIZE) as usize;
+            if d[h + 0x0c] == 0 {
+                d[h + 0x0d] |= NODE_DELTAS;
+            }
+        }
+        let mut by_block: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        for &(vlcn, n) in runs {
+            for v in vlcn..vlcn
+                .checked_add(n)
+                .ok_or_else(|| format_err!("a run past the last cluster"))?
+            {
+                by_block.entry(v & !(BLOCK - 1)).or_default().push(v);
+            }
+        }
+        for (block, clusters) in by_block {
+            // A row of one count over the block: rows of counts first.
+            let covered = self.find(tree, &|k| {
+                k.len() >= 16 && le64(k, 0) <= block && block < le64(k, 0).saturating_add(le64(k, 8))
+            });
+            if covered.is_ok() {
+                self.unpack_refcounts(block)?;
+            }
+            let key = [block.to_le_bytes(), BLOCK.to_le_bytes()].concat();
+            match self.find(tree, &|k| k == key.as_slice()) {
+                Ok(at) => {
+                    let v = self.value_mut(at);
+                    if v.len() < 0x1c + 2 * BLOCK as usize {
+                        return Err(format_err!("reference count row of {} bytes", v.len()));
+                    }
+                    for &c in &clusters {
+                        let i = 0x1c + 2 * (c - block) as usize;
+                        let count = le16(v, i)
+                            .checked_add(1)
+                            .ok_or_else(|| format_err!("cluster {c:#x}: too many references"))?;
+                        v[i..i + 2].copy_from_slice(&count.to_le_bytes());
+                    }
+                    let total = le32(v, 0x18) + clusters.len() as u32;
+                    v[0x18..0x1c].copy_from_slice(&total.to_le_bytes());
+                }
+                Err(Error::NotFound(_)) => {
+                    let mut value = refcount::counts_value(block, 0, stamp);
+                    value[0x18..0x1c].copy_from_slice(&(clusters.len() as u32).to_le_bytes());
+                    for &c in &clusters {
+                        let i = 0x1c + 2 * (c - block) as usize;
+                        value[i..i + 2].copy_from_slice(&1u16.to_le_bytes());
+                    }
+                    self.insert_sorted(tree, &row_keyed_by_value(&value, 16), &u64_key_order)?;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
 
     /// As Windows keeps the medium allocator small: a data container's
@@ -952,8 +1100,9 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         let (left, right) = rows.split_at(k);
         let mut last_left = left.last().unwrap().0.clone();
         // Windows indexes the pages of its allocator tables by the last
-        // cluster they cover: (start + count - 1 of the last row, 1).
-        if matches!(tree, Tree::Root(1 | 2)) && level == 0 && last_left.len() == 16 {
+        // cluster they cover: (start + count - 1 of the last row, 1); the
+        // block reference count table's rows are such ranges too.
+        if matches!(tree, Tree::Root(1 | 2 | 6)) && level == 0 && last_left.len() == 16 {
             let last = le64(&last_left, 0)
                 .saturating_add(le64(&last_left, 8))
                 .saturating_sub(1);
@@ -982,11 +1131,12 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
                     (last_left.clone(), self.index_row(&last_left)?),
                     (Vec::new(), self.index_row(&[])?),
                 ];
-                // Windows' allocator roots over pages: flags 0xf.
+                // Windows' allocator roots over pages: flags 0xf; the block
+                // reference count table's: 7 (flag 4 as its leaves').
                 let index_flags = if matches!(tree, Tree::Root(1 | 2)) {
                     child_flags | NODE_INDEX | NODE_ROOT | NODE_DELTAS
                 } else {
-                    NODE_INDEX | NODE_ROOT
+                    NODE_INDEX | NODE_ROOT | (child_flags & 4)
                 };
                 self.write_node(page, level + 1, index_flags, &index)?;
                 self.count_pages(tree, 2);
@@ -2343,6 +2493,103 @@ impl<D: WriteAt> Volume<D> {
         if data.len() > MAX_CREATED {
             return Err(Error::Unsupported(format!("files of more than {MAX_CREATED} bytes")));
         }
+        self.replace_data(
+            path,
+            now,
+            data.len() > MAX_INLINE as u64,
+            None,
+            &|vol, tx, band, file| vol.new_record(tx, band, data, file),
+        )
+    }
+
+    /// Gives the file at `to` the data of the file at `from` as a block
+    /// clone, as Windows' Copy-Item does on a Dev Drive: `to` (made empty
+    /// first when it does not exist; else it must be empty) gets a copy of
+    /// the extent map of `from`'s data, checksums included, and every
+    /// cluster they share counts one more reference in the block
+    /// reference count table (root 6). Times: as for a file written now.
+    /// Small files (data in the record) are copied instead. Named streams
+    /// are not cloned; `from` must not have snapshots, and both must be
+    /// integrity streams or neither.
+    pub fn clone_file(&mut self, from: &str, to: &str, now: u64) -> Result<()> {
+        let source = self.open_file(&self.lookup(from)?)?;
+        if !source.snapshots.is_empty() {
+            return Err(Error::Unsupported(format!("{from}: snapshots")));
+        }
+        let Some(data) = source.data else {
+            return Err(Error::Unsupported(format!("{from}: no data stream")));
+        };
+        match self.lookup(to) {
+            Ok(e) if e.size == 0 && e.attributes & 0x10 == 0 => {}
+            Ok(_) => return Err(Error::Unsupported(format!("{to}: not an empty file"))),
+            Err(Error::NotFound(_)) => self.create_file(to, b"", now)?,
+            Err(e) => return Err(e),
+        }
+        let extents = match &data.content {
+            crate::file::Content::Extents(x) if data.size > MAX_INLINE as u64 => x.clone(),
+            _ => {
+                let mut buf = vec![0u8; data.size as usize];
+                let n = self.read_stream(&data, 0, &mut buf)?;
+                buf.truncate(n);
+                return self.write_file(to, &buf, now);
+            }
+        };
+        let target = self.file_at(to)?;
+        let checksums = extents.iter().any(|x| x.checksums.is_some());
+        if checksums != (le32(&target.record, 0x48) & INTEGRITY != 0) {
+            return Err(Error::Unsupported(format!(
+                "{from} and {to}: only one of them an integrity stream"
+            )));
+        }
+        let width = |k: u16| if k == 1 { 4 } else { 8 };
+        let records: Vec<(u64, u64, u64, Vec<u8>)> = extents
+            .iter()
+            .filter(|x| x.written)
+            .map(|x| {
+                let sums = x
+                    .checksums
+                    .as_ref()
+                    .map(|c| {
+                        c.values
+                            .iter()
+                            .flat_map(|&v| v.to_le_bytes()[..width(c.kind)].to_vec())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (x.vcn, x.vlcn, x.clusters, sums)
+            })
+            .collect();
+        if records.len() != extents.len() {
+            return Err(Error::Unsupported(format!("{from}: sparse ranges")));
+        }
+        let shared: Vec<(u64, u64)> = records.iter().map(|r| (r.1, r.2)).collect();
+        let size = data.size;
+        let allocated = size.div_ceil(self.cluster) * self.cluster;
+        self.replace_data(to, now, true, Some(&shared), &|vol, tx, _, file| {
+            let live = vol.map_value(tx, file.table, size, allocated, &records)?;
+            let mut record = extent_record(size, allocated, live, file.now, file.id, file.security);
+            if file.integrity {
+                let a = le32(&record, 0x48) | INTEGRITY;
+                record[0x48..0x4c].copy_from_slice(&a.to_le_bytes());
+            }
+            Ok(record)
+        })
+    }
+
+    /// Replaces a file's data with what `make` records (given the
+    /// transaction, the data band when `clustered`, and the new record's
+    /// fields), as `write_file_from` describes; `shared` names runs
+    /// (virtual cluster, clusters) the new data shares with other files,
+    /// whose references go up by one.
+    #[allow(clippy::type_complexity)]
+    fn replace_data(
+        &mut self,
+        path: &str,
+        now: u64,
+        clustered: bool,
+        shared: Option<&[(u64, u64)]>,
+        make: &dyn Fn(&Self, &mut Transaction<'_, D>, Option<u64>, NewRecord) -> Result<Vec<u8>>,
+    ) -> Result<()> {
         let FileAt {
             parent,
             name,
@@ -2368,17 +2615,16 @@ impl<D: WriteAt> Volume<D> {
                 content: crate::file::Content::Extents(x),
                 ..
             }) if x.iter().any(|x| x.checksums.is_some()));
-        let band = if data.len() > MAX_INLINE as u64 {
-            Some(self.data_band(dir)?)
-        } else {
-            None
-        };
+        let band = if clustered { Some(self.data_band(dir)?) } else { None };
         let (id, security) = (le64(&old, 0x80), le64(&old, 0x50));
         {
             let mut tx = Transaction::begin(&*self)?;
             // The old data clusters become free (kept until the commit).
             let clusters = clusters_of(&runs);
             tx.free_data(&clusters)?;
+            if let Some(shared) = shared {
+                tx.add_references(shared)?;
+            }
             let file = NewRecord {
                 now,
                 id,
@@ -2386,7 +2632,7 @@ impl<D: WriteAt> Volume<D> {
                 integrity,
                 table: home.unwrap_or(dir),
             };
-            let mut record = self.new_record(&mut tx, band, data, file)?;
+            let mut record = make(self, &mut tx, band, file)?;
             // Kept: creation and access times, attributes (but the bits
             // that describe the content).
             record[0x28..0x30].copy_from_slice(&old[0x28..0x30]);
@@ -2572,9 +2818,8 @@ impl<D: WriteAt> Volume<D> {
                 let v = self.virtual_of(c)?;
                 for (first, count, value) in &rows {
                     if *first <= v && v < first.saturating_add(*count) {
-                        let at = 0x1c + 2 * (v - first) as usize;
                         // A count it does not hold: taken as shared.
-                        if value.get(at..at + 2).is_none_or(|b| b != [0, 0]) {
+                        if refcount::count_of(value, v).is_none_or(|c| c > 0) {
                             return Ok(true);
                         }
                     }
@@ -3485,6 +3730,28 @@ const ROW_NAME: u16 = 0x30;
 
 /// A row: header (size, key offset and length, flags, value offset and
 /// length), the key and the value, each 8-aligned.
+/// The reference count row (of `rows`, sorted by first cluster) that
+/// holds virtual cluster `v`.
+fn refcount_row(rows: &[(u64, u64, RowAt)], v: u64) -> Option<RowAt> {
+    let i = rows.partition_point(|r| r.0 <= v).checked_sub(1)?;
+    (v < rows[i].1).then_some(rows[i].2)
+}
+
+/// A row whose key is the first `key_len` bytes of its value, as Windows
+/// lays out the rows of the block reference count table (and of the
+/// allocators).
+fn row_keyed_by_value(value: &[u8], key_len: usize) -> Vec<u8> {
+    let size = (0x10 + value.len()).next_multiple_of(8);
+    let mut r = vec![0u8; size];
+    r[0..4].copy_from_slice(&(size as u32).to_le_bytes());
+    r[4..6].copy_from_slice(&0x10u16.to_le_bytes());
+    r[6..8].copy_from_slice(&(key_len as u16).to_le_bytes());
+    r[10..12].copy_from_slice(&0x10u16.to_le_bytes());
+    r[12..14].copy_from_slice(&(value.len() as u16).to_le_bytes());
+    r[0x10..0x10 + value.len()].copy_from_slice(value);
+    r
+}
+
 fn row(key: &[u8], value: &[u8], flags: u16) -> Vec<u8> {
     let voff = (0x10 + key.len()).next_multiple_of(8);
     let size = (voff + value.len()).next_multiple_of(8);
@@ -3653,6 +3920,10 @@ fn file_id_row(id: u64, utf16: &[u8]) -> (Vec<u8>, Vec<u8>) {
     value.extend(utf16);
     (key, value)
 }
+
+/// 0x10 of a new block reference count row when there is no other: the
+/// u32 Windows changes with each transaction (its values end in 01).
+const REFCOUNT_STAMP: u32 = 1;
 
 /// Files `refs create` makes keep up to this much data in their record;
 /// larger ones up to the next limit get data clusters.

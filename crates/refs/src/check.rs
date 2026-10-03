@@ -22,6 +22,7 @@ use crate::error::Result;
 use crate::file::{Content, Target};
 use crate::node::Node;
 use crate::page::{PAGE_HEADER_SIZE, PageRef};
+use crate::refcount;
 use crate::util::{le16, le32, le64};
 use crate::volume::{ROOT_DIRECTORY, Volume};
 
@@ -304,16 +305,16 @@ impl<D: ReadAt> Volume<D> {
         // did not replace: a file's runs are taken once.
         runs.sort();
         runs.dedup();
-        let refcounts = self.refcount_rows()?;
+        let (refcounts, row_problems) = self.refcount_rows()?;
+        for p in row_problems {
+            report.problem(p);
+        }
         let shared = |c: u64| -> bool {
             let Ok(v) = self.virtual_of(c) else { return false };
             refcounts
                 .iter()
                 .find(|(first, count, _)| *first <= v && v < first + count)
-                .is_some_and(|(first, _, counts)| {
-                    let i = 2 * (v - first) as usize;
-                    counts.get(i..i + 2).is_some_and(|b| b != [0, 0])
-                })
+                .is_some_and(|(_, _, value)| refcount::count_of(value, v).is_some_and(|c| c > 0))
         };
         let mut last: Option<(u64, String)> = None;
         for (lcn, n, name) in &runs {
@@ -365,16 +366,28 @@ impl<D: ReadAt> Volume<D> {
         out
     }
 
-    /// The block reference count table's rows: first virtual cluster,
-    /// count, and the u16 counts from 0x1c.
-    fn refcount_rows(&self) -> Result<Vec<(u64, u64, Vec<u8>)>> {
-        let mut rows = Vec::new();
+    /// The block reference count table's rows (see `refcount`): their
+    /// ranges and values, and the problems found in them (a row of counts
+    /// too short for its range, an unknown kind).
+    #[allow(clippy::type_complexity)]
+    fn refcount_rows(&self) -> Result<(Vec<(u64, u64, Vec<u8>)>, Vec<String>)> {
+        let (mut rows, mut problems) = (Vec::new(), Vec::new());
         self.walk(&self.checkpoint.roots[6].clone(), false, &mut |row| {
-            if row.key.len() >= 16 && row.value.len() >= 0x1c {
-                rows.push((le64(row.key, 0), le64(row.key, 8), row.value[0x1c..].to_vec()));
+            let Some((first, n)) = refcount::range(row.value) else {
+                problems.push(format!("reference count row of {} bytes", row.value.len()));
+                return Ok(());
+            };
+            match le32(row.value, 0x14) {
+                refcount::COUNTS if row.value.len() < 0x1c + 2 * n as usize => problems.push(format!(
+                    "reference count row {first:#x}: {n:#x} clusters, {} bytes",
+                    row.value.len()
+                )),
+                refcount::COUNTS | refcount::UNIFORM => {}
+                kind => problems.push(format!("reference count row {first:#x} of kind {kind}")),
             }
+            rows.push((first, n, row.value.to_vec()));
             Ok(())
         })?;
-        Ok(rows)
+        Ok((rows, problems))
     }
 }

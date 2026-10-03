@@ -393,21 +393,42 @@ table's rows for a text diff):
   extent records after the file's own (its record count and sizes
   grow); `refs` appends and truncates the same way (Volume::update_file).
 * Block reference counts (root 6): rows keyed by a range of virtual
-  clusters (first, count; 0x400 clusters each seen); value: the key, a
-  u64 at 0x10, the sum of the counts (u32 at 0x18), then from 0x1c a u16
-  per cluster counting its references beyond the first (three files
-  sharing a cluster: 2; 0 for a cluster one file has alone); empty on
-  volumes without block clones or deduplication. Copying a file
-  (Windows 11 clones its blocks) adds a row for each 0x400-aligned range
-  of its clusters with count 1; deleting one of the files sharing a
-  cluster lowers its count and the total (the row stays, at 0 too), and
-  only a cluster of count 0 is freed. The u64 at 0x10 changes with every
-  transaction that touches the table (the same in all its rows; meaning
-  unknown, `refs` keeps it). `refs` deletes and rewrites such files the
-  same way (**verified**: after refs deleted one or all three files
-  sharing clusters, Windows reported no leak, read the others, cloned
-  and deleted the rest) and refuses to overwrite shared clusters in
-  place (that would change the other files).
+  clusters (first, count), the key being the first 16 bytes of the value
+  (row size 0x830 for a value of 0x820); empty on volumes without block
+  clones or deduplication. The value: the key, a u32 at 0x10 that
+  Windows changes with every transaction touching the row (its values
+  end in 01: 0x4b205801, 0x465d7001), the row's kind (u32 at 0x14), the
+  sum of the counts (u32 at 0x18). Kind 1: 0x400 clusters, from 0x1c a
+  u16 per cluster counting its references beyond the first (three files
+  sharing a cluster: 2; 0 for a cluster one file has alone). Kind 0: a
+  value of 0x20 bytes, one count (u16 at 0x1c, again at 0x1e, the total
+  0) for every cluster of a range of any number of blocks: Windows packs
+  rows whose clusters have one count so and merges neighbours (after it
+  deleted one of three copies: rows of 0x800 and 0x1000 clusters, count
+  2). A row with 0 at 0x14 and an array of counts is read as kind 0 with
+  the first count: Windows freed the clusters of a clone whose rows
+  `refs` had written with 0 there as unshared (**verified**). Leaf
+  nodes have key deltas (flags 0xe for a root, 0xc below an index of
+  flags 7, whose rows are keyed (last cluster a page covers, 1) as in the
+  allocators). Copying a file (Windows 11 clones its blocks with
+  `Copy-Item` on a Dev Drive) adds a row for each 0x400-aligned range of
+  its whole clusters with count 1 (its last, partly used cluster is
+  copied); deleting one of the files sharing a cluster lowers its count
+  and the total (the row stays at 0, or goes), and only a cluster of
+  count 0 is freed. `refs` deletes and rewrites such files the same way,
+  turning a row of kind 0 into rows of counts where counts change
+  (**verified**: after refs deleted one or all three files sharing
+  clusters, Windows reported no leak, read the others, cloned and deleted
+  the rest), refuses to overwrite shared clusters in place (that would
+  change the other files), and clones files (Volume::clone_file, `refs
+  clone`): the copy gets the source's extent records (with their
+  checksums), each cluster a reference more, new rows of kind 1 taking
+  the other rows' u32 at 0x10 (else 1) (**verified**: Windows read clones
+  of a 30 MB file and of a 64 MB integrity stream, wrote into one,
+  deleted the sources, appended to the other clone, and `refs check` and
+  `refsutil leak` found nothing; and after Windows packed rows to kind
+  0, `refs` deleted a copy and cloned again through them, and Windows
+  deleted the rest).
 * Moving a file to another directory, or giving it a second name (steps
   `move`, `link`): its record leaves its name row and becomes a row of
   type 0x40 of the directory it was made in (its home; key 0x40, 0x8000,

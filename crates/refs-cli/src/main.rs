@@ -255,6 +255,24 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Copy a file as a block clone, as Copy-Item does on a Dev Drive: the
+    /// copy shares the file's clusters, counted in the block reference
+    /// count table (experimental: writes the volume, only with --yes; the
+    /// data only, not named streams; small files are copied)
+    Clone {
+        /// The image, disk or partition.
+        device: PathBuf,
+        #[arg(long)]
+        offset: Option<u64>,
+        /// The file.
+        #[arg(long)]
+        path: String,
+        /// The copy's path (a new name, or an empty file).
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Check the volume's consistency (read-only): every page's checksum
     /// and structure, every page and file cluster used in its allocator,
     /// clusters several files map counted as shared. Exits with 1 on a
@@ -1291,6 +1309,22 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             vol.link_file(&path, &to, now())?;
+            writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
+        }
+        Command::Clone {
+            device,
+            offset,
+            path,
+            to,
+            yes,
+        } => {
+            let mut vol = open_writable(&device, offset, yes)?;
+            writeln!(out, "{path}: clone as {to}")?;
+            if !yes {
+                writeln!(out, "nothing written (--yes writes)")?;
+                return Ok(());
+            }
+            vol.clone_file(&path, &to, now())?;
             writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
         }
         Command::Tree { source, root, object } => {

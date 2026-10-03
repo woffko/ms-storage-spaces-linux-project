@@ -1734,6 +1734,179 @@ fn freeing_the_pages_windows_left_for_its_next_checkpoint() {
     assert_pages_valid(&vol, &skip, "written twice");
 }
 
+/// The reference count table's counts: (virtual cluster, count) of every
+/// cluster with one, and their sum. Rows of kind 1 hold a count per
+/// cluster from 0x1c (their total at 0x18), rows of kind 0 one count for
+/// their whole range.
+fn reference_counts<D: ReadAt>(vol: &Volume<D>) -> (BTreeSet<(u64, u16)>, u64) {
+    let (mut counts, mut total) = (BTreeSet::new(), 0);
+    vol.walk(&vol.checkpoint.roots[6].clone(), false, &mut |row| {
+        let v = row.value;
+        let u64_at = |o: usize| u64::from_le_bytes(v[o..o + 8].try_into().unwrap());
+        let (first, n) = (u64_at(0), u64_at(8));
+        let kind = u32::from_le_bytes(v[0x14..0x18].try_into().unwrap());
+        let count = |j: u64| {
+            let at = if kind == 1 { 0x1c + 2 * j as usize } else { 0x1c };
+            u16::from_le_bytes([v[at], v[at + 1]])
+        };
+        let mut sum = 0;
+        for j in 0..n {
+            let c = count(j);
+            if c > 0 {
+                counts.insert((first + j, c));
+                sum += u64::from(c);
+            }
+        }
+        if kind == 1 {
+            assert_eq!(
+                sum,
+                u64::from(u32::from_le_bytes(v[0x18..0x1c].try_into().unwrap())),
+                "row {first:#x}"
+            );
+        }
+        total += sum;
+        Ok(())
+    })
+    .unwrap();
+    (counts, total)
+}
+
+#[test]
+fn cloning_files() {
+    // As Windows' Copy-Item on a Dev Drive: the copy shares the clusters,
+    // the reference count table counts the second reference; deleting
+    // either copy leaves the other whole, deleting both frees them.
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 135_400_000_000_000_000;
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i % 253) as u8).collect();
+    vol.create_file("/a.bin", &data, now).unwrap();
+    let used_once = used(&vol, 1);
+    assert_eq!(reference_counts(&vol).1, 0);
+    vol.clone_file("/a.bin", "/b.bin", now + 1).unwrap();
+    assert_eq!(read_all(&vol, "/b.bin"), data);
+    let b = vol.lookup("/b.bin").unwrap();
+    assert_eq!((b.times.created, b.times.modified), (now + 1, now + 1));
+    let (counts, total) = reference_counts(&vol);
+    assert_eq!(total, 74, "300 000 bytes: 74 clusters, one reference more each");
+    assert!(counts.iter().all(|&(_, c)| c == 1));
+    assert_eq!(
+        used(&vol, 1).difference(&used_once).count(),
+        0,
+        "no data clusters taken"
+    );
+    assert_pages_valid(&vol, &skip, "cloned");
+    // A third copy into an existing empty file; then the copies go.
+    vol.create_file("/c.bin", b"", now).unwrap();
+    vol.clone_file("/b.bin", "/c.bin", now).unwrap();
+    assert!(reference_counts(&vol).0.iter().all(|&(_, c)| c == 2));
+    vol.delete_file("/a.bin", now).unwrap();
+    vol.delete_file("/c.bin", now).unwrap();
+    assert_eq!(read_all(&vol, "/b.bin"), data);
+    assert_eq!(reference_counts(&vol).1, 0);
+    assert_pages_valid(&vol, &skip, "two copies deleted");
+    vol.delete_file("/b.bin", now).unwrap();
+    assert_allocated(&vol, &skip, "all copies deleted");
+    assert_pages_valid(&vol, &skip, "all copies deleted");
+    // Integrity streams clone with their checksums; refused: a target with
+    // data, one integrity stream and one not.
+    vol.create_file("/i.bin", b"", now).unwrap();
+    vol.set_integrity("/i.bin", true).unwrap();
+    vol.write_file("/i.bin", &data, now).unwrap();
+    vol.create_file("/j.bin", b"", now).unwrap();
+    vol.set_integrity("/j.bin", true).unwrap();
+    vol.clone_file("/i.bin", "/j.bin", now).unwrap();
+    assert_eq!(read_all(&vol, "/j.bin"), data);
+    for err in [
+        vol.clone_file("/i.bin", "/j.bin", now).unwrap_err(),
+        vol.clone_file("/i.bin", "/k.bin", now).unwrap_err(),
+    ] {
+        assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
+    }
+    // Small files are copied.
+    vol.clone_file("/small.txt", "/small2.txt", now).unwrap();
+    assert_eq!(read_all(&vol, "/small2.txt"), read_all(&vol, "/small.txt"));
+    assert_pages_valid(&vol, &skip, "integrity cloned");
+}
+
+#[test]
+fn rows_of_one_count() {
+    // Windows packs reference count rows whose clusters have one count
+    // into rows of kind 0 over several blocks (here three copies made by
+    // `refs`, one deleted by Windows: count 2 everywhere). Read, then
+    // changed through: a deleted copy (rows of counts where counts drop),
+    // another clone, all deleted.
+    let (image, manifest, skip) = load("r314uniform");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 135_500_000_000_000_000;
+    let mut kinds = BTreeSet::new();
+    vol.walk(&vol.checkpoint.roots[6].clone(), false, &mut |row| {
+        kinds.insert((
+            u32::from_le_bytes(row.value[0x14..0x18].try_into().unwrap()),
+            row.value.len(),
+        ));
+        Ok(())
+    })
+    .unwrap();
+    assert!(kinds.contains(&(0, 0x20)) && kinds.contains(&(1, 0x820)), "{kinds:?}");
+    let shared = reference_counts(&vol).0;
+    assert_eq!(
+        shared.len(),
+        7325,
+        "30 000 000 bytes: 7325 clusters, the last one shared too"
+    );
+    assert!(shared.iter().all(|&(_, c)| c == 2));
+    assert_pages_valid(&vol, &skip, "Windows' rows");
+    let data = read_all(&vol, "/src.bin");
+    vol.delete_file("/c1.bin", now).unwrap();
+    assert!(reference_counts(&vol).0.iter().all(|&(_, c)| c == 1));
+    assert_eq!(read_all(&vol, "/c2.bin"), data);
+    assert_pages_valid(&vol, &skip, "a copy deleted");
+    vol.clone_file("/src.bin", "/c3.bin", now).unwrap();
+    assert!(reference_counts(&vol).0.iter().all(|&(_, c)| c == 2));
+    let clusters = {
+        let file = vol.open_file(&vol.lookup("/src.bin").unwrap()).unwrap();
+        let refs::Content::Extents(x) = file.data.unwrap().content else {
+            panic!("inline")
+        };
+        x.iter()
+            .flat_map(|x| {
+                let lcn = vol.translate(x.vlcn).unwrap();
+                lcn..lcn + x.clusters
+            })
+            .collect::<Vec<_>>()
+    };
+    for path in ["/src.bin", "/c2.bin", "/c3.bin"] {
+        vol.delete_file(path, now).unwrap();
+        assert_pages_valid(&vol, &skip, path);
+    }
+    assert_eq!(reference_counts(&vol).1, 0);
+    let used = used(&vol, 1);
+    assert!(clusters.iter().all(|c| !used.contains(c)), "all copies' clusters free");
+    assert_allocated(&vol, &skip, "all copies deleted");
+}
+
+#[test]
+fn cloning_cloned_files() {
+    // Windows' clones (count 2): one more copy counts 3.
+    let (image, manifest, skip) = load("r314basic4k");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 135_400_000_000_000_000;
+    let before = reference_counts(&vol);
+    vol.clone_file("/clones/copy1.bin", "/clones/copy3.bin", now).unwrap();
+    assert_eq!(read_all(&vol, "/clones/copy3.bin"), read_all(&vol, "/clones/copy1.bin"));
+    let after = reference_counts(&vol);
+    assert_eq!(after.1, before.1 + 2560, "10 MiB: 2560 clusters");
+    assert!(after.0.iter().all(|&(_, c)| c == 3));
+    assert_pages_valid(&vol, &skip, "Windows' clones cloned");
+}
+
 #[test]
 fn checking_volumes() {
     // Windows' volumes and ours after writing check clean; a damaged

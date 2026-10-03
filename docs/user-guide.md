@@ -481,6 +481,7 @@ refs mkdir devdrive.img --path /notes/archive --yes
 refs write devdrive.img --path /notes/log.txt --from more.txt --append --yes
 refs move devdrive.img --path /notes/log.txt --to /archive/log.txt --yes
 refs link devdrive.img --path /archive/log.txt --to /notes/log.txt --yes
+refs clone devdrive.img --path /archive/big.iso --to /notes/big.iso --yes
 ```
 
 `refs overwrite` replaces bytes inside a file (not beyond its end, not in
@@ -505,7 +506,11 @@ New data goes into the volume's data containers; when they are full
 and only then uses room in the metadata containers.
 `refs move` moves a file or directory into another directory and `refs
 link` gives a file another name (a hard link); changing a hard-linked
-file through one name changes it for all of them. `refs write --stream
+file through one name changes it for all of them. `refs clone` copies a
+file as a block clone, as `Copy-Item` does on a Dev Drive: the copy
+shares the file's clusters (counted in the block reference count table)
+and takes no room until one of them changes; writing to either later
+leaves the other as it was. `refs write --stream
 NAME` writes a named stream (an alternate data stream; up to 1 KiB stays
 in the file's record) and `refs delete --stream NAME`
 deletes one. `refs set --integrity

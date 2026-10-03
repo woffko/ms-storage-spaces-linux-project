@@ -9,6 +9,7 @@ pub mod error;
 pub mod file;
 pub mod node;
 pub mod page;
+mod refcount;
 mod util;
 pub mod volume;
 pub mod write;
