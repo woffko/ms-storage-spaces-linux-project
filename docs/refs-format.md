@@ -170,6 +170,14 @@ and refuses a page where that breaks: a zeroed hole made it report "an
 invalid metadata page" and refuse to mount the volume (**verified**; the
 tests check every page this way, Windows' pages included).
 
+Tables of more than one page: index nodes (level 1 and up; node flags:
+1 index, 2 root) hold a row per child whose key is the child's last key
+and whose value is the child's page reference; the last row has no key
+(row flag 2) and takes everything above. Pages below the root have no
+table descriptor (the u32 8 at 0x50, the node header at 0x58); the root's
+descriptor counts the table's rows (0x20) and the pages below the root
+(0x18) (**verified**: directories `refs` grew this way read on Windows).
+
 A directory's rows sort by type, then: file id rows (0x20) by id, name
 rows (0x30) by name compared without case (NTFS-like: upcased UTF-16
 units; the key flags at 2 do not count). (**verified** on the names of
@@ -350,6 +358,33 @@ table's rows for a text diff):
   attached it as healthy, `refsutil leak` found exactly the leaks it finds
   on the untouched volume, `refsutil triage /g` passed, and Windows
   committed its own transactions on top (`tools/vm/Test-RefsVolume.ps1`).
+
+## The log (MLog)
+
+Windows logs every transaction before it reaches a checkpoint, and when it
+attaches a volume it replays the records from the checkpoint's log
+sequence number (0x70: low u32, then high u32) to the end of the log
+("Log Restart Start/Last LSN" in the ReFS operational event log).
+Detaching an image without dismounting the volume first leaves records
+past the checkpoint (every volume `New-RefsVolume.ps1` made before it
+took the disk offline first had some); taking the disk offline makes
+ReFS write a checkpoint that covers the log (**verified**).
+
+* The control page ("MLog", the volume signature at 4, zero at 0x28)
+  sits among the volume's first clusters on plain volumes (cluster 0x30
+  on 4 KiB, 0x27 on 64 KiB clusters) and right after the log region on a
+  volume inside a space (4 KiB page 0x44000); nothing found so far points
+  at it. It gives the log's epoch (0x20) and its region, from 0xb8 to
+  0xc0 in 4 KiB pages (0x24000..0x44000 on every corpus volume).
+* Record pages (4 KiB): "MLog", the volume signature, the epoch at 0x20,
+  the record's LSN at 0x28 and the previous one at 0x30.
+
+The checkpoint misses changes when a record of the current epoch is not
+older than its LSN (**verified** against Windows' restart ranges). `refs
+info` reports it; `refs` reads only the checkpoint, and refuses to write
+such a volume: Windows would replay the logged changes over its own (a
+directory created on such a volume collided with objects the replay
+created, which lost the directory's contents).
 
 ## Not read yet
 

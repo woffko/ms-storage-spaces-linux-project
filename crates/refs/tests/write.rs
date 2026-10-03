@@ -429,7 +429,6 @@ fn creating_files() {
     // Refused before anything is written.
     let written = overlay.written_pages().len();
     for (path, why) in [
-        ("/many/new.txt", "a directory of several pages"),
         ("/new file.txt", "an existing name"),
         ("/кириллица2.txt", "a name that is not ASCII"),
     ] {
@@ -609,4 +608,169 @@ fn created_files_take_ids_past_the_directory_counter() {
         (before + 2, before + 2),
         "both object tables"
     );
+}
+
+#[test]
+fn creating_directories() {
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 133_500_000_000_000_000;
+    let objects = vol.object_ids().count();
+    vol.create_directory("/made on linux", now).unwrap();
+    vol.create_directory("/made on linux/inner", now).unwrap();
+    vol.create_file("/made on linux/a.txt", b"inside", now).unwrap();
+    vol.create_file("/made on linux/inner/b.bin", &vec![3u8; 70_000], now)
+        .unwrap();
+    vol.rename("/made on linux/a.txt", "a renamed.txt", now).unwrap();
+    vol.delete_file("/made on linux/inner/b.bin", now).unwrap();
+    assert_eq!(vol.object_ids().count(), objects + 2, "two new objects");
+    let e = vol.lookup("/made on linux").unwrap();
+    assert!(e.is_dir() && e.times.created == now, "{e:?}");
+    let names: Vec<String> = vol
+        .read_dir(vol_dir(&vol, "/made on linux"))
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(names, ["a renamed.txt", "inner"]);
+    assert_eq!(read_all(&vol, "/made on linux/a renamed.txt"), b"inside");
+    assert!(vol.read_dir(vol_dir(&vol, "/made on linux/inner")).unwrap().is_empty());
+    // The parent-child table names the new directories under their parents.
+    let mut links = Vec::new();
+    vol.walk(&vol.checkpoint.roots[4].clone(), false, &mut |row| {
+        links.push((
+            u64::from_le_bytes(row.key[8..16].try_into().unwrap()),
+            u64::from_le_bytes(row.key[24..32].try_into().unwrap()),
+        ));
+        Ok(())
+    })
+    .unwrap();
+    let outer = vol_dir(&vol, "/made on linux");
+    assert!(
+        links.contains(&(ROOT_DIRECTORY, outer)) && links.contains(&(outer, vol_dir(&vol, "/made on linux/inner")))
+    );
+    assert_allocated(&vol, &skip, "directories");
+    assert_pages_valid(&vol, &skip, "directories");
+    // Everything Windows wrote reads as before.
+    let fresh = Volume::open(&overlay, offset).unwrap();
+    let mut changed = manifest.clone();
+    let entries = changed["entries"].as_array_mut().unwrap();
+    entries.push(
+        serde_json::json!({"path": "made on linux", "kind": "dir", "attributes": 0x10, "created": now, "written": now}),
+    );
+    entries.push(serde_json::json!({"path": "made on linux/inner", "kind": "dir", "attributes": 0x10, "created": now, "written": now}));
+    entries.push(serde_json::json!({"path": "made on linux/a renamed.txt", "kind": "file", "attributes": 0x20, "created": now, "written": now, "size": 6,
+        "sha256": refs::checksum::sha256(b"inside").iter().map(|b| format!("{b:02x}")).collect::<String>()}));
+    let problems = common::compare(&fresh, &changed);
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+fn vol_dir<D: ReadAt>(vol: &Volume<D>, path: &str) -> u64 {
+    match vol.lookup(path).unwrap().target {
+        refs::Target::Directory(oid) => oid,
+        _ => panic!("{path}: no directory"),
+    }
+}
+
+#[test]
+fn replacing_file_contents() {
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 133_600_000_000_000_000;
+    let big: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    let mut small = read_all(&vol, "/small.txt");
+    small.extend(b" and more");
+    let mid_clusters: Vec<u64> = {
+        let file = vol.open_file(&vol.lookup("/mid.bin").unwrap()).unwrap();
+        let refs::Content::Extents(x) = file.data.unwrap().content else {
+            panic!()
+        };
+        x.iter()
+            .flat_map(|x| {
+                let lcn = vol.translate(x.vlcn).unwrap();
+                lcn..lcn + x.clusters
+            })
+            .collect()
+    };
+    for (path, data) in [
+        ("/small.txt", small.clone()),       // inline, appended
+        ("/last.txt", big[..5000].to_vec()), // inline to clusters
+        ("/mid.bin", b"short now".to_vec()), // clusters to inline
+        ("/dir/inner.txt", big.clone()),     // clusters, larger
+    ] {
+        let before = vol.lookup(path).unwrap();
+        vol.write_file(path, &data, now).unwrap();
+        let after = vol.lookup(path).unwrap();
+        assert_eq!(read_all(&vol, path), data, "{path}");
+        assert_eq!(
+            (after.size, after.attributes, after.times.created, after.times.modified),
+            (data.len() as u64, before.attributes, before.times.created, now),
+            "{path}"
+        );
+    }
+    let used = used(&vol, 1);
+    assert!(
+        mid_clusters.iter().all(|c| !used.contains(c)),
+        "mid.bin's old clusters freed"
+    );
+    assert_allocated(&vol, &skip, "rewritten");
+    assert_pages_valid(&vol, &skip, "rewritten");
+}
+
+#[test]
+fn filling_directories_splits_their_pages() {
+    const COUNT: usize = 150;
+    let (image, manifest, skip) = load("r314basic4k");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 133_700_000_000_000_000;
+    // A directory of one page grows to a tree (its root splits, then its
+    // leaves), and a directory that is a tree already takes more names.
+    let names: Vec<String> = (0..COUNT)
+        .map(|i| format!("/deep/a/b/c/d/e/f/g/h/file {i:03}.txt"))
+        .collect();
+    for (i, path) in names.iter().enumerate() {
+        vol.create_file(path, &vec![i as u8; 900], now).unwrap();
+    }
+    vol.create_file("/many/added.txt", b"to a large directory", now)
+        .unwrap();
+    for (i, path) in names.iter().enumerate() {
+        assert_eq!(read_all(&vol, path), vec![i as u8; 900], "{path}");
+    }
+    assert_eq!(read_all(&vol, "/many/added.txt"), b"to a large directory");
+    let dir = vol_dir(&vol, "/deep/a/b/c/d/e/f/g/h");
+    assert_eq!(
+        vol.read_dir(dir).unwrap().len(),
+        COUNT + 1,
+        "leaf.bin and the new files"
+    );
+    // Some go again (none empties a page).
+    for path in names.iter().step_by(7) {
+        vol.delete_file(path, now).unwrap();
+    }
+    assert_eq!(vol.read_dir(dir).unwrap().len(), COUNT + 1 - COUNT.div_ceil(7));
+    assert_allocated(&vol, &skip, "split");
+    assert_pages_valid(&vol, &skip, "split");
+    let fresh = Volume::open(&overlay, offset).unwrap();
+    assert_eq!(read_all(&fresh, &names[1]), vec![1u8; 900]);
+}
+
+#[test]
+fn writes_wait_for_windows_to_replay_its_log() {
+    // A volume detached without a checkpoint over its log (Windows would
+    // replay the log over anything written now): every write is refused.
+    let (image, manifest, _) = load("r314integ");
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, manifest["partition_offset"].as_u64().unwrap()).unwrap();
+    assert!(vol.log_state().unwrap().needs_replay());
+    let err = vol.create_file("/new.txt", b"x", 1).unwrap_err();
+    assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
+    let err = vol.set_attributes("/sizes/size_100.bin", 0x21).unwrap_err();
+    assert!(matches!(err, refs::Error::Unsupported(_)), "{err}");
+    assert!(overlay.written_pages().is_empty());
 }

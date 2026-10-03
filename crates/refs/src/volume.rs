@@ -54,6 +54,8 @@ pub struct Volume<D> {
     /// Clusters per container, and each container's first physical cluster.
     pub clusters_per_container: u64,
     pub(crate) containers: BTreeMap<u64, u64>,
+    /// The log's state, read once (commits by `refs` leave the log alone).
+    log: std::sync::OnceLock<LogState>,
     objects: BTreeMap<u64, PageRef>,
 }
 
@@ -111,6 +113,7 @@ impl<D: ReadAt> Volume<D> {
             containers: BTreeMap::new(),
             objects: BTreeMap::new(),
             checkpoint_lcns: Vec::new(),
+            log: std::sync::OnceLock::new(),
         };
         vol.load()?;
         Ok(vol)
@@ -207,6 +210,61 @@ impl<D: ReadAt> Volume<D> {
             roots,
             root_offsets,
         })
+    }
+
+    /// The log (MLog): the checkpoint's log sequence number and the newest
+    /// record's. Windows replays records from the checkpoint's on when it
+    /// attaches the volume, so while the newest is not older, the volume
+    /// on disk is the checkpoint plus changes only the log holds (`refs`
+    /// reads the checkpoint, and must not write: the replay would land on
+    /// top of its changes).
+    pub fn log_state(&self) -> Result<LogState> {
+        if let Some(&state) = self.log.get() {
+            return Ok(state);
+        }
+        let state = self.read_log_state()?;
+        Ok(*self.log.get_or_init(|| state))
+    }
+
+    fn read_log_state(&self) -> Result<LogState> {
+        const PAGE: u64 = 4096;
+        let checkpoint = Lsn::from(le64(&self.read_physical(self.checkpoint.lcn, 1)?, 0x70));
+        // The control page, where Windows put it so far: among the
+        // volume's first clusters (plain volumes), or right after the log
+        // region at its usual place, 4 KiB pages 0x24000..0x44000 (a
+        // volume inside a space). Neither: the log is not understood.
+        let signature = le32(&self.read_physical(SUPERBLOCK_LCN, 1)?, 0x0c);
+        let is_control = |c: &[u8]| &c[0..4] == b"MLog" && le32(c, 4) == signature && le64(c, 0x28) == 0;
+        let mut control = None;
+        for lcn in 0..0x400u64.min(self.boot.volume_size() / self.cluster) {
+            let c = self.read_physical(lcn, 1)?;
+            if is_control(&c) {
+                control = Some(c);
+                break;
+            }
+        }
+        if control.is_none() {
+            let mut c = vec![0u8; PAGE as usize];
+            if self.dev.read_exact_at(&mut c, self.offset + 0x44000 * PAGE).is_ok() && is_control(&c) {
+                control = Some(c);
+            }
+        }
+        let control = control.ok_or_else(|| format_err!("no log control page"))?;
+        let (epoch, start, end) = (le64(&control, 0x20), le64(&control, 0xb8), le64(&control, 0xc0));
+        if start >= end || (end - start) > 1 << 22 {
+            return Err(format_err!("log of pages {start:#x}..{end:#x}"));
+        }
+        // Every record page of the current epoch.
+        let mut newest = None;
+        let mut head = [0u8; 0x30];
+        for page in start..end {
+            self.dev.read_exact_at(&mut head, self.offset + page * PAGE)?;
+            if &head[0..4] == b"MLog" && le32(&head, 4) == signature && le64(&head, 0x20) == epoch {
+                let lsn = Lsn::from(le64(&head, 0x28));
+                newest = newest.max(Some(lsn));
+            }
+        }
+        Ok(LogState { checkpoint, newest })
     }
 
     /// Reads `count` clusters from physical cluster `lcn`.
@@ -408,5 +466,37 @@ impl<D: ReadAt> Volume<D> {
             .ok_or_else(|| format_err!("cluster {vlcn:#x} beyond any device"))?;
         self.dev.read_exact_at(buf, at)?;
         Ok(())
+    }
+}
+
+/// A log sequence number: (wrap, sequence) as ReFS stores it (u32 low
+/// part first), ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Lsn {
+    pub high: u32,
+    pub low: u32,
+}
+
+impl From<u64> for Lsn {
+    fn from(v: u64) -> Self {
+        Lsn {
+            high: (v >> 32) as u32,
+            low: v as u32,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LogState {
+    /// Where the checkpoint's view of the volume ends in the log.
+    pub checkpoint: Lsn,
+    /// The newest record in the log.
+    pub newest: Option<Lsn>,
+}
+
+impl LogState {
+    /// Records Windows would replay over the checkpoint.
+    pub fn needs_replay(&self) -> bool {
+        self.newest.is_some_and(|n| n >= self.checkpoint)
     }
 }

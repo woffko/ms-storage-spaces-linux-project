@@ -9,8 +9,8 @@ Dev Drive (ReFS; Windows 11 Pro formats ReFS only as a Dev Drive). Then
 the tree of the scenario is written and manifest.json lists every file and
 directory: path, kind, size, SHA-256 of the data and of each alternate
 stream, attributes, the four timestamps, hard link groups, link targets,
-sparse ranges. The VHDX is detached at the end. Run on the Windows test VM
-only.
+sparse ranges. The VHDX is detached at the end, after taking its disk
+offline so that the volume's log is clean. Run on the Windows test VM only.
 
 Scenarios:
   basic   names (Unicode, 240 characters, spaces), sizes around cluster and page
@@ -354,6 +354,12 @@ public static class RefsGen {
     }
     $manifest | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $dir 'manifest.json')
     "$Name`: $($entries.Count) entries, ReFS $($manifest.refs_version), $ClusterSize-byte clusters"
+    # A clean end: taking the disk offline dismounts the volume, and ReFS
+    # writes a checkpoint that covers its log (detaching the image alone
+    # leaves records Windows replays at the next attach, and refs refuses
+    # to write such a volume).
+    Write-VolumeCache -DriveLetter $part.DriveLetter
+    Set-Disk -Number $disk.Number -IsOffline $true
 } finally {
     foreach ($f in $images) { Dismount-DiskImage -ImagePath $f -ErrorAction SilentlyContinue | Out-Null }
 }

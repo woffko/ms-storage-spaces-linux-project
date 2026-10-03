@@ -324,7 +324,7 @@ impl<D: ReadAt> Volume<D> {
     /// is the lowest, so the walk stops at the first row of another type
     /// (the whole tree of a large directory is megabytes); a tree in
     /// another order is searched in full.
-    fn own_row(&self, oid: u64) -> Result<Vec<u8>> {
+    pub(crate) fn own_row(&self, oid: u64) -> Result<Vec<u8>> {
         let mut own = None;
         self.walk_while(&self.object(oid)?.clone(), false, &mut |row| {
             let kind = le16(row.key, 0);

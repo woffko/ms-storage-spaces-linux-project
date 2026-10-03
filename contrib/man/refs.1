@@ -70,6 +70,21 @@ refs \- read Microsoft ReFS volumes on Linux
 .B \-\-path
 .I file
 .RB [ \-\-yes ]
+.br
+.B refs mkdir
+.I device
+.B \-\-path
+.I directory
+.RB [ \-\-yes ]
+.br
+.B refs write
+.I device
+.B \-\-path
+.I file
+.B \-\-from
+.I local-file
+.RB [ \-\-append ]
+.RB [ \-\-yes ]
 .PP
 where
 .I source
@@ -89,10 +104,12 @@ their data, sparse files, alternate data streams, hard links, symbolic
 links and junctions, attributes and times. Only
 .BR set ,
 .BR overwrite ,
+.BR write ,
 .BR create ,
-.B rename
-and
+.BR rename ,
 .B delete
+and
+.B mkdir
 write to the volume.
 .PP
 Every metadata page is checked against the checksum its reference
@@ -188,6 +205,25 @@ Rename a file within its directory, or delete it (not hard links;
 deleting a file with data clusters is refused on volumes with cloned or
 deduplicated clusters). Experimental; only with
 .BR \-\-yes .
+.TP
+.B mkdir
+Create a directory. Experimental; only with
+.BR \-\-yes .
+.TP
+.B write
+Replace a file's content with that of
+.IR local-file ,
+or with
+.B \-\-append
+add it to the end; the file keeps its creation time, attributes and
+permissions (up to 64 MiB; not files with named streams, snapshots or
+integrity streams). Experimental; only with
+.BR \-\-yes .
+.PP
+The writing commands refuse a volume whose log holds changes its last
+checkpoint lacks (a volume detached without being dismounted;
+.B refs info
+shows it): attach it to Windows once and remove it safely first.
 .SH LIMITS
 Verified against Windows on ReFS 3.14 volumes with 4 KiB and 64 KiB
 clusters, CRC-64 and SHA-256 metadata checksums and integrity streams.

@@ -179,6 +179,36 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Create a directory (experimental: writes the volume, only with
+    /// --yes; a printable ASCII name; small volumes and directories).
+    Mkdir {
+        /// The image, disk or partition.
+        device: PathBuf,
+        #[arg(long)]
+        offset: Option<u64>,
+        #[arg(long)]
+        path: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Replace a file's content with a local file's, or append it
+    /// (experimental: writes the volume, only with --yes; up to 64 MiB; not
+    /// files with named streams, snapshots or integrity streams).
+    Write {
+        /// The image, disk or partition.
+        device: PathBuf,
+        #[arg(long)]
+        offset: Option<u64>,
+        #[arg(long)]
+        path: String,
+        #[arg(long)]
+        from: PathBuf,
+        /// Add to the end instead of replacing.
+        #[arg(long)]
+        append: bool,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Every cluster the volume uses, by physical cluster: superblocks,
     /// checkpoints, the pages of each tree, the data runs of each file
     /// (for format work: what changed between two images).
@@ -628,6 +658,8 @@ fn fixture(dir: &std::path::Path, out: &std::path::Path, data_limit: u64, exclud
                 tree_pages(&vol, &vol.object(oid)?.clone(), false, "", 0, &mut std::io::sink())?;
             }
         }
+        // The log's control and record pages (writing checks the log).
+        vol.log_state()?;
         excluded = excluded_objects;
     }
     let mut image = SparseImage::new(dev.size()?);
@@ -709,6 +741,21 @@ fn main() -> Result<()> {
             )?;
             writeln!(out, "containers  {} clusters each", vol.clusters_per_container)?;
             writeln!(out, "objects     {}", vol.object_ids().count())?;
+            match vol.log_state() {
+                Ok(log) if log.needs_replay() => writeln!(
+                    out,
+                    "log         records past the checkpoint (up to {:#x}:{:#x}): Windows replays them when it \
+                     attaches the volume; refs shows the checkpoint and does not write",
+                    log.newest.unwrap().high,
+                    log.newest.unwrap().low
+                )?,
+                Ok(log) => writeln!(
+                    out,
+                    "log         clean at {:#x}:{:#x}",
+                    log.checkpoint.high, log.checkpoint.low
+                )?,
+                Err(e) => writeln!(out, "log         unreadable: {e}")?,
+            }
         }
         Command::Ls {
             source,
@@ -905,6 +952,59 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             vol.rename(&path, &to, now())?;
+            writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
+        }
+        Command::Mkdir {
+            device,
+            offset,
+            path,
+            yes,
+        } => {
+            let mut vol = open_writable(&device, offset, yes)?;
+            writeln!(out, "{path}: create directory")?;
+            if !yes {
+                writeln!(out, "nothing written (--yes writes)")?;
+                return Ok(());
+            }
+            vol.create_directory(&path, now())?;
+            writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
+        }
+        Command::Write {
+            device,
+            offset,
+            path,
+            from,
+            append,
+            yes,
+        } => {
+            let bytes = std::fs::read(&from).with_context(|| format!("cannot read {}", from.display()))?;
+            let mut vol = open_writable(&device, offset, yes)?;
+            let data = if append {
+                let e = vol.lookup(&path)?;
+                let file = vol.open_file(&e)?;
+                let mut old = Vec::new();
+                if let Some(s) = &file.data {
+                    old.resize(s.size as usize, 0);
+                    let mut at = 0;
+                    while at < old.len() {
+                        let n = vol.read_stream(s, at as u64, &mut old[at..])?;
+                        if n == 0 {
+                            break;
+                        }
+                        at += n;
+                    }
+                }
+                old.extend(&bytes);
+                old
+            } else {
+                bytes
+            };
+            writeln!(out, "{path}: {} bytes", data.len())?;
+            if !yes {
+                writeln!(out, "nothing written (--yes writes)")?;
+                return Ok(());
+            }
+            vol.write_file(&path, &data, now())?;
             writeln!(out, "written: checkpoint clock {}", vol.checkpoint.clock)?;
         }
         Command::Tree { source, root, object } => {

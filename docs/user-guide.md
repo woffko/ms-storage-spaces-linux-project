@@ -431,6 +431,13 @@ fails is reported, not guessed at. The data of integrity streams
 checked on every read too: damaged data is an error (EIO in the mount),
 never returned.
 
+`refs` reads the volume's last checkpoint. A volume that was detached
+without being dismounted (the disk image detached, the cable pulled) can
+have newer changes in its log, which Windows replays when it attaches the
+volume again; `refs info` says so ("records past the checkpoint"), and the
+writing commands refuse such a volume: attach it to Windows once and take
+it offline or safely remove it before writing with `refs`.
+
 Changing a file's times or attributes is the first write `refs` does
 (experimental; a ReFS volume that is not attached anywhere else; only
 with `--yes`, otherwise it prints what would change):
@@ -442,6 +449,8 @@ refs overwrite devdrive.img --path /data.bin --at 4096 --from patch.bin --yes
 refs create devdrive.img --path /notes/todo.txt --from todo.txt --yes
 refs rename devdrive.img --path /notes/todo.txt --to done.txt --yes
 refs delete devdrive.img --path /notes/done.txt --yes
+refs mkdir devdrive.img --path /notes/archive --yes
+refs write devdrive.img --path /notes/log.txt --from more.txt --append --yes
 ```
 
 `refs overwrite` replaces bytes inside a file (not beyond its end, not in
@@ -453,7 +462,10 @@ small enough to fit one metadata page; it takes the permissions of the
 files beside it. `refs rename` (within the directory)
 and `refs delete` work on files whose record is in their directory entry
 (most files; not hard links); deleting a file with data clusters is
-refused on volumes with block-cloned or deduplicated clusters.
+refused on volumes with block-cloned or deduplicated clusters. `refs
+mkdir` creates a directory; `refs write` replaces a file's content (or
+appends to it with `--append`), keeping its creation time, attributes and
+permissions.
 
 It writes the way Windows does (copy on write, then a new checkpoint), so
 an interruption leaves the volume as it was before. Files whose record
@@ -467,8 +479,8 @@ symbolic links and junctions, attributes and times, volumes with 4 KiB
 and 64 KiB clusters, CRC-64 or SHA-256 metadata checksums and integrity
 streams (verified on ReFS 3.14 volumes made by Windows 11). Not read yet:
 compressed files, encrypted files, ReFS 1.x/2.x; writing ReFS beyond
-times, attributes, overwriting, and creating, renaming and deleting
-files is not supported yet.
+times, attributes, overwriting and rewriting files, creating, renaming
+and deleting files and creating directories is not supported yet.
 
 ## Troubleshooting
 

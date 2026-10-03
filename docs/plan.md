@@ -693,8 +693,28 @@ rows of thin spaces not allocated yet (M7).
   object table rows (0x50); the first creates took the highest id in use
   plus one and left the counter, so Windows could have given the same id
   again; `refs create` now raises the counter in both object tables (on
-  Windows: our file id 5, Windows' next 6). Next: growing files,
-  directories, splitting pages.
+  Windows: our file id 5, Windows' next 6). `refs mkdir`: a new object
+  (the object table's counter, descriptor 0x38), a one-page tree with the
+  directory's record (a link to its parent and name, an empty $I30),
+  rows in both object tables and the parent-child table, an entry in the
+  parent; identical to Windows' rows for the same directory. The log: on
+  a volume Windows had detached without checkpointing, the replay at the
+  next attach created objects with the id `refs` had just given a new
+  directory; writes are now refused while the log has records past the
+  checkpoint, `refs info` shows the log's state, and the corpus is made
+  with clean logs (the disk taken offline before detaching). `refs write`
+  replaces a file's content (appending, growing into clusters, shrinking
+  back into the record) as a new record that keeps the file's id, times,
+  attributes and security. Tables of any depth: rows go into the leaf
+  whose key range holds them (index rows hold their child's last key, the
+  last one none), a full page splits (a root grows a level; the
+  descriptor counts the pages below the root at 0x18). On Windows: two
+  new directories, files in them, an appended and a shrunk file and 150
+  new files in one directory (its page split) read back with their
+  hashes, `refsutil leak` and `triage` as on the untouched volume, and
+  Windows then wrote in those directories. Next: merging pages, splitting
+  full index pages, hard links and moves between directories, named
+  streams, integrity streams.
 
 ## Test infrastructure (continuous, feeds every stage)
 

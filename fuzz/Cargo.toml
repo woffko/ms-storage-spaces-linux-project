@@ -111,3 +111,10 @@ path = "fuzz_targets/refs_volume.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "refs_write"
+path = "fuzz_targets/refs_write.rs"
+test = false
+doc = false
+bench = false

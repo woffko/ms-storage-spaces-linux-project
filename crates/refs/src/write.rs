@@ -68,8 +68,10 @@ struct Page {
     /// The physical clusters it was read from.
     old: Vec<u64>,
     data: Vec<u8>,
-    /// The parent page and the offset of this page's reference in it.
-    parent: Option<(usize, usize)>,
+    /// The parent page and the key of the row there that references this
+    /// page (empty for the last row): rows move when pages change, keys
+    /// stay.
+    parent: Option<(usize, Vec<u8>)>,
     dirty: bool,
     /// The physical clusters it is written to.
     new: Option<Vec<u64>>,
@@ -95,7 +97,20 @@ pub struct Transaction<'v, D> {
 }
 
 impl<'v, D: WriteAt> Transaction<'v, D> {
-    pub fn new(vol: &'v Volume<D>) -> Self {
+    /// A transaction on the volume; refused while the log holds records
+    /// Windows would replay over the checkpoint.
+    pub fn begin(vol: &'v Volume<D>) -> Result<Self> {
+        if vol.log_state()?.needs_replay() {
+            return Err(Error::Unsupported(
+                "the volume's log has changes its checkpoint lacks (Windows replays them when it next \
+                 attaches the volume): attach it to Windows once and detach it before writing"
+                    .into(),
+            ));
+        }
+        Ok(Self::new(vol))
+    }
+
+    fn new(vol: &'v Volume<D>) -> Self {
         Transaction {
             vol,
             pages: Vec::new(),
@@ -110,7 +125,7 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
     }
 
     /// Copies the page a reference names (once per transaction).
-    fn load(&mut self, tree: Tree, r: &PageRef, depth: usize, parent: Option<(usize, usize)>) -> Result<usize> {
+    fn load(&mut self, tree: Tree, r: &PageRef, depth: usize, parent: Option<(usize, Vec<u8>)>) -> Result<usize> {
         let old = r.lcns[..self.per_page()]
             .iter()
             .map(|&l| if tree.physical() { Ok(l) } else { self.vol.translate(l) })
@@ -178,13 +193,11 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
                         });
                     }
                 } else {
-                    children.push((value, row.value.to_vec()));
+                    children.push((row.key.to_vec(), row.value.to_vec()));
                 }
             }
-            let depth = self.pages[i].depth + 1;
-            for (at, r) in children.into_iter().rev() {
-                let r = PageRef::parse(&r)?;
-                stack.push(self.load(tree, &r, depth, Some((i, at)))?);
+            for (key, r) in children.into_iter().rev() {
+                stack.push(self.child(tree, i, key, &r)?);
             }
         }
         Ok(out)
@@ -203,7 +216,7 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         let mut i = Some(at.page);
         while let Some(j) = i {
             self.pages[j].dirty = true;
-            i = self.pages[j].parent.map(|p| p.0);
+            i = self.pages[j].parent.as_ref().map(|p| p.0);
         }
         &mut self.pages[at.page].data[at.value..at.value + at.len]
     }
@@ -337,14 +350,21 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         Ok(())
     }
 
-    /// The root page of a directory that is one page (leaf) only.
-    fn single_page(&mut self, dir: u64) -> Result<usize> {
-        let root = self.root(Tree::Object(dir))?;
-        let d = &self.pages[root].data;
-        if d[PAGE_HEADER_SIZE + le32(d, PAGE_HEADER_SIZE) as usize + 0x0c] != 0 {
-            return Err(Error::Unsupported("directories of more than one page".into()));
-        }
-        Ok(root)
+    /// A page the transaction adds: the root of a new table (it gets
+    /// clusters on commit; there are no old ones to free).
+    fn new_root(&mut self, tree: Tree, data: Vec<u8>) -> usize {
+        self.pages.push(Page {
+            tree,
+            depth: 0,
+            old: Vec::new(),
+            data,
+            parent: None,
+            dirty: true,
+            new: None,
+        });
+        let i = self.pages.len() - 1;
+        self.roots.insert(tree, i);
+        i
     }
 
     /// A directory's last file id given out (its object table row, 0x50).
@@ -370,43 +390,30 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         Ok(())
     }
 
-    /// The keys of a page's rows.
-    fn keys(&self, page: usize) -> Result<Vec<Vec<u8>>> {
-        Node::at(&self.pages[page].data, PAGE_HEADER_SIZE)?
-            .rows()
-            .map(|r| r.map(|r| r.key.to_vec()))
-            .collect()
-    }
-
-    /// Inserts a row into a leaf page (in key order, by `before`: whether
-    /// the new row goes before an existing key), in the free space between
-    /// the rows and the key index at the page's end, and counts it in the
-    /// table's descriptor.
-    fn insert(&mut self, page: usize, row: &[u8], before: &dyn Fn(&[u8]) -> bool) -> Result<()> {
+    /// Puts a row into a node (leaf or index) in the free space between
+    /// its rows and its key index (compacting it first when the space is
+    /// in holes), and counts it in the table's descriptor when `count`
+    /// (leaf rows). False: no room in the page.
+    fn place(&mut self, page: usize, row: &[u8], before: &dyn Fn(&[u8]) -> bool, count: bool) -> Result<bool> {
         let d = &self.pages[page].data;
         let h = PAGE_HEADER_SIZE + le32(d, PAGE_HEADER_SIZE) as usize;
-        let (end, free, index, count) = (
+        let (end, free, index, rows) = (
             le32(d, h + 4) as usize,
             le32(d, h + 8) as usize,
             le32(d, h + 0x10) as usize,
             le32(d, h + 0x14) as usize,
         );
-        if d[h + 0x0c] != 0 {
-            return Err(Error::Unsupported("inserting into an index node".into()));
-        }
         let size = row.len().next_multiple_of(8);
         if free < size + 4 {
-            return Err(Error::Unsupported(
-                "the page is full (splitting it is not done yet)".into(),
-            ));
+            return Ok(false);
         }
         if end + size + 4 > index {
             self.compact(page)?;
-            return self.insert(page, row, before);
+            return self.place(page, row, before, count);
         }
         // Where in the key index the row goes.
         let node = Node::at(d, PAGE_HEADER_SIZE)?;
-        let mut pos = count;
+        let mut pos = rows;
         for (i, r) in node.rows().enumerate() {
             if before(r?.key) {
                 pos = i;
@@ -424,12 +431,250 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         put(d, h + 4, (end + size) as u32);
         put(d, h + 8, (free - size - 4) as u32);
         put(d, h + 0x10, (index - 4) as u32);
-        put(d, h + 0x14, (count + 1) as u32);
-        // The table's row count (in the descriptor of its root page).
+        put(d, h + 0x14, (rows + 1) as u32);
+        if count {
+            self.count_rows(page, 1);
+        }
+        Ok(true)
+    }
+
+    /// Adds to the table's row count (its root page's descriptor, 0x20).
+    fn count_rows(&mut self, page: usize, by: i64) {
         let root = self.roots[&self.pages[page].tree];
+        self.mark(root);
         let d = &mut self.pages[root].data;
-        let rows = le64(d, PAGE_HEADER_SIZE + 0x20) + 1;
+        let rows = (le64(d, PAGE_HEADER_SIZE + 0x20) as i64 + by) as u64;
         d[PAGE_HEADER_SIZE + 0x20..PAGE_HEADER_SIZE + 0x28].copy_from_slice(&rows.to_le_bytes());
+    }
+
+    /// Adds to the table's count of pages below its root (0x18).
+    fn count_pages(&mut self, tree: Tree, by: u64) {
+        let root = self.roots[&tree];
+        self.mark(root);
+        let d = &mut self.pages[root].data;
+        let pages = le64(d, PAGE_HEADER_SIZE + 0x18) + by;
+        d[PAGE_HEADER_SIZE + 0x18..PAGE_HEADER_SIZE + 0x20].copy_from_slice(&pages.to_le_bytes());
+    }
+
+    /// Inserts a leaf row in key order (`order` compares keys; an empty
+    /// key, the last row of an index node, is above every key) into a table
+    /// of any depth, splitting pages that are full.
+    fn insert_sorted(
+        &mut self,
+        tree: Tree,
+        row: &[u8],
+        order: &dyn Fn(&[u8], &[u8]) -> std::cmp::Ordering,
+    ) -> Result<()> {
+        let key = row_key(row).to_vec();
+        for _ in 0..16 {
+            let leaf = self.find_leaf(tree, &key, order)?;
+            if self.place(leaf, row, &|k| order(&key, k).is_lt(), true)? {
+                return Ok(());
+            }
+            self.split(tree, leaf, order)?;
+        }
+        Err(format_err!("no room for a row in table {tree:?}"))
+    }
+
+    /// The leaf whose key range holds `key`.
+    fn find_leaf(
+        &mut self,
+        tree: Tree,
+        key: &[u8],
+        order: &dyn Fn(&[u8], &[u8]) -> std::cmp::Ordering,
+    ) -> Result<usize> {
+        let mut page = self.root(tree)?;
+        for _ in 0..16 {
+            let node = Node::at(&self.pages[page].data, PAGE_HEADER_SIZE)?;
+            if node.is_leaf() {
+                return Ok(page);
+            }
+            let mut pick = None;
+            for row in node.rows() {
+                let row = row?;
+                pick = Some((row.key.to_vec(), row.value.to_vec()));
+                if row.key.is_empty() || order(key, row.key).is_le() {
+                    break;
+                }
+            }
+            let (k, v) = pick.ok_or_else(|| format_err!("an index node without rows"))?;
+            page = self.child(tree, page, k, &v)?;
+        }
+        Err(format_err!("table {tree:?} deeper than 16 levels"))
+    }
+
+    /// The child page an index row names: one this transaction made or
+    /// already copied, else read.
+    fn child(&mut self, tree: Tree, parent: usize, key: Vec<u8>, reference: &[u8]) -> Result<usize> {
+        if let Some(i) = self
+            .pages
+            .iter()
+            .position(|p| p.parent.as_ref() == Some(&(parent, key.clone())))
+        {
+            return Ok(i);
+        }
+        let depth = self.pages[parent].depth + 1;
+        self.load(tree, &PageRef::parse(reference)?, depth, Some((parent, key)))
+    }
+
+    /// The rows of a node in key order: (key, the whole row).
+    fn node_rows(&self, page: usize) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let d = &self.pages[page].data;
+        let h = PAGE_HEADER_SIZE + le32(d, PAGE_HEADER_SIZE) as usize;
+        let (index, count) = (le32(d, h + 0x10) as usize, le32(d, h + 0x14) as usize);
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let at = h + (le32(d, h + index + 4 * i) & 0xffff) as usize;
+            let size = le32(d, at) as usize;
+            let row = d
+                .get(at..at + size)
+                .ok_or_else(|| format_err!("row outside its page"))?;
+            out.push((row_key(row).to_vec(), row.to_vec()));
+        }
+        Ok(out)
+    }
+
+    /// Lays out a node anew: `rows` from the start of its row area, the key
+    /// index at the end of the page.
+    fn write_node(&mut self, page: usize, level: u8, flags: u8, rows: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
+        self.mark(page);
+        let d = &mut self.pages[page].data;
+        let h = PAGE_HEADER_SIZE + le32(d, PAGE_HEADER_SIZE) as usize;
+        let area = d.len() - h;
+        let used: usize = rows.iter().map(|(_, r)| r.len()).sum();
+        let index = area - 4 * rows.len();
+        if 0x28 + used > index {
+            return Err(format_err!("{} bytes of rows for a node of {area}", used));
+        }
+        d[h..].fill(0);
+        let put = |d: &mut Vec<u8>, at: usize, v: u32| d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        let mut at = 0x28;
+        for (i, (_, r)) in rows.iter().enumerate() {
+            d[h + at..h + at + r.len()].copy_from_slice(r);
+            put(d, h + index + 4 * i, 0xffff_0000 | at as u32);
+            at += r.len();
+        }
+        put(d, h, 0x28);
+        put(d, h + 4, at as u32);
+        put(d, h + 8, (index - at) as u32);
+        d[h + 0x0c] = level;
+        d[h + 0x0d] = flags;
+        put(d, h + 0x10, index as u32);
+        put(d, h + 0x14, rows.len() as u32);
+        put(d, h + 0x20, area as u32);
+        Ok(())
+    }
+
+    /// A new page below `parent` (the table's root lends its header; no
+    /// table descriptor: the node header follows at 0x58).
+    fn new_child(&mut self, tree: Tree, parent: usize, key: Vec<u8>) -> usize {
+        let root = self.roots[&tree];
+        let mut data = vec![0u8; self.pages[root].data.len()];
+        data[..PAGE_HEADER_SIZE].copy_from_slice(&self.pages[root].data[..PAGE_HEADER_SIZE]);
+        data[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + 4].copy_from_slice(&8u32.to_le_bytes());
+        let depth = self.pages[parent].depth + 1;
+        self.pages.push(Page {
+            tree,
+            depth,
+            old: Vec::new(),
+            data,
+            parent: Some((parent, key)),
+            dirty: true,
+            new: None,
+        });
+        self.pages.len() - 1
+    }
+
+    /// An index row for a child page (its reference, laid out like the
+    /// checkpoint's, is filled on commit).
+    fn index_row(&self, key: &[u8]) -> Result<Vec<u8>> {
+        let (at, size) = (
+            self.vol.checkpoint.root_offsets[ROOT_OBJECTS],
+            self.vol.checkpoint.reference_size,
+        );
+        let mut reference = self.vol.read_physical(self.vol.checkpoint.lcn, 1)?[at..at + size].to_vec();
+        reference[..0x20].fill(0);
+        Ok(row(key, &reference, if key.is_empty() { ROW_LAST } else { 0 }))
+    }
+
+    /// Splits a full page in two by size: a root becomes an index node over
+    /// two new pages; another page keeps its first half, a new page after it
+    /// takes the rest, and the parent gets a row for the first half.
+    fn split(&mut self, tree: Tree, page: usize, order: &dyn Fn(&[u8], &[u8]) -> std::cmp::Ordering) -> Result<()> {
+        let d = &self.pages[page].data;
+        let h = PAGE_HEADER_SIZE + le32(d, PAGE_HEADER_SIZE) as usize;
+        let (level, flags) = (d[h + 0x0c], d[h + 0x0d]);
+        let rows = self.node_rows(page)?;
+        if rows.len() < 2 {
+            return Err(format_err!("a row larger than half a page"));
+        }
+        let total: usize = rows.iter().map(|(_, r)| r.len()).sum();
+        let mut k = 1;
+        let mut size = rows[0].1.len();
+        while k < rows.len() - 1 && size + rows[k].1.len() <= total / 2 {
+            size += rows[k].1.len();
+            k += 1;
+        }
+        let (left, right) = rows.split_at(k);
+        let last_left = left.last().unwrap().0.clone();
+        // Children of the page (copied in this transaction) move with their
+        // rows: those of the second half, and all of them when the root
+        // splits (its children go to the two new pages).
+        let children: Vec<(usize, bool)> = (0..self.pages.len())
+            .filter_map(|i| match &self.pages[i].parent {
+                Some((parent, key)) if *parent == page => Some((i, left.iter().any(|(k, _)| k == key))),
+                _ => None,
+            })
+            .collect();
+        match self.pages[page].parent.clone() {
+            None => {
+                let l = self.new_child(tree, page, last_left.clone());
+                let r = self.new_child(tree, page, Vec::new());
+                for &(c, in_left) in &children {
+                    self.pages[c].parent.as_mut().unwrap().0 = if in_left { l } else { r };
+                }
+                let child_flags = flags & !NODE_ROOT;
+                self.write_node(l, level, child_flags, left)?;
+                self.write_node(r, level, child_flags, right)?;
+                let index = vec![
+                    (last_left.clone(), self.index_row(&last_left)?),
+                    (Vec::new(), self.index_row(&[])?),
+                ];
+                self.write_node(page, level + 1, NODE_INDEX | NODE_ROOT, &index)?;
+                self.count_pages(tree, 2);
+            }
+            Some((parent, key)) => {
+                // The parent takes a row for the first half; splitting a full
+                // parent as well is not done yet.
+                let index = self.index_row(&last_left)?;
+                if (le32(
+                    &self.pages[parent].data,
+                    PAGE_HEADER_SIZE + le32(&self.pages[parent].data, PAGE_HEADER_SIZE) as usize + 8,
+                ) as usize)
+                    < index.len().next_multiple_of(8) + 4
+                {
+                    return Err(Error::Unsupported(
+                        "a full index page (the table is too large for now)".into(),
+                    ));
+                }
+                let r = self.new_child(tree, parent, key);
+                for &(c, in_left) in &children {
+                    if !in_left {
+                        self.pages[c].parent.as_mut().unwrap().0 = r;
+                    }
+                }
+                self.write_node(page, level, flags, left)?;
+                self.write_node(r, level, flags, right)?;
+                self.pages[page].parent = Some((parent, last_left.clone()));
+                self.count_pages(tree, 1);
+                // The parent's row for the first half (its old row now names
+                // the second half).
+                let before = |k: &[u8]| k.is_empty() || order(&last_left, k).is_lt();
+                if !self.place(parent, &index, &before, false)? {
+                    return Err(format_err!("no room for an index row"));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -471,7 +716,13 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
     /// counts as free; the next compaction reuses it) and uncounts it in
     /// the table's descriptor.
     fn remove(&mut self, page: usize, this: &dyn Fn(&[u8]) -> bool) -> Result<()> {
-        let pos = Node::at(&self.pages[page].data, PAGE_HEADER_SIZE)?
+        let node = Node::at(&self.pages[page].data, PAGE_HEADER_SIZE)?;
+        if node.len() == 1 && self.pages[page].parent.is_some() {
+            return Err(Error::Unsupported(
+                "emptying a page of a table (merging pages is not done yet)".into(),
+            ));
+        }
+        let pos = node
             .rows()
             .position(|r| r.is_ok_and(|r| this(r.key)))
             .ok_or_else(|| Error::NotFound("row to remove".into()))?;
@@ -506,12 +757,31 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
         Ok(())
     }
 
+    /// Where, in an index page, the reference of the row with `key` is.
+    fn child_reference(&self, page: usize, key: &[u8]) -> Result<usize> {
+        let data = &self.pages[page].data;
+        let base = data.as_ptr() as usize;
+        for row in Node::at(data, PAGE_HEADER_SIZE)?.rows() {
+            let row = row?;
+            if row.key == key {
+                return Ok(row.value.as_ptr() as usize - base);
+            }
+        }
+        Err(format_err!("no index row for a child page"))
+    }
+
+    /// Removes the leaf row whose key `this` accepts, wherever in the table.
+    fn remove_row(&mut self, tree: Tree, this: &dyn Fn(&[u8]) -> bool) -> Result<()> {
+        let at = self.find(tree, this)?;
+        self.remove(at.page, this)
+    }
+
     /// Marks a page and those above it changed.
     fn mark(&mut self, page: usize) {
         let mut i = Some(page);
         while let Some(j) = i {
             self.pages[j].dirty = true;
-            i = self.pages[j].parent.map(|p| p.0);
+            i = self.pages[j].parent.as_ref().map(|p| p.0);
         }
     }
 
@@ -593,8 +863,9 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
                 }
                 objects_done = true;
             }
-            if let Some((parent, at)) = self.pages[i].parent {
+            if let Some((parent, key)) = self.pages[i].parent.clone() {
                 let data = self.pages[i].data.clone();
+                let at = self.child_reference(parent, &key)?;
                 store_reference(&mut self.pages[parent].data[at..at + reference_size], &names[&i], &data)?;
             }
         }
@@ -755,62 +1026,149 @@ impl<D: WriteAt> Volume<D> {
         let dir = self.directory_of(parent)?;
         let common = self.shared_security(dir)?;
         {
-            let mut tx = Transaction::new(&*self);
-            let root = tx.root(Tree::Object(dir))?;
+            let mut tx = Transaction::begin(&*self)?;
             // The next file id, and the value every record of the
             // directory carries at 0x50.
             // The next file id: past the directory's counter (its object
             // table rows, 0x50: the last id given out, never lowered) and
             // every id in use; the counter follows.
-            let keys = tx.keys(root)?;
-            let used = keys
+            let used = self
+                .object_rows(dir)?
                 .iter()
-                .filter(|k| k.len() >= 16 && le16(k, 0) == ROW_FILE_ID)
-                .map(|k| le64(k, 8))
+                .filter(|(k, _)| k.len() >= 16 && le16(k, 0) == ROW_FILE_ID)
+                .map(|(k, _)| le64(k, 8))
                 .max()
                 .unwrap_or(1);
             let next_id = used.max(tx.last_file_id(dir)?) + 1;
             tx.set_last_file_id(dir, next_id)?;
 
-            let record = if data.len() <= MAX_INLINE {
-                resident_record(data, now, next_id, common)
+            let band = if data.len() > MAX_INLINE {
+                Some(self.data_band(dir)?)
             } else {
-                // Data clusters where the data near it is, written now
-                // (they are free until the commit).
-                let band = self.data_band(dir)?;
-                let clusters = (data.len() as u64).div_ceil(self.cluster);
-                let runs = tx.take_data(band, clusters)?;
-                let mut at = 0usize;
-                let mut extents = Vec::new();
-                for &(lcn, n) in &runs {
-                    let len = ((n * self.cluster) as usize).min(data.len() - at);
-                    let mut buf = vec![0u8; (n * self.cluster) as usize];
-                    buf[..len].copy_from_slice(&data[at..at + len]);
-                    self.dev.write_all_at(&buf, self.offset + lcn * self.cluster)?;
-                    extents.push(((at as u64) / self.cluster, self.virtual_of(lcn)?, n));
-                    at += len;
-                }
-                self.dev.flush()?;
-                extent_record(
-                    data.len() as u64,
-                    clusters * self.cluster,
-                    &extents,
-                    now,
-                    next_id,
-                    common,
-                )
+                None
             };
+            let record = self.new_record(&mut tx, band, data, now, next_id, common)?;
             let utf16: Vec<u8> = name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
             // The file id row.
             let (key, value) = file_id_row(next_id, &utf16);
-            tx.insert(root, &row(&key, &value, 0), &|k| directory_key_order(&key, k).is_lt())?;
+            tx.insert_sorted(Tree::Object(dir), &row(&key, &value, 0), &directory_key_order)?;
             // The name row with the record.
             let mut key = vec![ROW_NAME as u8, 0, 1, 0];
             key.extend(&utf16);
-            tx.insert(root, &row(&key, &record, ROW_EMBEDS_NODE), &|k| {
-                directory_key_order(&key, k).is_lt()
-            })?;
+            tx.insert_sorted(
+                Tree::Object(dir),
+                &row(&key, &record, ROW_EMBEDS_NODE),
+                &directory_key_order,
+            )?;
             self.touch_directory(&mut tx, parent, dir, now)?;
+            tx.commit()?;
+        }
+        self.load()
+    }
+
+    /// A file record holding `data`: inline up to MAX_INLINE, else in
+    /// clusters taken from the data band `band` and written now (they are
+    /// free until the commit).
+    fn new_record(
+        &self,
+        tx: &mut Transaction<'_, D>,
+        band: Option<u64>,
+        data: &[u8],
+        now: u64,
+        id: u64,
+        security: u64,
+    ) -> Result<Vec<u8>> {
+        let Some(band) = band.filter(|_| data.len() > MAX_INLINE) else {
+            return Ok(resident_record(data, now, id, security));
+        };
+        let clusters = (data.len() as u64).div_ceil(self.cluster);
+        let runs = tx.take_data(band, clusters)?;
+        let mut at = 0usize;
+        let mut extents = Vec::new();
+        for &(lcn, n) in &runs {
+            let len = ((n * self.cluster) as usize).min(data.len() - at);
+            let mut buf = vec![0u8; (n * self.cluster) as usize];
+            buf[..len].copy_from_slice(&data[at..at + len]);
+            self.dev.write_all_at(&buf, self.offset + lcn * self.cluster)?;
+            extents.push(((at as u64) / self.cluster, self.virtual_of(lcn)?, n));
+            at += len;
+        }
+        self.dev.flush()?;
+        Ok(extent_record(
+            data.len() as u64,
+            clusters * self.cluster,
+            &extents,
+            now,
+            id,
+            security,
+        ))
+    }
+
+    /// Replaces a file's whole content with `data` (appending, truncating
+    /// and growing alike), as a new record that keeps the file's id,
+    /// creation and access times, attributes and security; its modification
+    /// and change times become `now`. Files with named streams, snapshots,
+    /// integrity checksums or a reparse point are refused for now, and so
+    /// are files with data clusters on volumes with shared clusters.
+    pub fn write_file(&mut self, path: &str, data: &[u8], now: u64) -> Result<()> {
+        if data.len() as u64 > MAX_CREATED {
+            return Err(Error::Unsupported(format!("files of more than {MAX_CREATED} bytes")));
+        }
+        let EmbeddedFile {
+            parent,
+            name,
+            dir,
+            record: old,
+            runs,
+        } = self.embedded_file(path)?;
+        let entry = self.lookup(path)?;
+        let file = self.open_file(&entry)?;
+        if !file.streams.is_empty() || !file.snapshots.is_empty() {
+            return Err(Error::Unsupported(format!(
+                "{path}: named streams, snapshots or integrity"
+            )));
+        }
+        if let Some(crate::file::Stream {
+            content: crate::file::Content::Extents(x),
+            ..
+        }) = &file.data
+            && x.iter().any(|x| x.checksums.is_some())
+        {
+            return Err(Error::Unsupported(format!("{path}: integrity stream")));
+        }
+        if !runs.is_empty() && self.has_shared_clusters()? {
+            return Err(Error::Unsupported(format!(
+                "{path}: the volume has shared (cloned or deduplicated) clusters"
+            )));
+        }
+        let band = if data.len() > MAX_INLINE {
+            Some(self.data_band(dir)?)
+        } else {
+            None
+        };
+        let (id, security) = (le64(&old, 0x80), le64(&old, 0x50));
+        {
+            let mut tx = Transaction::begin(&*self)?;
+            // The old data clusters become free (kept until the commit).
+            let clusters: Vec<u64> = runs.iter().flat_map(|&(lcn, n)| lcn..lcn + n).collect();
+            tx.release(ROOT_MEDIUM_ALLOCATOR, &clusters)?;
+            let mut record = self.new_record(&mut tx, band, data, now, id, security)?;
+            // Kept: creation and access times, attributes (but the bits
+            // that describe the content).
+            record[0x28..0x30].copy_from_slice(&old[0x28..0x30]);
+            record[0x40..0x48].copy_from_slice(&old[0x40..0x48]);
+            let attributes = (le32(&old, 0x48) & !SPARSE) | (le32(&record, 0x48) & SPARSE);
+            record[0x48..0x4c].copy_from_slice(&attributes.to_le_bytes());
+            tx.remove_row(Tree::Object(dir), &|k| is_name_row(k, &name))?;
+            let utf16: Vec<u8> = name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+            let mut key = vec![ROW_NAME as u8, 0, 1, 0];
+            key.extend(&utf16);
+            tx.insert_sorted(
+                Tree::Object(dir),
+                &row(&key, &record, ROW_EMBEDS_NODE),
+                &directory_key_order,
+            )?;
+            self.touch_directory(&mut tx, &parent, dir, now)?;
             tx.commit()?;
         }
         self.load()
@@ -861,13 +1219,12 @@ impl<D: WriteAt> Volume<D> {
             )));
         }
         {
-            let mut tx = Transaction::new(&*self);
+            let mut tx = Transaction::begin(&*self)?;
             // Its data clusters become free (kept until the commit).
             let clusters: Vec<u64> = runs.iter().flat_map(|&(lcn, n)| lcn..lcn + n).collect();
             tx.release(ROOT_MEDIUM_ALLOCATOR, &clusters)?;
-            let root = tx.single_page(dir)?;
-            tx.remove(root, &|k| is_name_row(k, &name))?;
-            tx.remove(root, &|k| {
+            tx.remove_row(Tree::Object(dir), &|k| is_name_row(k, &name))?;
+            tx.remove_row(Tree::Object(dir), &|k| {
                 k.len() >= 16 && le16(k, 0) == ROW_FILE_ID && le64(k, 8) == id
             })?;
             self.touch_directory(&mut tx, &parent, dir, now)?;
@@ -897,19 +1254,20 @@ impl<D: WriteAt> Volume<D> {
         record[0x38..0x40].copy_from_slice(&now.to_le_bytes());
         let utf16: Vec<u8> = new_name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
         {
-            let mut tx = Transaction::new(&*self);
-            let root = tx.single_page(dir)?;
-            tx.remove(root, &|k| is_name_row(k, &name))?;
-            tx.remove(root, &|k| {
+            let mut tx = Transaction::begin(&*self)?;
+            tx.remove_row(Tree::Object(dir), &|k| is_name_row(k, &name))?;
+            tx.remove_row(Tree::Object(dir), &|k| {
                 k.len() >= 16 && le16(k, 0) == ROW_FILE_ID && le64(k, 8) == id
             })?;
             let (key, value) = file_id_row(id, &utf16);
-            tx.insert(root, &row(&key, &value, 0), &|k| directory_key_order(&key, k).is_lt())?;
+            tx.insert_sorted(Tree::Object(dir), &row(&key, &value, 0), &directory_key_order)?;
             let mut key = vec![ROW_NAME as u8, 0, 1, 0];
             key.extend(&utf16);
-            tx.insert(root, &row(&key, &record, ROW_EMBEDS_NODE), &|k| {
-                directory_key_order(&key, k).is_lt()
-            })?;
+            tx.insert_sorted(
+                Tree::Object(dir),
+                &row(&key, &record, ROW_EMBEDS_NODE),
+                &directory_key_order,
+            )?;
             self.touch_directory(&mut tx, &parent, dir, now)?;
             tx.commit()?;
         }
@@ -1043,6 +1401,109 @@ impl<D: WriteAt> Volume<D> {
         Err(Error::Unsupported("no file data to place new data near".into()))
     }
 
+    /// Creates a directory, as Windows does: a new object (the object
+    /// table's counter, 0x38 of its descriptor, gives the id) with a tree
+    /// of one page holding its own row (its record: a link to its parent
+    /// and name, an empty $I30 index), rows in both object tables, a
+    /// parent-child row, and an entry in the parent directory. For now the
+    /// object and parent-child tables and the parent directory must each
+    /// fit one page.
+    pub fn create_directory(&mut self, path: &str, now: u64) -> Result<()> {
+        let trimmed = path.trim_end_matches('/');
+        let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
+        check_name(name)?;
+        match self.lookup(trimmed) {
+            Err(Error::NotFound(_)) => {}
+            Ok(_) => return Err(Error::Unsupported(format!("{path} exists"))),
+            Err(e) => return Err(e),
+        }
+        let parent_oid = self.directory_of(parent)?;
+        let security = self.shared_directory_security(parent_oid)?;
+        let utf16: Vec<u8> = name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        {
+            let mut tx = Transaction::begin(&*self)?;
+            // The object id, from the object table's counter (both copies).
+            let objects = tx.root(Tree::Root(ROOT_OBJECTS))?;
+            let copy = tx.root(Tree::Root(ROOT_OBJECTS_COPY))?;
+            let oid = le64(&tx.pages[objects].data, PAGE_HEADER_SIZE + 0x38) + 1;
+            if self.object(oid).is_ok() {
+                return Err(format_err!("object {oid:#x} exists already"));
+            }
+            for page in [objects, copy] {
+                tx.mark(page);
+                tx.pages[page].data[PAGE_HEADER_SIZE + 0x38..PAGE_HEADER_SIZE + 0x40]
+                    .copy_from_slice(&oid.to_le_bytes());
+            }
+            // The directory's tree: one page, laid out like its parent's.
+            let template = tx.root(Tree::Object(parent_oid))?;
+            let record = directory_record(parent_oid, &utf16, now, security);
+            let page = directory_page(&tx.pages[template].data, oid, &record)?;
+            tx.new_root(Tree::Object(oid), page);
+            // Its rows in both object tables (the parent's as a template,
+            // no file id given out yet); the reference is filled on commit.
+            let at = tx.find(Tree::Root(ROOT_OBJECTS), &|k| k.len() >= 16 && le64(k, 8) == parent_oid)?;
+            let mut value = tx.pages[at.page].data[at.value..at.value + at.len].to_vec();
+            if value.len() < 0x58 {
+                return Err(format_err!("object table row of {} bytes", value.len()));
+            }
+            value[0x50..0x58].copy_from_slice(&1u64.to_le_bytes());
+            let mut key = vec![0u8; 16];
+            key[8..16].copy_from_slice(&oid.to_le_bytes());
+            for page in [objects, copy] {
+                let table = tx.pages[page].tree;
+                tx.insert_sorted(table, &row(&key, &value, 0), &u64_key_order)?;
+            }
+            // The parent-child row (key and value alike).
+
+            let mut link = vec![0u8; 32];
+            link[8..16].copy_from_slice(&parent_oid.to_le_bytes());
+            link[24..32].copy_from_slice(&oid.to_le_bytes());
+            tx.insert_sorted(Tree::Root(ROOT_PARENT_CHILD), &row(&link, &link, 0), &u64_key_order)?;
+            // The entry in the parent.
+
+            let mut key = vec![ROW_NAME as u8, 0, 2, 0];
+            key.extend(&utf16);
+            let mut entry = vec![0u8; 0x54];
+            entry[8..16].copy_from_slice(&oid.to_le_bytes());
+            for at in [0x10, 0x18, 0x20, 0x28] {
+                entry[at..at + 8].copy_from_slice(&now.to_le_bytes());
+            }
+            entry[0x40..0x44].copy_from_slice(&REFS_DIRECTORY_BIT.to_le_bytes());
+            tx.insert_sorted(Tree::Object(parent_oid), &row(&key, &entry, 0), &directory_key_order)?;
+            self.touch_directory(&mut tx, parent, parent_oid, now)?;
+            tx.commit()?;
+        }
+        self.load()
+    }
+
+    /// The security descriptor reference of a directory beside or below
+    /// `dir` (directories created by default share one; the root's
+    /// differs).
+    fn shared_directory_security(&self, dir: u64) -> Result<u64> {
+        let mut dirs = std::collections::VecDeque::from([dir, ROOT_DIRECTORY]);
+        let mut seen = 0;
+        while let Some(d) = dirs.pop_front() {
+            seen += 1;
+            if seen > 256 {
+                break;
+            }
+            for e in self.read_dir(d)? {
+                if let Target::Directory(child) = e.target
+                    && e.attributes & 0x404 == 0
+                {
+                    let own = self.own_row(child)?;
+                    if own.len() >= 0x58 && le64(&own, 0x50) != 0 {
+                        return Ok(le64(&own, 0x50));
+                    }
+                    dirs.push_back(child);
+                }
+            }
+        }
+        Err(Error::Unsupported(
+            "no directory to share a security descriptor with".into(),
+        ))
+    }
+
     fn directory_of(&self, parent: &str) -> Result<u64> {
         if parent.trim_matches('/').is_empty() {
             return Ok(ROOT_DIRECTORY);
@@ -1073,7 +1534,7 @@ impl<D: WriteAt> Volume<D> {
             )));
         }
         {
-            let mut tx = Transaction::new(&*self);
+            let mut tx = Transaction::begin(&*self)?;
             let at = tx.find(Tree::Object(dir), &|k| {
                 k.len() > 4 && le16(k, 0) == 0x30 && le16(k, 2) == 1 && utf16(&k[4..]) == name
             })?;
@@ -1102,8 +1563,18 @@ fn inline_data(record: &[u8]) -> Option<usize> {
 }
 
 const ROW_OWN: u16 = 0x10;
+/// The sparse file attribute.
+const SPARSE: u32 = 0x200;
+const ROOT_PARENT_CHILD: usize = 4;
+/// ReFS's directory bit in a directory entry's attributes.
+const REFS_DIRECTORY_BIT: u32 = 0x1000_0000;
 /// The row flag of rows whose value embeds a node (records, extent maps).
 const ROW_EMBEDS_NODE: u16 = 1;
+/// The row flag of an index node's last row (no key: above every key).
+const ROW_LAST: u16 = 2;
+/// Node flags: an index node, the table's root.
+const NODE_INDEX: u8 = 1;
+const NODE_ROOT: u8 = 2;
 /// The row flag of removed rows (they stay in the row area).
 const ROW_DELETED: u16 = 4;
 const ROW_FILE_ID: u16 = 0x20;
@@ -1352,4 +1823,116 @@ fn extent_record(size: u64, allocated: u64, extents: &[(u64, u64, u64)], now: u6
     node[index + 4..index + 8].copy_from_slice(&(0xffff_0000u32 | (0x28 + set_row.len()) as u32).to_le_bytes());
     r.extend(node);
     r
+}
+
+/// Keys compared as a sequence of u64 (the object and parent-child tables).
+fn u64_key_order(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    let field = |k: &[u8], i: usize| k.get(i..i + 8).map(|f| u64::from_le_bytes(f.try_into().unwrap()));
+    (0..a.len().max(b.len()).div_ceil(8))
+        .map(|i| field(a, 8 * i).cmp(&field(b, 8 * i)))
+        .find(|o| o.is_ne())
+        .unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// The $I30 index stub every directory's record carries (the same 140
+/// bytes on every directory Windows made).
+const EMPTY_I30: [u8; 0x24] = [
+    0, 0, 0, 0, 0x80, 0, 0, 0, 0x0c, 0, 0, 0, 0x30, 0, 0, 0, 0x40, 2, 1, 0, 0x16, 0, 0, 0, 0x10, 0, 0, 0, 0x70, 0, 0,
+    0, 0x70, 0, 0, 0,
+];
+
+/// A directory's own record, as Windows writes it for a new directory:
+/// the file fields (times, no attributes, the security reference, 1 link)
+/// and two rows: the link to the parent with the name (descriptor
+/// 0x000d0039; its value is its key without the length, the row lets them
+/// overlap), and the empty $I30 index (0x00050090).
+fn directory_record(parent: u64, name_utf16: &[u8], now: u64, security: u64) -> Vec<u8> {
+    let put32 = |v: &mut Vec<u8>, at: usize, x: u32| v[at..at + 4].copy_from_slice(&x.to_le_bytes());
+    let put64 = |v: &mut Vec<u8>, at: usize, x: u64| v[at..at + 8].copy_from_slice(&x.to_le_bytes());
+    // The link row: key = value length, marker, descriptor, parent, 0, name.
+    let klen = 0x20 + name_utf16.len();
+    let link_size = (0x10 + klen).next_multiple_of(8);
+    let mut link = vec![0u8; link_size];
+    put32(&mut link, 0, link_size as u32);
+    link[4..6].copy_from_slice(&0x10u16.to_le_bytes());
+    link[6..8].copy_from_slice(&(klen as u16).to_le_bytes());
+    link[0x0a..0x0c].copy_from_slice(&0x18u16.to_le_bytes());
+    link[0x0c..0x0e].copy_from_slice(&((klen - 8) as u16).to_le_bytes());
+    put64(&mut link, 0x10, (klen - 8) as u64);
+    put32(&mut link, 0x18, 0x8000_0002);
+    put32(&mut link, 0x1c, 0x000d_0039);
+    put64(&mut link, 0x20, parent);
+    link[0x30..0x30 + name_utf16.len()].copy_from_slice(name_utf16);
+    // The $I30 row.
+    let mut i30 = vec![0u8; 140];
+    i30[..EMPTY_I30.len()].copy_from_slice(&EMPTY_I30);
+    let mut key = vec![0u8; 0x18];
+    key[0..8].copy_from_slice(&(i30.len() as u64).to_le_bytes());
+    key[8..12].copy_from_slice(&0x8000_0002u32.to_le_bytes());
+    key[12..16].copy_from_slice(&0x0005_0090u32.to_le_bytes());
+    key[16..24].copy_from_slice(&"$I30".encode_utf16().flat_map(|c| c.to_le_bytes()).collect::<Vec<_>>());
+    let index = row(&key, &i30, 0);
+    // The record.
+    const NODE: usize = 0xa8;
+    let rows = 0x28 + link.len() + index.len();
+    let mut r = vec![0u8; NODE + rows + 8];
+    put32(&mut r, 0, NODE as u32);
+    r[4..8].copy_from_slice(&[0x28, 0, 1, 0]);
+    put32(&mut r, 8, 1);
+    put32(&mut r, 0x0c, 0x1f0);
+    put32(&mut r, 0x10, 0x1f0);
+    put32(&mut r, 0x14, 2);
+    put64(&mut r, 0x20, 2);
+    for at in [0x28, 0x30, 0x38, 0x40] {
+        put64(&mut r, at, now);
+    }
+    put64(&mut r, 0x50, security);
+    put64(&mut r, 0x98, 1);
+    let h = NODE;
+    put32(&mut r, h, 0x28);
+    put32(&mut r, h + 4, rows as u32);
+    r[h + 0x0c..h + 0x10].copy_from_slice(&[0, 2, 0, 0]);
+    put32(&mut r, h + 0x10, rows as u32);
+    put32(&mut r, h + 0x14, 2);
+    put32(&mut r, h + 0x20, (rows + 8) as u32);
+    r[h + 0x28..h + 0x28 + link.len()].copy_from_slice(&link);
+    r[h + 0x28 + link.len()..h + rows].copy_from_slice(&index);
+    put32(&mut r, h + rows, 0xffff_0028);
+    put32(&mut r, h + rows + 4, 0xffff_0000 | (0x28 + link.len()) as u32);
+    r
+}
+
+/// The single page of a new directory's tree: the header and the table
+/// descriptor of `template` (another directory's root page; the row count
+/// set to 1, the table id at 0x48 set to `oid`), and a leaf node holding
+/// the own row with `record`.
+fn directory_page(template: &[u8], oid: u64, record: &[u8]) -> Result<Vec<u8>> {
+    let h = PAGE_HEADER_SIZE + le32(template, PAGE_HEADER_SIZE) as usize;
+    let size = template.len();
+    let own = row(&(ROW_OWN as u32).to_le_bytes(), record, ROW_EMBEDS_NODE);
+    let index = size - h - 4;
+    if h + 0x28 + own.len() > h + index {
+        return Err(format_err!("a directory record of {} bytes", record.len()));
+    }
+    let mut p = vec![0u8; size];
+    p[..h].copy_from_slice(&template[..h]);
+    p[0x48..0x50].copy_from_slice(&oid.to_le_bytes());
+    p[PAGE_HEADER_SIZE + 0x20..PAGE_HEADER_SIZE + 0x28].copy_from_slice(&1u64.to_le_bytes());
+    let put32 = |p: &mut Vec<u8>, at: usize, x: u32| p[at..at + 4].copy_from_slice(&x.to_le_bytes());
+    put32(&mut p, h, 0x28);
+    put32(&mut p, h + 4, (0x28 + own.len()) as u32);
+    put32(&mut p, h + 8, (index - 0x28 - own.len()) as u32);
+    p[h + 0x0c..h + 0x10].copy_from_slice(&[0, 2, 0, 0]);
+    put32(&mut p, h + 0x10, index as u32);
+    put32(&mut p, h + 0x14, 1);
+    put32(&mut p, h + 0x20, (index + 4) as u32);
+    p[h + 0x28..h + 0x28 + own.len()].copy_from_slice(&own);
+    put32(&mut p, h + index, 0xffff_0028);
+    Ok(p)
+}
+
+/// The key of a row (its bytes).
+fn row_key(row: &[u8]) -> &[u8] {
+    let (at, len) = (le16(row, 4) as usize, le16(row, 6) as usize);
+    row.get(at..at + len).unwrap_or(&[])
 }

@@ -65,6 +65,8 @@ foreach ($step in ($Steps.Split(';') | Where-Object { $_ })) {
             default { throw "unknown step $step" }
         }
         Write-VolumeCache -DriveLetter $part.DriveLetter
+        # Offline first: ReFS then checkpoints over its log (a clean volume).
+        Set-Disk -Number $disk.Number -IsOffline $true
     } finally {
         Dismount-DiskImage -ImagePath $vhdx | Out-Null
     }
