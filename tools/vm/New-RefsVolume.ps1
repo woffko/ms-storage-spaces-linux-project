@@ -107,10 +107,11 @@ try {
     Format-Volume @format | Out-Null
     $part = Get-Partition -DiskNumber $disk.Number -PartitionNumber $part.PartitionNumber
     $drive = "$($part.DriveLetter):\"
-    # ReFS before 3.5 (Windows Server 2019) has no hard links and takes named
-    # streams of up to 128 KiB.
+    # ReFS before 3.5 (Windows Server 2019) has no hard links; before 3.14
+    # (3.4 and 3.7 of Server 2022 seen) named streams take up to 128 KiB.
     $refsVersion = [version]((fsutil fsinfo refsinfo $drive | Select-String 'REFS (Volume )?Version') -replace '.*:\s*', '')
     $older = $refsVersion -lt [version]'3.5'
+    $smallStreams = $refsVersion -lt [version]'3.14'
 
     # Deterministic content: SplitMix64 bytes seeded from the file's name.
     Add-Type -TypeDefinition @'
@@ -279,7 +280,7 @@ public static class RefsGen {
         New-File 'streams\host.txt' 2000
         $h = Join-Path $drive 'streams\host.txt'
         Set-Content -Path $h -Stream small -Value 'a small stream' -NoNewline
-        $big = New-Object byte[] $(if ($older) { 120000 } else { 200000 }); (New-Object Random 7).NextBytes($big); Set-Content -Path $h -Stream big -Value $big -Encoding Byte
+        $big = New-Object byte[] $(if ($smallStreams) { 120000 } else { 200000 }); (New-Object Random 7).NextBytes($big); Set-Content -Path $h -Stream big -Value $big -Encoding Byte
         # Links.
         New-File 'links\target.txt' 3000
         if (-not $older) {

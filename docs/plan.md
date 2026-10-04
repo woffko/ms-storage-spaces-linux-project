@@ -613,8 +613,13 @@ rows of thin spaces not allocated yet (M7).
   layout (attribute rows keyed by type and name, no levels, no resident
   data, named streams split over rows), full containers left out of the
   medium allocator; read and mounted as Windows listed five volumes
-  (`r34*`), writing refused. Open: ReFS 3.5 to 3.13 (3.7 needs Server
-  2022; 3.9 and 3.10 Windows 11 22H2 and 23H2).
+  (`r34*`), writing refused. ReFS 3.7 (Windows Server 2022, the same
+  day): the record layout and allocators of 3.14, small files in extents,
+  named streams of up to 128 KiB split over rows (as on 3.4; now joined on
+  any version); five volumes (`r37*`) read and mounted as Windows listed
+  them. Both VMs fully updated first (`tools/vm/Install-Updates.ps1`; the
+  format stayed the same). Open: ReFS 3.9 and 3.10 (Windows 11 22H2 and
+  23H2, no installation media at hand).
 * B2 (done): `refs mount` (FUSE, read-only;
   streams as extended attributes, links and junctions as symbolic links,
   hard links as one inode, directory listings cached), checked against Windows' listing of

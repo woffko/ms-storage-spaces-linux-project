@@ -17,8 +17,9 @@
 - `tools/gen-corpus.sh` lists the corpus configurations; `tools/fetch-corpus.sh NAME...` copies pools to
   `testdata/pools/NAME/` as sparse raw images (git-ignored). Corpus tests skip missing pools.
 - Older Windows for ReFS samples of other versions: Windows Server 2019 Evaluation (WIN-R326LQ0OIA6,
-  `WIN_VM_HOST=Administrator@10.0.77.11`, key login; ReFS 3.4, volumes `r34*`). The user runs one such VM
-  at a time (Server 2022 for 3.7 and 2012 R2 for 1.2 are planned): ask for the next one when needed.
+  `WIN_VM_HOST=Administrator@10.0.77.11`; ReFS 3.4, volumes `r34*`) and Server 2022 Evaluation
+  (WIN-4OUB3OQJKV6, `WIN_VM_HOST=Administrator@10.0.77.10`; ReFS 3.7, volumes `r37*`), key login. The user
+  runs one such VM at a time (Server 2012 R2 for ReFS 1.2 is planned): ask for the next one when needed.
   `tools/vm/New-RefsVolume.ps1` formats plain ReFS where there are no Dev Drives;
   `tools/vm/Install-Updates.ps1` installs Windows updates there (as SYSTEM, since Windows Update refuses
   network logons).

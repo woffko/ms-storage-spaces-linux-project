@@ -6,8 +6,8 @@ marks statements backed by a test against volumes Windows created
 ReFS 3.14 Dev Drives of Windows 11 Insider 26340, 4 KiB and 64 KiB
 clusters, CRC64 and SHA-256 metadata checksums, integrity streams, stream
 snapshots and deduplicated files, a volume inside a two-way mirror space
-read through `storage-spaces`; and ReFS 3.4 volumes of Windows Server
-2019, see "ReFS 3.4").
+read through `storage-spaces`; and ReFS 3.4 and 3.7 volumes of Windows
+Server 2019 and 2022, see "ReFS 3.4 and 3.7").
 The most complete public description is
 [forefst](https://github.com/xbqt/forefst) (GPL-3.0, documentation read,
 no code taken); refsprogs (GPL-2.0+) and libfsrefs are the other prior art
@@ -414,7 +414,7 @@ times: a 5 MiB file of zeros became 1280 one-cluster runs of one cluster.
 Nothing else is needed to read them (**verified**: identical text and
 random files deduplicated, and the zero file).
 
-## ReFS 3.4 (Windows Server 2019)
+## ReFS 3.4 and 3.7 (Windows Server 2019 and 2022)
 
 Windows Server 2019 (build 17763) formats ReFS 3.4 on any disk
 (`Format-Volume -FileSystem ReFS`; there are no Dev Drives;
@@ -425,13 +425,10 @@ then have the same schema table and read the same way; the update by
 B+-trees, the container and object tables and the directories follow the
 rules above (page references of 104 bytes with CRC-64). What differs:
 
-* File records: attribute rows keyed (u32 the value's bytes, u32 where
-  this row's part of the value starts, u32 the attribute type, the name
-  in UTF-16; a zero u16 for none), not by the stream marker, descriptor
-  and level id of 3.14. A value longer than a row is split over rows by
-  offset (a named stream of 120 000 bytes in parts of 4072 bytes). There
-  are no data levels and no resident data: a file of one byte has an
-  extent map.
+* File records: attribute rows keyed (u32 the value's bytes, u32 0, u32
+  the attribute type, the name in UTF-16; a zero u16 for none), not by the
+  stream marker, descriptor and level id of 3.14. There are no data levels
+  and no resident data: a file of one byte has an extent map.
   * $DATA (0x80): a header and, at 0x88, the extent map's node as in a
     3.14 level value (the same extent records, integrity checksums after
     them and their kind at 0x16), but 0x20 the extent records, 0x28 flags
@@ -454,13 +451,31 @@ rules above (page references of 104 bytes with CRC-64). What differs:
   clusters, a stamp whose low byte is 1, count 1 on the 2560 clusters of
   the 10 MiB file).
 
-`refs` reads records in this layout on volumes before 3.14 (where a
-record has rows of this kind; otherwise by the rules of 3.14), counts full
-containers as used, and refuses to write any version but 3.14
-(**verified**: five volumes Server 2019 made, `r34*` with 4 KiB and 64
-KiB clusters and integrity streams, a block clone, read and mounted with
-every file and named stream as Windows listed it, `refs check` clean;
-fixtures in CI).
+Windows Server 2022 (build 20348) formats ReFS 3.7, also with every
+update to September 2026 (build 20348.5622: Windows Update offered nothing
+after the cumulative update of 2023-11, the rest came from the Microsoft
+Update Catalog by `tools/vm/Install-Updates.ps1 -PackageUrl`; the schema
+table stayed the same). 3.7 has the record layout and the allocators of
+3.14 (data levels, level sets, full containers of class 0x4000 with
+uniform rows, hard links), but keeps the data of small files in extents
+too (100 bytes in a cluster), and named streams resident only, of up to
+128 KiB.
+
+On both, a value longer than a row (a named stream of 120 000 bytes) is
+split over rows whose keys differ only in the u32 at 4, where the part
+starts in the value; the u32 at 0 is the whole value's bytes (a value in
+one row: its bytes, and 0). Parts of 4072 bytes on 4 KiB clusters, 16360
+on 64 KiB clusters.
+
+`refs` joins split values on any version, reads records in the layout of
+3.4 on volumes before 3.14 (where a record has rows of this kind;
+otherwise by the rules of 3.14), counts full containers as used where the
+container table counts used clusters, and refuses to write any version
+but 3.14
+(**verified**: five volumes each version made, `r34*` and `r37*`, with 4
+KiB and 64 KiB clusters, integrity streams, a block clone and, on 3.7,
+hard links, read and mounted with every file and named stream as Windows
+listed it, `refs check` clean; fixtures in CI).
 
 ## Writing (Track B4)
 
@@ -790,6 +805,6 @@ created, which lost the directory's contents).
 
 LZ4 on QuickAssist hardware (format 3 is decoded as LZ4, no sample),
 extended attributes, EFS, the USN journal, snapshots of named streams (read by the same rules, no sample),
-ReFS 3.5 to 3.13 (no sample: 3.7 of Server 2022, 3.9 and 3.10 of Windows
-11 22H2 and 23H2; read by the rules of 3.4 where records have its rows,
-else by those of 3.14) and ReFS 1.x/2.x.
+ReFS 3.5, 3.6 and 3.8 to 3.13 (no sample: 3.9 and 3.10 of Windows 11
+22H2 and 23H2; read by the rules of 3.4 where records have its rows, else
+by those of 3.14) and ReFS 1.x/2.x.
