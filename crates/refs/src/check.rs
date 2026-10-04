@@ -74,7 +74,7 @@ impl Allocator {
     /// physical clusters).
     pub(crate) fn read<D: ReadAt>(vol: &Volume<D>, root: usize) -> Result<Self> {
         let mut rows = Vec::new();
-        vol.walk(&vol.checkpoint.roots[root].clone(), root == 12, &mut |row| {
+        vol.walk(&vol.root(root)?, root == 12, &mut |row| {
             let v = row.value;
             if v.len() >= 0x18 {
                 let (start, count) = (le64(v, 0), le64(v, 8));
@@ -94,17 +94,13 @@ impl Allocator {
         if root == 1 && vol.legacy_records() {
             let cpc = vol.clusters_per_container;
             let mut full = Vec::new();
-            vol.walk(
-                &vol.checkpoint.roots[crate::volume::ROOT_CONTAINERS].clone(),
-                true,
-                &mut |row| {
-                    let v = row.value;
-                    if v.len() >= 0x30 && le32(v, 0x14) == 0 && le64(v, 0x20) == cpc {
-                        full.push(le64(v, v.len() - 16));
-                    }
-                    Ok(())
-                },
-            )?;
+            vol.walk(&vol.root(crate::volume::ROOT_CONTAINERS)?, true, &mut |row| {
+                let v = row.value;
+                if v.len() >= 0x30 && le32(v, 0x14) == 0 && le64(v, 0x20) == cpc {
+                    full.push(le64(v, v.len() - 16));
+                }
+                Ok(())
+            })?;
             for start in full {
                 let overlaps = rows
                     .iter()
@@ -216,6 +212,9 @@ impl<D: ReadAt> Volume<D> {
     /// Checks the volume (see the module); `skip` names objects not to
     /// look into (fixtures that leave some out).
     pub fn check(&self, skip: &[u64]) -> Result<Report> {
+        if self.v1 {
+            return self.check_v1(skip);
+        }
         let mut report = Report::default();
         match self.deferred_pages() {
             Ok(d) => report.deferred_clusters = d.iter().map(|(_, l)| l.len() as u64).sum(),
@@ -451,6 +450,118 @@ impl<D: ReadAt> Volume<D> {
         Ok(report)
     }
 
+    /// ReFS 1.x: every page of every table and object (its checksum, its
+    /// own block number, its node and rows), every file's record and runs
+    /// (inside the volume, and no cluster mapped by two files: 1.x has no
+    /// block clones). Its allocators are laid out otherwise and not
+    /// checked.
+    fn check_v1(&self, skip: &[u64]) -> Result<Report> {
+        let mut report = Report::default();
+        let mut todo: Vec<(PageRef, String)> = Vec::new();
+        for (i, r) in self.checkpoint.roots.iter().enumerate() {
+            todo.push((r.clone(), format!("root {i}")));
+        }
+        for oid in self.object_ids().collect::<Vec<_>>() {
+            if !skip.contains(&oid) {
+                todo.push((self.object(oid)?.clone(), format!("object {oid:#x}")));
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        while let Some((r, what)) = todo.pop() {
+            if !seen.insert(r.lcns[0]) {
+                continue;
+            }
+            report.pages += 1;
+            let page = match self.read_page(&r, false) {
+                Ok(p) => p,
+                Err(e) => {
+                    report.problem(format!("{what}: {e}"));
+                    continue;
+                }
+            };
+            let node = match self.node_in(&page, self.node_offset()) {
+                Ok(n) => n,
+                Err(e) => {
+                    report.problem(format!("{what}: page {:#x}: {e}", r.lcns[0]));
+                    continue;
+                }
+            };
+            for row in node.rows() {
+                match row.and_then(|row| {
+                    if node.is_leaf() {
+                        Ok(None)
+                    } else {
+                        self.page_ref(row.value).map(Some)
+                    }
+                }) {
+                    Ok(Some(child)) => todo.push((child, what.clone())),
+                    Ok(None) => {}
+                    Err(e) => report.problem(format!("{what}: page {:#x}: {e}", r.lcns[0])),
+                }
+            }
+        }
+        let total = self.boot.volume_size() / self.cluster;
+        let mut runs: Vec<(u64, u64, String)> = Vec::new();
+        let mut dirs = vec![(ROOT_DIRECTORY, String::new())];
+        while let Some((oid, path)) = dirs.pop() {
+            report.directories += 1;
+            let entries = match self.read_dir(oid) {
+                Ok(e) => e,
+                Err(e) => {
+                    report.problem(format!("{path}/: {e}"));
+                    continue;
+                }
+            };
+            for e in entries {
+                let name = format!("{path}/{}", e.name);
+                if let Target::Directory(child) = e.target {
+                    if e.attributes & 0x400 == 0 && !skip.contains(&child) {
+                        dirs.push((child, name));
+                    }
+                    continue;
+                }
+                report.files += 1;
+                let file = match self.open_file(&e) {
+                    Ok(f) => f,
+                    Err(err) => {
+                        report.problem(format!("{name}: {err}"));
+                        continue;
+                    }
+                };
+                let streams = file.data.iter().chain(file.streams.iter().map(|(_, s)| s));
+                for s in streams {
+                    if let Content::Extents(x) = &s.content {
+                        for x in x {
+                            report.data_clusters += x.clusters;
+                            if x.vlcn.checked_add(x.clusters).is_none_or(|end| end > total) {
+                                report.problem(format!(
+                                    "{name}: a run of {} clusters at {:#x}, past the volume's end",
+                                    x.clusters, x.vlcn
+                                ));
+                            } else {
+                                runs.push((x.vlcn, x.clusters, name.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        runs.sort();
+        let mut last: Option<(u64, String)> = None;
+        for (lcn, n, name) in runs {
+            if let Some((end, other)) = &last
+                && lcn < *end
+                && *other != name
+            {
+                report.problem(format!("{name}: cluster {lcn:#x} also mapped by {other}"));
+            }
+            if last.as_ref().is_none_or(|(end, _)| lcn + n > *end) {
+                last = Some((lcn + n, name));
+            }
+        }
+        Ok(report)
+    }
+
     /// The pages of extent maps a record keeps outside it (its levels'
     /// values whose node is an index over pages).
     fn map_pages_of_record(&self, record: &[u8]) -> Vec<u64> {
@@ -480,7 +591,7 @@ impl<D: ReadAt> Volume<D> {
     #[allow(clippy::type_complexity)]
     fn refcount_rows(&self) -> Result<(Vec<(u64, u64, Vec<u8>)>, Vec<String>)> {
         let (mut rows, mut problems) = (Vec::new(), Vec::new());
-        self.walk(&self.checkpoint.roots[6].clone(), false, &mut |row| {
+        self.walk(&self.root(6)?, false, &mut |row| {
             let Some((first, n)) = refcount::range(row.value) else {
                 problems.push(format!("reference count row of {} bytes", row.value.len()));
                 return Ok(());

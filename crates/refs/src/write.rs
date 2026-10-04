@@ -109,6 +109,7 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
     /// A transaction on the volume; refused while the log holds records
     /// Windows would replay over the checkpoint.
     pub fn begin(vol: &'v Volume<D>) -> Result<Self> {
+        vol.writable_version()?;
         if vol.log_state()?.needs_replay() {
             return Err(Error::Unsupported(
                 "the volume's log has changes its checkpoint lacks (Windows replays them when it next \
@@ -3134,7 +3135,7 @@ impl<D: WriteAt> Volume<D> {
     /// beyond the first (0: one file's alone).
     fn refcounted(&self, runs: &[(u64, u64)]) -> Result<bool> {
         let mut rows = Vec::new();
-        self.walk(&self.checkpoint.roots[6].clone(), false, &mut |row| {
+        self.walk(&self.root(6)?, false, &mut |row| {
             if row.key.len() >= 16 {
                 rows.push((le64(row.key, 0), le64(row.key, 8), row.value.to_vec()));
             }
@@ -3301,7 +3302,7 @@ impl<D: WriteAt> Volume<D> {
     /// The parent of a directory (the parent-child table).
     fn parent_of(&self, oid: u64) -> Result<u64> {
         let mut parent = None;
-        self.walk_while(&self.checkpoint.roots[ROOT_PARENT_CHILD].clone(), false, &mut |row| {
+        self.walk_while(&self.root(ROOT_PARENT_CHILD)?, false, &mut |row| {
             if row.key.len() >= 32 && le64(row.key, 24) == oid {
                 parent = Some(le64(row.key, 8));
                 return Ok(false);
@@ -3676,6 +3677,7 @@ impl<D: WriteAt> Volume<D> {
 
     /// A file by path (see `FileAt`).
     fn file_at(&self, path: &str) -> Result<FileAt> {
+        self.writable_version()?;
         let trimmed = path.trim_end_matches('/');
         let parent = trimmed.rsplit_once('/').map_or("", |(p, _)| p);
         let entry = self.lookup(trimmed)?;
@@ -3788,17 +3790,13 @@ impl<D: WriteAt> Volume<D> {
     /// near directory `dir` (Windows keeps file data apart from metadata).
     fn data_band(&self, dir: u64) -> Result<u64> {
         let mut bands = Vec::new();
-        self.walk(
-            &self.checkpoint.roots[ROOT_MEDIUM_ALLOCATOR].clone(),
-            false,
-            &mut |row| {
-                let v = row.value;
-                if v.len() >= 0x18 && le16(v, 0x12) == ALLOCATOR_BITMAP {
-                    bands.push((le64(v, 0), le64(v, 8)));
-                }
-                Ok(())
-            },
-        )?;
+        self.walk(&self.root(ROOT_MEDIUM_ALLOCATOR)?, false, &mut |row| {
+            let v = row.value;
+            if v.len() >= 0x18 && le16(v, 0x12) == ALLOCATOR_BITMAP {
+                bands.push((le64(v, 0), le64(v, 8)));
+            }
+            Ok(())
+        })?;
         let mut dirs = std::collections::VecDeque::from([dir, ROOT_DIRECTORY]);
         let mut seen = 0;
         while let Some(d) = dirs.pop_front() {

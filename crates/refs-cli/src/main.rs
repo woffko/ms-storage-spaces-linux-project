@@ -563,15 +563,15 @@ fn tree_pages<D: ReadAt>(
     if level > 16 {
         bail!("{what}: deeper than 16 levels");
     }
-    for &lcn in r.lcns.iter().take((vol.page_size / vol.cluster) as usize) {
+    for &lcn in r.lcns.iter().take((vol.page_size / vol.cluster).max(1) as usize) {
         let at = if physical { lcn } else { vol.translate(lcn)? };
         writeln!(out, "{at:#x} 1 page {what} depth {level}")?;
     }
     let page = vol.read_page(r, physical)?;
-    let node = refs::node::Node::at(&page, refs::page::PAGE_HEADER_SIZE)?;
+    let node = vol.node_in(&page, vol.node_offset())?;
     if !node.is_leaf() {
         for row in node.rows() {
-            let child = refs::page::PageRef::parse(row?.value)?;
+            let child = vol.page_ref(row?.value)?;
             tree_pages(vol, &child, physical, what, level + 1, out)?;
         }
     }
@@ -814,8 +814,10 @@ fn fixture(dir: &std::path::Path, out: &std::path::Path, data_limit: u64, exclud
         // The log's control and record pages (writing checks the log),
         // and the pages only the older checkpoint references (writing
         // frees them).
-        vol.log_state()?;
-        vol.deferred_pages()?;
+        if vol.checkpoint.major >= 3 {
+            vol.log_state()?;
+            vol.deferred_pages()?;
+        }
         excluded = excluded_objects;
     }
     let mut image = SparseImage::new(dev.size()?);
@@ -1383,6 +1385,13 @@ fn main() -> Result<()> {
         }
         Command::Map { source } => {
             let vol = open_volume(&source)?;
+            if vol.checkpoint.major < 3 {
+                bail!(
+                    "refs map: the allocators of ReFS {}.{} are not read",
+                    vol.checkpoint.major,
+                    vol.checkpoint.minor
+                );
+            }
             map(&vol, &mut out)?;
         }
         Command::Rows { source, path, bytes } => {

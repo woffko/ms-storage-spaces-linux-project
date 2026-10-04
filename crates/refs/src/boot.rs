@@ -56,11 +56,12 @@ impl BootSector {
                 boot.bytes_per_sector
             )));
         }
-        if boot.major != 3 {
-            return Err(crate::Error::Unsupported(format!("ReFS {}.{}", boot.major, boot.minor)));
-        }
-        if boot.container_size == 0 || !boot.container_size.is_multiple_of(cluster) {
-            return Err(format_err!("container size {:#x}", boot.container_size));
+        match boot.major {
+            // ReFS 1.x (Windows 8.1, Server 2012 R2): no containers.
+            1 => {}
+            3 if boot.container_size != 0 && boot.container_size.is_multiple_of(cluster) => {}
+            3 => return Err(format_err!("container size {:#x}", boot.container_size)),
+            _ => return Err(crate::Error::Unsupported(format!("ReFS {}.{}", boot.major, boot.minor))),
         }
         Ok(boot)
     }

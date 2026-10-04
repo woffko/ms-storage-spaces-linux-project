@@ -10,7 +10,7 @@ use crate::boot::{BOOT_SECTOR_SIZE, BootSector};
 use crate::checksum::{crc32c, crc64, sha256};
 use crate::error::{Error, Result, format_err};
 use crate::node::{Node, Row};
-use crate::page::{PAGE_HEADER_SIZE, PageHeader, PageRef};
+use crate::page::{PAGE_HEADER_SIZE, PageHeader, PageRef, V1_BLOCK, V1_HEADER_SIZE};
 use crate::util::{le16, le32, le64};
 
 /// Cluster of the primary superblock.
@@ -47,8 +47,12 @@ pub struct Volume<D> {
     pub boot: BootSector,
     pub cluster: u64,
     /// Bytes of a metadata page: 16 KiB on 4 KiB clusters, one cluster on
-    /// 64 KiB clusters.
+    /// 64 KiB clusters, a block of 16 KiB on ReFS 1.x.
     pub page_size: u64,
+    /// ReFS 1.x: pages are blocks of 16 KiB named by their number from the
+    /// start of the volume (24-byte references, 48-byte headers), there
+    /// is no container table, and data runs count blocks too.
+    pub(crate) v1: bool,
     pub volume_guid: [u8; 16],
     pub checkpoint: Checkpoint,
     /// The clusters of both checkpoint copies (the superblock's list).
@@ -81,11 +85,16 @@ const UNITS_KEPT: usize = 8;
 /// Verifies a superblock's or checkpoint's own checksum: the descriptor
 /// at `at` (a page reference to the page itself), over the first cluster
 /// with the whole descriptor zeroed.
-fn self_checksum_ok(page: &[u8], at: usize, len: usize, cluster: usize) -> bool {
+fn self_checksum_ok(page: &[u8], at: usize, len: usize, cluster: usize, v1: bool) -> bool {
     let Some(desc) = page.get(at..at + len) else {
         return false;
     };
-    let Ok(r) = PageRef::parse(desc) else {
+    let parsed = if v1 {
+        PageRef::parse_v1(desc)
+    } else {
+        PageRef::parse(desc)
+    };
+    let Ok(r) = parsed else {
         return false;
     };
     let mut copy = page[..cluster.min(page.len())].to_vec();
@@ -110,13 +119,15 @@ impl<D: ReadAt> Volume<D> {
         dev.read_exact_at(&mut sector, offset)?;
         let boot = BootSector::parse(&sector)?;
         let cluster = boot.cluster_size();
-        let page_size = cluster.max(16384);
+        let v1 = boot.major == 1;
+        let page_size = if v1 { V1_BLOCK } else { cluster.max(16384) };
         let mut vol = Volume {
             dev,
             offset,
             boot,
             cluster,
             page_size,
+            v1,
             volume_guid: [0; 16],
             checkpoint: Checkpoint {
                 lcn: 0,
@@ -145,6 +156,9 @@ impl<D: ReadAt> Volume<D> {
     /// Reads the superblock, the current checkpoint and the tables cached
     /// from it (again after a commit).
     pub(crate) fn load(&mut self) -> Result<()> {
+        if self.v1 {
+            return self.load_v1();
+        }
         let (cluster, page_size) = (self.cluster, self.page_size);
         let total_clusters = self.boot.volume_size() / cluster;
         // The superblock: the primary, then the two copies at the end.
@@ -159,7 +173,7 @@ impl<D: ReadAt> Volume<D> {
             }
             let page = self.read_physical(lcn, 1)?;
             let (at, len) = (le32(&page, 0x78) as usize, le32(&page, 0x7c) as usize);
-            if &page[0..4] == b"SUPB" && self_checksum_ok(&page, at, len, cluster as usize) {
+            if &page[0..4] == b"SUPB" && self_checksum_ok(&page, at, len, cluster as usize, false) {
                 supb = Some(page);
                 break;
             }
@@ -182,7 +196,13 @@ impl<D: ReadAt> Volume<D> {
             let page = self.read_physical(lcn, page_size / cluster)?;
             let reference_size = le32(&page, 0x5c) as usize;
             if &page[0..4] != b"CHKP"
-                || !self_checksum_ok(&page, le32(&page, 0x58) as usize, reference_size, cluster as usize)
+                || !self_checksum_ok(
+                    &page,
+                    le32(&page, 0x58) as usize,
+                    reference_size,
+                    cluster as usize,
+                    false,
+                )
             {
                 continue;
             }
@@ -200,6 +220,9 @@ impl<D: ReadAt> Volume<D> {
     /// The other checkpoint the superblock lists, when it is valid and
     /// older than the current one.
     pub(crate) fn older_checkpoint(&self) -> Option<Checkpoint> {
+        if self.v1 {
+            return None;
+        }
         let lcn = *self.checkpoint_lcns.iter().find(|&&l| l != self.checkpoint.lcn)?;
         let page = self.read_physical(lcn, self.page_size / self.cluster).ok()?;
         let ok = page.get(0..4) == Some(b"CHKP")
@@ -208,6 +231,7 @@ impl<D: ReadAt> Volume<D> {
                 le32(&page, 0x58) as usize,
                 le32(&page, 0x5c) as usize,
                 self.cluster as usize,
+                false,
             );
         let clock = le64(&page, 0x60);
         if !ok || clock >= self.checkpoint.clock {
@@ -240,10 +264,10 @@ impl<D: ReadAt> Volume<D> {
                 Err(_) if lenient => continue,
                 Err(e) => return Err(e),
             };
-            let node = Node::at(&page, PAGE_HEADER_SIZE)?;
+            let node = self.node_in(&page, self.node_offset())?;
             if !node.is_leaf() {
                 for row in node.rows() {
-                    todo.push((PageRef::parse(row?.value)?, depth + 1));
+                    todo.push((self.page_ref(row?.value)?, depth + 1));
                 }
             }
             out.push(r);
@@ -261,7 +285,7 @@ impl<D: ReadAt> Volume<D> {
     /// alike are not walked.
     pub fn deferred_pages(&self) -> Result<Vec<(usize, Vec<u64>)>> {
         use std::collections::HashSet;
-        let Some(old) = self.older_checkpoint() else {
+        let Some(old) = self.older_checkpoint().filter(|_| !self.v1) else {
             return Ok(Vec::new());
         };
         let per_page = (self.page_size / self.cluster) as usize;
@@ -326,6 +350,125 @@ impl<D: ReadAt> Volume<D> {
         Ok(out)
     }
 
+    /// ReFS 1.x: the superblock at block 0x1e (the volume GUID at 0x30, at
+    /// 0x50 the offset and at 0x54 the number of its checkpoints' block
+    /// numbers, at 0x58 and 0x5c its own reference), the checkpoint with
+    /// the higher sequence number (u64 at 8 of the block header), and its
+    /// roots; no container table: one container stands for the volume,
+    /// whose clusters are where they say.
+    fn load_v1(&mut self) -> Result<()> {
+        let supb = self.read_block(SUPERBLOCK_LCN)?;
+        let (at, len) = (le32(&supb, 0x58) as usize, le32(&supb, 0x5c) as usize);
+        if le64(&supb, 0) != SUPERBLOCK_LCN || !self_checksum_ok(&supb, at, len, V1_BLOCK as usize, true) {
+            return Err(format_err!("no valid superblock"));
+        }
+        self.volume_guid = supb[0x30..0x40].try_into().unwrap();
+        let (list, count) = (le32(&supb, 0x50) as usize, le32(&supb, 0x54) as usize);
+        if count != 2 || list + 16 > supb.len() {
+            return Err(format_err!("superblock lists {count} checkpoints"));
+        }
+        self.checkpoint_lcns.clear();
+        let mut best: Option<(u64, u64, Vec<u8>)> = None;
+        for i in 0..count {
+            let block = le64(&supb, list + 8 * i);
+            self.checkpoint_lcns.push(block);
+            let Ok(page) = self.read_block(block) else {
+                continue;
+            };
+            let (at, len) = (le32(&page, 0x38) as usize, le32(&page, 0x3c) as usize);
+            if le64(&page, 0) != block || !self_checksum_ok(&page, at, len, V1_BLOCK as usize, true) {
+                continue;
+            }
+            let clock = le64(&page, 8);
+            if best.as_ref().is_none_or(|b| clock > b.1) {
+                best = Some((block, clock, page));
+            }
+        }
+        let (block, clock, chkp) = best.ok_or_else(|| format_err!("no valid checkpoint"))?;
+        self.checkpoint = Self::parse_checkpoint_v1(block, clock, &chkp)?;
+        let clusters = (self.boot.volume_size() / self.cluster).max(1);
+        self.clusters_per_container = clusters.next_power_of_two();
+        self.containers = BTreeMap::from([(0, 0)]);
+        self.container_classes = BTreeMap::from([(0, 0)]);
+        self.compacted.clear();
+        self.units.lock().unwrap().clear();
+        self.load_objects()
+    }
+
+    /// A ReFS 1.x checkpoint: the version at 0x34 and 0x36, at 0x58 the
+    /// number of roots and from 0x5c their offsets (24-byte references).
+    fn parse_checkpoint_v1(block: u64, clock: u64, page: &[u8]) -> Result<Checkpoint> {
+        let count = le32(page, 0x58) as usize;
+        if !(6..=32).contains(&count) {
+            return Err(format_err!("checkpoint with {count} roots"));
+        }
+        let root_offsets: Vec<usize> = (0..count).map(|i| le32(page, 0x5c + 4 * i) as usize).collect();
+        let roots = root_offsets
+            .iter()
+            .enumerate()
+            .map(|(i, &at)| {
+                page.get(at..at + 0x18)
+                    .ok_or_else(|| format_err!("checkpoint root {i} outside the page"))
+                    .and_then(PageRef::parse_v1)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Checkpoint {
+            lcn: block,
+            clock,
+            major: crate::util::le16(page, 0x34),
+            minor: crate::util::le16(page, 0x36),
+            flags: 0,
+            reference_size: 0x18,
+            roots,
+            root_offsets,
+        })
+    }
+
+    /// Reads ReFS 1.x block `n`.
+    fn read_block(&self, n: u64) -> Result<Vec<u8>> {
+        let mut buf = vec![0u8; V1_BLOCK as usize];
+        let at = n
+            .checked_mul(V1_BLOCK)
+            .and_then(|b| b.checked_add(self.offset))
+            .filter(|_| n < self.boot.volume_size() / V1_BLOCK)
+            .ok_or_else(|| format_err!("block {n:#x} outside the volume"))?;
+        self.dev.read_exact_at(&mut buf, at)?;
+        Ok(buf)
+    }
+
+    /// Checkpoint root `i` (ReFS 1.x has 6 roots, 3.x 13 or more).
+    pub(crate) fn root(&self, i: usize) -> Result<PageRef> {
+        self.checkpoint
+            .roots
+            .get(i)
+            .cloned()
+            .ok_or_else(|| format_err!("no checkpoint root {i} (of {})", self.checkpoint.roots.len()))
+    }
+
+    /// Where a page's node starts (after its header).
+    pub fn node_offset(&self) -> usize {
+        if self.v1 { V1_HEADER_SIZE } else { PAGE_HEADER_SIZE }
+    }
+
+    /// The node whose descriptor is at `buf[descriptor]`, as this volume
+    /// lays nodes out.
+    pub fn node_in<'b>(&self, buf: &'b [u8], descriptor: usize) -> Result<Node<'b>> {
+        if self.v1 {
+            Node::at_v1(buf, descriptor)
+        } else {
+            Node::at(buf, descriptor)
+        }
+    }
+
+    /// A page reference in a row of this volume's kind.
+    pub fn page_ref(&self, b: &[u8]) -> Result<PageRef> {
+        if self.v1 {
+            PageRef::parse_v1(b)
+        } else {
+            PageRef::parse(b)
+        }
+    }
+
     fn parse_checkpoint(lcn: u64, clock: u64, page: &[u8]) -> Result<Checkpoint> {
         let reference_size = le32(page, 0x5c) as usize;
         if !matches!(reference_size, 0x30 | 0x48 | 0x68) {
@@ -380,6 +523,9 @@ impl<D: ReadAt> Volume<D> {
 
     fn read_log_state(&self) -> Result<LogState> {
         const PAGE: u64 = 4096;
+        if self.v1 {
+            return Err(Error::Unsupported("the log of ReFS 1.x".into()));
+        }
         let checkpoint = Lsn::from(le64(&self.read_physical(self.checkpoint.lcn, 1)?, 0x70));
         // The control page, where Windows put it so far: among the
         // volume's first clusters (plain volumes), or right after the log
@@ -455,6 +601,16 @@ impl<D: ReadAt> Volume<D> {
     /// Reads the page a reference points at (virtual clusters unless
     /// `physical`), checking its checksum and that it is a B+-tree page.
     pub fn read_page(&self, r: &PageRef, physical: bool) -> Result<Vec<u8>> {
+        if self.v1 {
+            let page = self.read_block(r.lcns[0])?;
+            if !r.verifies(&page) {
+                return Err(format_err!("page at {:#x} fails its checksum", r.lcns[0]));
+            }
+            if le64(&page, 0) != r.lcns[0] {
+                return Err(format_err!("block {:#x} is no page of its own", r.lcns[0]));
+            }
+            return Ok(page);
+        }
         let per_page = (self.page_size / self.cluster) as usize;
         let mut page = Vec::with_capacity(self.page_size as usize);
         for &lcn in &r.lcns[..per_page] {
@@ -506,7 +662,7 @@ impl<D: ReadAt> Volume<D> {
             return Err(format_err!("B+-tree deeper than {MAX_DEPTH} levels"));
         }
         let page = self.read_page(r, physical)?;
-        self.node(&Node::at(&page, PAGE_HEADER_SIZE)?, physical, depth, f)
+        self.node(&self.node_in(&page, self.node_offset())?, physical, depth, f)
     }
 
     fn node(
@@ -521,7 +677,7 @@ impl<D: ReadAt> Volume<D> {
             let more = if node.is_leaf() {
                 f(row)?
             } else {
-                self.level(&PageRef::parse(row.value)?, physical, depth + 1, f)?
+                self.level(&self.page_ref(row.value)?, physical, depth + 1, f)?
             };
             if !more {
                 return Ok(false);
@@ -537,7 +693,7 @@ impl<D: ReadAt> Volume<D> {
         let mut cpc = 0;
         let mut last = Err(format_err!("no container table"));
         for root in [ROOT_CONTAINERS, ROOT_CONTAINERS_COPY] {
-            let r = self.checkpoint.roots[root].clone();
+            let r = self.root(root)?;
             containers.clear();
             classes.clear();
             compacted.clear();
@@ -570,7 +726,7 @@ impl<D: ReadAt> Volume<D> {
         self.container_classes = classes;
         // Their streams' ranges and kept clusters: root 10.
         if !compacted.is_empty() {
-            let r = self.checkpoint.roots[ROOT_CONTAINER_INDEX].clone();
+            let r = self.root(ROOT_CONTAINER_INDEX)?;
             self.walk(&r, false, &mut |row| {
                 if row.key.len() >= 16
                     && let Some(c) = compacted.get_mut(&le64(row.key, 0))
@@ -673,8 +829,10 @@ impl<D: ReadAt> Volume<D> {
     }
 
     fn load_objects(&mut self) -> Result<()> {
-        let r = self.checkpoint.roots[ROOT_OBJECTS].clone();
+        let r = self.root(ROOT_OBJECTS)?;
         let reference_size = self.checkpoint.reference_size;
+        // The reference: at 0x20 of the value (at 0 on ReFS 1.x).
+        let at = if self.v1 { 0 } else { 0x20 };
         let mut objects = BTreeMap::new();
         self.walk(&r, false, &mut |row| {
             if row.key.len() < 16 {
@@ -682,9 +840,9 @@ impl<D: ReadAt> Volume<D> {
             }
             let reference = row
                 .value
-                .get(0x20..0x20 + reference_size)
+                .get(at..at + reference_size)
                 .ok_or_else(|| format_err!("object table row of {} bytes", row.value.len()))?;
-            objects.insert(le64(row.key, 8), PageRef::parse(reference)?);
+            objects.insert(le64(row.key, 8), self.page_ref(reference)?);
             Ok(())
         })?;
         self.objects = objects;
@@ -707,7 +865,7 @@ impl<D: ReadAt> Volume<D> {
     /// free counts and its free uniform ranges).
     pub fn free_clusters(&self) -> Result<u64> {
         let mut free = 0u64;
-        self.walk(&self.checkpoint.roots[1].clone(), false, &mut |row| {
+        self.walk(&self.root(1)?, false, &mut |row| {
             let v = row.value;
             if v.len() >= 0x18 {
                 match (le16(v, 0x12), le16(v, 0x10)) {

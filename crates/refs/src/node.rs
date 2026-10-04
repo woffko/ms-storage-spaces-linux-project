@@ -7,7 +7,8 @@
 //! bytes per row: a 16-bit row offset relative to the header and a 16-bit
 //! marker) and the row count. A row starts with a 16-byte row header: its
 //! size, the offset and length of its key and of its value, both relative
-//! to the row.
+//! to the row. On ReFS 1.x the header is 32 bytes, the end of the key
+//! index at 0x18 (or 0), and the key index entries have no marker.
 
 use crate::error::{Result, format_err};
 use crate::util::{le16, le32};
@@ -39,16 +40,35 @@ impl<'a> Node<'a> {
         Self::with_header(buf, header)
     }
 
+    /// A ReFS 1.x node whose descriptor starts at `buf[descriptor]`.
+    pub fn at_v1(buf: &'a [u8], descriptor: usize) -> Result<Self> {
+        let rel = le32(buf, descriptor) as usize;
+        let header = descriptor
+            .checked_add(rel)
+            .filter(|&h| rel != 0 && h.checked_add(0x20).is_some_and(|e| e <= buf.len()))
+            .ok_or_else(|| format_err!("node header outside its {} bytes", buf.len()))?;
+        Self::parse(buf, header, true)
+    }
+
     /// The node whose header starts at `buf[header]`.
     pub fn with_header(buf: &'a [u8], header: usize) -> Result<Self> {
-        if header.checked_add(0x28).is_none_or(|e| e > buf.len()) {
+        Self::parse(buf, header, false)
+    }
+
+    fn parse(buf: &'a [u8], header: usize, v1: bool) -> Result<Self> {
+        let size = if v1 { 0x20 } else { 0x28 };
+        if header.checked_add(size).is_none_or(|e| e > buf.len()) {
             return Err(format_err!("node header outside its {} bytes", buf.len()));
         }
         let level = buf[header + 0x0c];
         let flags = buf[header + 0x0d];
         let start = le32(buf, header + 0x10) as usize;
         let count = le32(buf, header + 0x14) as usize;
-        let end = le32(buf, header + 0x20) as usize;
+        let end = match (v1, le32(buf, header + 0x18) as usize) {
+            (true, 0) => start.saturating_add(count.saturating_mul(4)),
+            (true, end) => end,
+            (false, _) => le32(buf, header + 0x20) as usize,
+        };
         if end < start || (end - start) / 4 != count || header + end > buf.len() {
             return Err(format_err!(
                 "node key index {start:#x}..{end:#x} does not hold {count} rows"

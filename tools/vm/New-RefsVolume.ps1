@@ -6,8 +6,9 @@ Windows' view of every file (Track B corpus, docs/plan.md).
 C:\sstest\refs\<Name>\disk.vhdx (a dynamic VHDX of 52 GiB: Dev Drive needs
 50 GB; only what ReFS writes takes space) gets a GPT, one partition and a
 Dev Drive (ReFS; Windows 11 Pro formats ReFS only as a Dev Drive), or on
-Windows Server 2019 and 2022 (ReFS 3.4 and 3.7, no Dev Drives) a plain
-ReFS volume. Then
+Windows Server 2012 R2, 2019 and 2022 (ReFS 1.2, 3.4 and 3.7, no Dev
+Drives) a plain ReFS volume (ReFS 1.x: 64 KiB clusters only; the script
+runs on Windows PowerShell 4.0 there). Then
 the tree of the scenario is written and manifest.json lists every file and
 directory: path, kind, size, SHA-256 of the data and of each alternate
 stream, attributes, the four timestamps, hard link groups, link targets,
@@ -50,7 +51,10 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-if ($env:COMPUTERNAME -notin 'DESKTOP-BQ2J4NS', 'DESKTOP-ELS4LDK', 'WIN-R326LQ0OIA6', 'WIN-4OUB3OQJKV6') { throw 'Unexpected machine' }
+if ($env:COMPUTERNAME -notin 'DESKTOP-BQ2J4NS', 'DESKTOP-ELS4LDK', 'WIN-R326LQ0OIA6', 'WIN-4OUB3OQJKV6', 'WIN-2P4MLM1IG2G') { throw 'Unexpected machine' }
+# Windows PowerShell 4.0 (Server 2012 R2) has no New-Item link types, no
+# LinkType and Target on items: cmd's mklink and dir /al stand in.
+$ps4 = $PSVersionTable.PSVersion.Major -lt 5
 # Dev Drives (and the refsutil commands of the features scenario) came with
 # Windows 11; older Windows formats plain ReFS.
 $devDrive = (Get-Command Format-Volume).Parameters.ContainsKey('DevDrive')
@@ -107,11 +111,6 @@ try {
     Format-Volume @format | Out-Null
     $part = Get-Partition -DiskNumber $disk.Number -PartitionNumber $part.PartitionNumber
     $drive = "$($part.DriveLetter):\"
-    # ReFS before 3.5 (Windows Server 2019) has no hard links; before 3.14
-    # (3.4 and 3.7 of Server 2022 seen) named streams take up to 128 KiB.
-    $refsVersion = [version]((fsutil fsinfo refsinfo $drive | Select-String 'REFS (Volume )?Version') -replace '.*:\s*', '')
-    $older = $refsVersion -lt [version]'3.5'
-    $smallStreams = $refsVersion -lt [version]'3.14'
 
     # Deterministic content: SplitMix64 bytes seeded from the file's name.
     Add-Type -TypeDefinition @'
@@ -124,6 +123,21 @@ public static class RefsGen {
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool DeviceIoControl(Microsoft.Win32.SafeHandles.SafeFileHandle h, uint code, ref DuplicateExtentsData input,
         int inputSize, IntPtr output, int outputSize, out int returned, IntPtr overlapped);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFile(string name, uint access, uint share,
+        IntPtr security, uint disposition, uint flags, IntPtr template);
+    // The ReFS version in the volume's boot sector (major, minor at 0x28;
+    // fsutil fsinfo refsinfo does not exist before Windows 10).
+    public static Version BootVersion(char drive) {
+        using (var h = CreateFile(@"\\.\" + drive + ":", 0x80000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero)) {
+            if (h.IsInvalid) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            using (var fs = new FileStream(h, FileAccess.Read)) {
+                var b = new byte[512];
+                if (fs.Read(b, 0, 512) != 512) throw new IOException("short boot sector");
+                return new Version(b[0x28], b[0x29]);
+            }
+        }
+    }
     // A block clone of the whole file (FSCTL_DUPLICATE_EXTENTS_TO_FILE),
     // `cluster` the volume's cluster size.
     public static void Clone(string src, string dst, long cluster) {
@@ -189,6 +203,11 @@ public static class RefsGen {
     }
 }
 '@
+    # ReFS before 3.5 (1.2 and 3.4 seen) has no hard links; before 3.14
+    # (3.4 and 3.7 of Server 2022 seen) named streams take up to 128 KiB.
+    $refsVersion = [RefsGen]::BootVersion($part.DriveLetter)
+    $older = $refsVersion -lt [version]'3.5'
+    $smallStreams = $refsVersion -lt [version]'3.14'
     function New-File([string] $rel, [long] $size) {
         $p = Join-Path $drive $rel
         [IO.Directory]::CreateDirectory((Split-Path $p)) | Out-Null
@@ -279,7 +298,7 @@ public static class RefsGen {
         # Alternate data streams.
         New-File 'streams\host.txt' 2000
         $h = Join-Path $drive 'streams\host.txt'
-        Set-Content -Path $h -Stream small -Value 'a small stream' -NoNewline
+        Set-Content -Path $h -Stream small -Value ([Text.Encoding]::ASCII.GetBytes('a small stream')) -Encoding Byte
         $big = New-Object byte[] $(if ($smallStreams) { 120000 } else { 200000 }); (New-Object Random 7).NextBytes($big); Set-Content -Path $h -Stream big -Value $big -Encoding Byte
         # Links.
         New-File 'links\target.txt' 3000
@@ -287,10 +306,19 @@ public static class RefsGen {
             New-Item -ItemType HardLink -Path (Join-Path $drive 'links\hard1.txt') -Target (Join-Path $drive 'links\target.txt') | Out-Null
             New-Item -ItemType HardLink -Path (Join-Path $drive 'names\hard2.txt') -Target (Join-Path $drive 'links\target.txt') | Out-Null
         }
-        New-Item -ItemType SymbolicLink -Path (Join-Path $drive 'links\sym_file') -Target (Join-Path $drive 'links\target.txt') | Out-Null
+        if ($ps4) {
+            Invoke-Native "mklink `"$(Join-Path $drive 'links\sym_file')`" `"$(Join-Path $drive 'links\target.txt')`"" | Out-Null
+        } else {
+            New-Item -ItemType SymbolicLink -Path (Join-Path $drive 'links\sym_file') -Target (Join-Path $drive 'links\target.txt') | Out-Null
+        }
         cmd /c mklink "$(Join-Path $drive 'links\sym_rel')" target.txt | Out-Null
-        New-Item -ItemType SymbolicLink -Path (Join-Path $drive 'links\sym_dir') -Target (Join-Path $drive 'deep') | Out-Null
-        New-Item -ItemType Junction -Path (Join-Path $drive 'links\junction') -Target (Join-Path $drive 'sizes') | Out-Null
+        if ($ps4) {
+            Invoke-Native "mklink /d `"$(Join-Path $drive 'links\sym_dir')`" `"$(Join-Path $drive 'deep')`"" | Out-Null
+            Invoke-Native "mklink /j `"$(Join-Path $drive 'links\junction')`" `"$(Join-Path $drive 'sizes')`"" | Out-Null
+        } else {
+            New-Item -ItemType SymbolicLink -Path (Join-Path $drive 'links\sym_dir') -Target (Join-Path $drive 'deep') | Out-Null
+            New-Item -ItemType Junction -Path (Join-Path $drive 'links\junction') -Target (Join-Path $drive 'sizes') | Out-Null
+        }
         # Attributes and timestamps.
         foreach ($a in 'ReadOnly', 'Hidden', 'System') {
             New-File "attrs\$($a.ToLower()).txt" 10
@@ -298,15 +326,16 @@ public static class RefsGen {
         }
         New-File 'attrs\times.txt' 10
         $t = Get-Item -Force (Join-Path $drive 'attrs\times.txt')
-        $t.CreationTimeUtc = [datetime]::new(2001, 2, 3, 4, 5, 6, [DateTimeKind]::Utc)
-        $t.LastWriteTimeUtc = [datetime]::new(2010, 11, 12, 13, 14, 15, [DateTimeKind]::Utc)
-        $t.LastAccessTimeUtc = [datetime]::new(2020, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+        $t.CreationTimeUtc = New-Object DateTime 2001, 2, 3, 4, 5, 6, ([DateTimeKind]::Utc)
+        $t.LastWriteTimeUtc = New-Object DateTime 2010, 11, 12, 13, 14, 15, ([DateTimeKind]::Utc)
+        $t.LastAccessTimeUtc = New-Object DateTime 2020, 1, 1, 0, 0, 0, ([DateTimeKind]::Utc)
         # Block cloning: copies of the 10 MiB file (Copy-Item clones on a Dev Drive).
         New-Item -ItemType Directory -Force (Join-Path $drive 'clones') | Out-Null
         Copy-Item (Join-Path $drive 'sizes\size_10485760.bin') (Join-Path $drive 'clones\copy1.bin')
         Copy-Item (Join-Path $drive 'sizes\size_10485760.bin') (Join-Path $drive 'clones\copy2.bin')
         # Without Dev Drives Copy-Item copies: a block clone made directly.
-        if (-not $devDrive) { [RefsGen]::Clone((Join-Path $drive 'sizes\size_10485760.bin'), (Join-Path $drive 'clones\clone3.bin'), $ClusterSize) }
+        # (ReFS 1.x has no block cloning.)
+        if (-not $devDrive -and $refsVersion.Major -ge 3) { [RefsGen]::Clone((Join-Path $drive 'sizes\size_10485760.bin'), (Join-Path $drive 'clones\clone3.bin'), $ClusterSize) }
         # Deleted and renamed.
         New-File 'gone\deleted.txt' 5000; Remove-Item (Join-Path $drive 'gone\deleted.txt')
         New-File 'gone\old_name.txt' 5000; Rename-Item (Join-Path $drive 'gone\old_name.txt') 'new_name.txt'
@@ -352,8 +381,23 @@ public static class RefsGen {
                 created = $item.CreationTimeUtc.ToFileTimeUtc(); written = $item.LastWriteTimeUtc.ToFileTimeUtc()
                 accessed = $item.LastAccessTimeUtc.ToFileTimeUtc()
             }
-            $link = $item.LinkType -in 'SymbolicLink', 'Junction'
-            if ($link) { $e.link_type = "$($item.LinkType)"; $e.link_target = "$($item.Target)" }
+            if ($ps4) {
+                # dir /al lists "<SYMLINK>  name [target]" (<SYMLINKD>, <JUNCTION>).
+                $listing = @()
+                if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                    $listing = cmd /c "dir /al `"$(Split-Path $item.FullName)`" 2>nul"
+                }
+                $line = $listing | Where-Object { $_ -match ('<(SYMLINKD?|JUNCTION)>\s+' + [regex]::Escape($item.Name) + ' \[(.*)\]$') } | Select-Object -First 1
+                $link = [bool]$line
+                if ($link) {
+                    $null = $line -match '<(SYMLINKD?|JUNCTION)>\s+.* \[(.*)\]$'
+                    $e.link_type = if ($Matches[1] -eq 'JUNCTION') { 'Junction' } else { 'SymbolicLink' }
+                    $e.link_target = $Matches[2]
+                }
+            } else {
+                $link = $item.LinkType -in 'SymbolicLink', 'Junction'
+                if ($link) { $e.link_type = "$($item.LinkType)"; $e.link_target = "$($item.Target)" }
+            }
             if (-not $item.PSIsContainer -and -not $link) {
                 $e.size = $item.Length
                 $e.sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $item.FullName).Hash.ToLowerInvariant()
@@ -375,15 +419,14 @@ public static class RefsGen {
             $entries.Add($e)
         }
     $vol = Get-Volume -Partition $part
-    $info = fsutil fsinfo refsinfo $drive
+    $info = if ($refsVersion.Major -ge 3) { fsutil fsinfo refsinfo $drive } else { fsutil fsinfo volumeinfo $drive }
     $manifest = [ordered]@{
         name = $Name; kind = 'refs'; scenario = $Scenario
         windows_build = [Environment]::OSVersion.Version.ToString()
-        # "REFS Volume Version" on Windows 11, "REFS Version" on Server 2019.
-        refs_version = (($info | Select-String 'REFS (Volume )?Version') -replace '.*:\s*', '')
+        refs_version = "$refsVersion"
         cluster_size = $ClusterSize; sha256_checksums = [bool]$Sha256Checksums; integrity_streams = [bool]$IntegrityStreams
         label = $vol.FileSystemLabel; volume_size = $vol.Size; free = $vol.SizeRemaining
-        serial = (($info | Select-String 'Volume Serial Number') -replace '.*:\s*', '')
+        serial = (($info | Select-String 'Volume Serial Number') -replace '.*:\s*', '' | Select-Object -First 1)
         partition_offset = $part.Offset
         pool = if ($PoolDisks -gt 0) { [ordered]@{ name = $poolName; space = $Name; disks = $PoolDisks; resiliency = $Resiliency } } else { $null }
         refsinfo = ($info -join "`n")

@@ -6,6 +6,10 @@ use crate::util::{le32, le64};
 
 /// Bytes of the header every metadata page (SUPB, CHKP, MSB+) starts with.
 pub const PAGE_HEADER_SIZE: usize = 0x50;
+/// ReFS 1.x: metadata pages are blocks of 16 KiB, numbered from the start
+/// of the volume, whose 48-byte header starts with their own number.
+pub const V1_BLOCK: u64 = 0x4000;
+pub const V1_HEADER_SIZE: usize = 0x30;
 
 /// A page reference: the (up to four) clusters of a page and the checksum
 /// of the page's content. 48 bytes with CRC64, 72 with SHA-256, 104 on
@@ -35,6 +39,30 @@ impl PageRef {
         };
         Ok(PageRef {
             lcns: [le64(b, 0), le64(b, 8), le64(b, 16), le64(b, 24)],
+            checksum_kind: kind,
+            checksum,
+        })
+    }
+
+    /// A ReFS 1.x reference (24 bytes): the block, then the checksum's
+    /// descriptor (kind at 0x0a, its offset from 8 at 0x0b, length at
+    /// 0x0c) and the checksum.
+    pub fn parse_v1(b: &[u8]) -> Result<Self> {
+        if b.len() < 0x10 {
+            return Err(format_err!("page reference of {} bytes", b.len()));
+        }
+        let kind = b[0x0a];
+        let offset = b[0x0b] as usize;
+        let len = crate::util::le16(b, 0x0c) as usize;
+        let checksum = match kind {
+            0 => Vec::new(),
+            _ => b
+                .get(8 + offset..8 + offset + len)
+                .ok_or_else(|| format_err!("page reference checksum outside its {} bytes", b.len()))?
+                .to_vec(),
+        };
+        Ok(PageRef {
+            lcns: [le64(b, 0), 0, 0, 0],
             checksum_kind: kind,
             checksum,
         })

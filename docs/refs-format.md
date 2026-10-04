@@ -477,6 +477,53 @@ KiB and 64 KiB clusters, integrity streams, a block clone and, on 3.7,
 hard links, read and mounted with every file and named stream as Windows
 listed it, `refs check` clean; fixtures in CI).
 
+## ReFS 1.x (Windows Server 2012 R2)
+
+Windows Server 2012 R2 (build 9600) formats ReFS 1.2, with clusters of
+64 KiB only (`Format-Volume -FileSystem ReFS`; 4 KiB is refused, and there
+is no `fsutil fsinfo refsinfo`). The format is of the same family as 3.x,
+told apart by the major version 1 in the boot sector (whose layout is
+3.x's, the container size 0):
+
+* Metadata pages are blocks of 16 KiB, numbered from the start of the
+  volume (not clusters, not virtual: there is no container table). A
+  block starts with a 48-byte header: its own number at 0, a sequence
+  number at 8. Page references are 24 bytes: the block number, then the
+  checksum's descriptor as in 3.x (kind at 0x0a, 2 for CRC-64/NVME as on
+  3.x, over the whole block; offset from 8 at 0x0b, length at 0x0c) and
+  the checksum.
+* The superblock is block 0x1e: the volume GUID at 0x30, at 0x50 the
+  offset and at 0x54 the number (2) of its checkpoints' block numbers,
+  at 0x58 and 0x5c the offset and length of its own reference, whose
+  checksum covers the block with that reference zeroed (as on 3.x). A
+  checkpoint: its sequence number at 8 (the higher one is current), the
+  version at 0x34 and 0x36, its own reference at 0x38/0x3c, at 0x58 the
+  number of roots (6: the object table, the two allocators, the schema,
+  the parent-child table, the object table's copy) and from 0x5c their
+  offsets.
+* Nodes: the descriptor's offset at 0x30 of a page; the node header is
+  32 bytes, the end of the key index at 0x18 (or 0), key index entries a
+  plain offset. Rows as on 3.x.
+* The object table's values start with the object's tree reference.
+* Directories have the rows of 3.x (0x10 its own, 0x20 a file id's name,
+  0x30 a name with the file's record or a directory's entry); a
+  directory's entry has its id at 0 (at 8 on 3.x), a file's record the
+  times at 0x28..0x48 and the attributes at 0x48 as on 3.x, the size and
+  the bytes allocated at 0x68 and 0x70.
+* Records have the attribute rows of 3.4 (see "ReFS 3.4 and 3.7"): $DATA
+  (0x80) the same header (the size at 0x3c), but the extent map's rows
+  are runs keyed by their first 16 bytes: (first block in the stream,
+  blocks, first block on the volume, flags), in blocks of 16 KiB; data
+  takes whole clusters (even 100 bytes). No resident data.
+* The allocators (roots 1 and 2) are laid out otherwise (rows over
+  0x100000 blocks) and not read.
+
+`refs` reads 1.x volumes this way (pages, directories, files; runs taken
+in clusters, refused if not whole clusters) and checks their pages and
+files (`refs check`: checksums, nodes, runs inside the volume and mapped
+once; not the allocators); writing them is refused (**verified**: a
+volume Windows Server 2012 R2 made, every file as Windows listed it).
+
 ## Writing (Track B4)
 
 `refs::write` commits the way described below (`refs set`, `overwrite`,

@@ -86,7 +86,12 @@ impl Entry {
         matches!(self.target, Target::Directory(_))
     }
 
-    fn parse(key: &[u8], value: &[u8]) -> Result<Self> {
+    /// A name row (type 0x30): a file with its record, a directory's (or
+    /// a moved file's) index entry. ReFS 1.x: the record has the size and
+    /// the allocated size at 0x68 and 0x70 (0x58 and 0x60 on 3.x), an index
+    /// entry the directory's id at 0 (at 8 on 3.x).
+    fn parse(key: &[u8], value: &[u8], v1: bool) -> Result<Self> {
+        let sizes = if v1 { 0x68 } else { 0x58 };
         let flags = le16(key, 2);
         let name = utf16(&key[4..]);
         let windows = |a: u32| {
@@ -98,7 +103,7 @@ impl Entry {
         };
         match flags {
             1 => {
-                if value.len() < 0x68 {
+                if value.len() < sizes + 0x10 {
                     return Err(format_err!("record of {name:?} of {} bytes", value.len()));
                 }
                 Ok(Entry {
@@ -110,8 +115,8 @@ impl Entry {
                         changed: le64(value, 0x38),
                         accessed: le64(value, 0x40),
                     },
-                    size: le64(value, 0x58),
-                    allocated: le64(value, 0x60),
+                    size: le64(value, sizes),
+                    allocated: le64(value, sizes + 8),
                     target: Target::Embedded(value.to_vec()),
                 })
             }
@@ -120,7 +125,11 @@ impl Entry {
                     return Err(format_err!("index entry of {name:?} of {} bytes", value.len()));
                 }
                 let raw = le32(value, 0x40);
-                let (ordinal, home) = (le64(value, 0), le64(value, 8));
+                let (ordinal, home) = if v1 {
+                    (0, le64(value, 0))
+                } else {
+                    (le64(value, 0), le64(value, 8))
+                };
                 Ok(Entry {
                     name,
                     attributes: windows(raw),
@@ -242,7 +251,7 @@ impl<D: ReadAt> Volume<D> {
         let mut out = Vec::new();
         for (key, value) in self.object_rows(oid)? {
             if le16(&key, 0) == ROW_NAME {
-                out.push(Entry::parse(&key, &value)?);
+                out.push(Entry::parse(&key, &value, self.v1)?);
             }
         }
         Ok(out)
@@ -377,7 +386,7 @@ impl<D: ReadAt> Volume<D> {
             Target::Directory(oid) => self.own_row(oid)?,
             _ => self.record(entry)?,
         };
-        let node = Node::at(&record, 0)?;
+        let node = self.node_in(&record, 0)?;
         let mut rows = Vec::new();
         self.walk_node(&node, false, 0, &mut |row: Row<'_>| {
             rows.push((row.key.to_vec(), row.value.to_vec()));
@@ -549,7 +558,7 @@ impl<D: ReadAt> Volume<D> {
         let mut out = Vec::new();
         // The checksum of integrity streams' data.
         let kind = le16(value, 0x16);
-        self.extent_node(&Node::at(value, 0)?, 0, kind, &mut out)?;
+        self.extent_node(&self.node_in(value, 0)?, 0, kind, &mut out)?;
         out.sort_by_key(|e| e.vcn);
         Ok(out)
     }
@@ -558,7 +567,7 @@ impl<D: ReadAt> Volume<D> {
     /// value (large maps: the value's node is an index over pages).
     pub(crate) fn extent_map_pages(&self, value: &[u8]) -> Result<Vec<u64>> {
         let mut out = Vec::new();
-        self.map_pages(&Node::at(value, 0)?, 0, &mut out)?;
+        self.map_pages(&self.node_in(value, 0)?, 0, &mut out)?;
         Ok(out)
     }
 
@@ -571,12 +580,12 @@ impl<D: ReadAt> Volume<D> {
         }
         let per_page = (self.page_size / self.cluster) as usize;
         for row in node.rows() {
-            let child = crate::page::PageRef::parse(row?.value)?;
+            let child = self.page_ref(row?.value)?;
             for &l in &child.lcns[..per_page] {
                 out.push(self.translate(l)?);
             }
             let page = self.read_page(&child, false)?;
-            self.map_pages(&Node::at(&page, crate::page::PAGE_HEADER_SIZE)?, depth + 1, out)?;
+            self.map_pages(&self.node_in(&page, self.node_offset())?, depth + 1, out)?;
         }
         Ok(())
     }
@@ -584,6 +593,33 @@ impl<D: ReadAt> Volume<D> {
     fn extent_node(&self, node: &Node<'_>, depth: usize, kind: u16, out: &mut Vec<Extent>) -> Result<()> {
         if depth > 16 {
             return Err(format_err!("extent map deeper than 16 levels"));
+        }
+        if node.is_leaf() && self.v1 {
+            // ReFS 1.x: rows of runs, the key the value's first 16 bytes:
+            // (first block of the run in the stream, blocks, first block
+            // on the volume, flags), in blocks of 16 KiB; data takes whole
+            // clusters.
+            let per = self.cluster / crate::page::V1_BLOCK;
+            for row in node.rows() {
+                let v = row?.value;
+                if v.len() < 0x18 {
+                    return Err(format_err!("data run of {} bytes", v.len()));
+                }
+                let (vcn, n, block) = (le64(v, 0), le64(v, 8), le64(v, 0x10));
+                if !vcn.is_multiple_of(per) || !n.is_multiple_of(per) || !block.is_multiple_of(per) {
+                    return Err(Error::Unsupported(format!(
+                        "a data run of {n} blocks at block {block:#x}, not of whole clusters"
+                    )));
+                }
+                out.push(Extent {
+                    vcn: vcn / per,
+                    vlcn: block / per,
+                    clusters: n / per,
+                    written: true,
+                    checksums: None,
+                });
+            }
+            return Ok(());
         }
         if node.is_leaf() {
             for record in node.records(|r| (le16(r, 0x0a) as usize).max(24)) {
@@ -606,9 +642,9 @@ impl<D: ReadAt> Volume<D> {
             }
         } else {
             for row in node.rows() {
-                let child = crate::page::PageRef::parse(row?.value)?;
+                let child = self.page_ref(row?.value)?;
                 let page = self.read_page(&child, false)?;
-                self.extent_node(&Node::at(&page, crate::page::PAGE_HEADER_SIZE)?, depth + 1, kind, out)?;
+                self.extent_node(&self.node_in(&page, self.node_offset())?, depth + 1, kind, out)?;
             }
         }
         Ok(())
