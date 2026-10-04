@@ -6,8 +6,8 @@ Windows' view of every file (Track B corpus, docs/plan.md).
 C:\sstest\refs\<Name>\disk.vhdx (a dynamic VHDX of 52 GiB: Dev Drive needs
 50 GB; only what ReFS writes takes space) gets a GPT, one partition and a
 Dev Drive (ReFS; Windows 11 Pro formats ReFS only as a Dev Drive), or on
-Windows Server 2012 R2, 2019 and 2022 (ReFS 1.2, 3.4 and 3.7, no Dev
-Drives) a plain ReFS volume (ReFS 1.x: 64 KiB clusters only; the script
+Windows Server 2012 R2, 2016, 2019 and 2022 (ReFS 1.2, 3.1, 3.4 and 3.7,
+no Dev Drives) a plain ReFS volume (ReFS 1.x: 64 KiB clusters only; the script
 runs on Windows PowerShell 4.0 there). Then
 the tree of the scenario is written and manifest.json lists every file and
 directory: path, kind, size, SHA-256 of the data and of each alternate
@@ -51,7 +51,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-if ($env:COMPUTERNAME -notin 'DESKTOP-BQ2J4NS', 'DESKTOP-ELS4LDK', 'WIN-R326LQ0OIA6', 'WIN-4OUB3OQJKV6', 'WIN-2P4MLM1IG2G') { throw 'Unexpected machine' }
+if ($env:COMPUTERNAME -notin 'DESKTOP-BQ2J4NS', 'DESKTOP-ELS4LDK', 'WIN-R326LQ0OIA6', 'WIN-4OUB3OQJKV6', 'WIN-2P4MLM1IG2G', 'WIN-LA8L93TB06T') { throw 'Unexpected machine' }
 # Windows PowerShell 4.0 (Server 2012 R2) has no New-Item link types, no
 # LinkType and Target on items: cmd's mklink and dir /al stand in.
 $ps4 = $PSVersionTable.PSVersion.Major -lt 5

@@ -462,6 +462,12 @@ uniform rows, hard links), but keeps the data of small files in extents
 too (100 bytes in a cluster), and named streams resident only, of up to
 128 KiB.
 
+Windows Server 2016 (build 14393) formats ReFS 3.1: the boot sector's
+container size is 0 (the container table's rows give it; from 3.4 on the
+boot sector names it too), and records are laid out as on 3.4. Its log has
+record pages from 4 KiB page 0x24001 on, but no control page where 3.14
+keeps one (`refs` reads no log there; writing is refused anyway).
+
 On both, a value longer than a row (a named stream of 120 000 bytes) is
 split over rows whose keys differ only in the u32 at 4, where the part
 starts in the value; the u32 at 0 is the whole value's bytes (a value in

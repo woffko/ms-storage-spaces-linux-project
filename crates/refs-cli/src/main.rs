@@ -813,8 +813,8 @@ fn fixture(dir: &std::path::Path, out: &std::path::Path, data_limit: u64, exclud
         }
         // The log's control and record pages (writing checks the log),
         // and the pages only the older checkpoint references (writing
-        // frees them).
-        if vol.checkpoint.major >= 3 {
+        // frees them): on versions `refs` writes.
+        if vol.writable_version().is_ok() {
             vol.log_state()?;
             vol.deferred_pages()?;
         }

@@ -718,7 +718,9 @@ impl<D: ReadAt> Volume<D> {
             }
         }
         last?;
-        if !cpc.is_power_of_two() || cpc * self.cluster != self.boot.container_size {
+        // The boot sector names the containers' size from 3.4 on (0 on 3.1).
+        let named = self.boot.container_size;
+        if !cpc.is_power_of_two() || (named != 0 && cpc.checked_mul(self.cluster) != Some(named)) {
             return Err(format_err!("{cpc} clusters per container"));
         }
         self.clusters_per_container = cpc;
