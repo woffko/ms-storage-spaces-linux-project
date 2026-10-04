@@ -618,8 +618,13 @@ rows of thin spaces not allocated yet (M7).
   named streams of up to 128 KiB split over rows (as on 3.4; now joined on
   any version); five volumes (`r37*`) read and mounted as Windows listed
   them. Both VMs fully updated first (`tools/vm/Install-Updates.ps1`; the
-  format stayed the same). Open: ReFS 3.9 and 3.10 (Windows 11 22H2 and
-  23H2, no installation media at hand).
+  format stayed the same). ReFS 1.2 (B3; Windows Server 2012 R2, the
+  same day): 16 KiB blocks of their own (24-byte references, 48-byte
+  headers, 32-byte node headers), no container table, the records of 3.4
+  with runs of blocks (integrity checksums per block); five volumes
+  (`r12*`) read and mounted as Windows listed them, `refs check` without
+  the allocators. Open: ReFS 3.1 (Server 2016, next), 3.9 and 3.10
+  (Windows 11 22H2 and 23H2, no installation media at hand).
 * B2 (done): `refs mount` (FUSE, read-only;
   streams as extended attributes, links and junctions as symbolic links,
   hard links as one inode, directory listings cached), checked against Windows' listing of
@@ -1086,7 +1091,8 @@ and on spaces exposed by stage 1.
    Done for 3.14; 3.4 - 3.13 need older Windows to make samples.
 2. B2 FUSE mount (`fuser`), read-only; compression (LZ4/ZSTD), block clones,
    integrity streams, snapshots. Done.
-3. B3 ReFS 1.x/2.x read support. Blocked: needs Windows that formats them.
+3. B3 ReFS 1.x/2.x read support. Done for 1.2 (Windows Server 2012 R2);
+   2.x existed only in previews of Server 2016.
 4. B4 write support: copy-on-write B+-tree updates, allocators, refcounts,
    checkpoints, logging; validated by Windows `chkdsk` / `refsutil`. Done
    (a read-write FUSE mount, clones, integrity streams, files with stream

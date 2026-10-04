@@ -18,8 +18,10 @@
   `testdata/pools/NAME/` as sparse raw images (git-ignored). Corpus tests skip missing pools.
 - Older Windows for ReFS samples of other versions: Windows Server 2019 Evaluation (WIN-R326LQ0OIA6,
   `WIN_VM_HOST=Administrator@10.0.77.11`; ReFS 3.4, volumes `r34*`) and Server 2022 Evaluation
-  (WIN-4OUB3OQJKV6, `WIN_VM_HOST=Administrator@10.0.77.10`; ReFS 3.7, volumes `r37*`), key login. The user
-  runs one such VM at a time (Server 2012 R2 for ReFS 1.2 is planned): ask for the next one when needed.
+  (WIN-4OUB3OQJKV6, `WIN_VM_HOST=Administrator@10.0.77.10`; ReFS 3.7, volumes `r37*`) and Server 2012 R2
+  Evaluation (WIN-2P4MLM1IG2G, `WIN_VM_HOST=Administrator@10.0.77.12`; ReFS 1.2, 64 KiB clusters only,
+  Windows PowerShell 4.0, Win32-OpenSSH; volumes `r12*`), key login. The user runs one such VM at a time
+  (Server 2016 for ReFS 3.1 is next): ask for the next one when needed.
   `tools/vm/New-RefsVolume.ps1` formats plain ReFS where there are no Dev Drives;
   `tools/vm/Install-Updates.ps1` installs Windows updates there (as SYSTEM, since Windows Update refuses
   network logons).

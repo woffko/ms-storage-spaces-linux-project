@@ -120,10 +120,12 @@ fn a_damaged_boot_sector_is_refused() {
 
 #[test]
 fn integrity_streams_refuse_damaged_data() {
-    // CRC32-C per 4 KiB cluster; CRC-64 per 16 KiB of 64 KiB clusters.
+    // CRC32-C per 4 KiB cluster; CRC-64 per 16 KiB of 64 KiB clusters
+    // (ReFS 1.2 too, per block of a run).
     for (name, path, sums) in [
         ("r314integ", "/sizes/size_16385.bin", 5),
         ("r314integ64k", "/sizes/size_65537.bin", 8),
+        ("r12integ64k", "/sizes/size_65537.bin", 8),
     ] {
         let (mut image, offset) = load(name);
         let vol = Volume::open(&image, offset).unwrap();

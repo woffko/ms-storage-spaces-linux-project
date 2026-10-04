@@ -313,13 +313,15 @@ shows it): attach it to Windows once and remove it safely first.
 .SH LIMITS
 Verified against Windows on ReFS 3.14 volumes (Windows 11) with 4 KiB and
 64 KiB clusters, CRC-64 and SHA-256 metadata checksums and integrity
-streams, and on ReFS 3.7 and 3.4 volumes (Windows Server 2022 and 2019;
-3.4 lays out file records differently). Other ReFS 3.x versions are read by the same
+streams, and on ReFS 3.7, 3.4 and 1.2 volumes (Windows Server 2022, 2019
+and 2012 R2; 3.4 lays out file records differently, 1.2 also its pages). Other ReFS 3.x versions are read by the same
 rules but were not verified. Only ReFS 3.14 volumes are written; the
 writing commands and
 .B mount \-\-rw
 refuse others.
-Encrypted files and ReFS 1.x and 2.x are not read yet;
+Encrypted files and ReFS 2.x are not read yet, nor the allocators of
+ReFS 1.x by
+.BR "refs check" ;
 stream snapshots are read by
 .B cat
 but not shown in the mount.

@@ -6,8 +6,9 @@ marks statements backed by a test against volumes Windows created
 ReFS 3.14 Dev Drives of Windows 11 Insider 26340, 4 KiB and 64 KiB
 clusters, CRC64 and SHA-256 metadata checksums, integrity streams, stream
 snapshots and deduplicated files, a volume inside a two-way mirror space
-read through `storage-spaces`; and ReFS 3.4 and 3.7 volumes of Windows
-Server 2019 and 2022, see "ReFS 3.4 and 3.7").
+read through `storage-spaces`; ReFS 3.4 and 3.7 volumes of Windows
+Server 2019 and 2022, see "ReFS 3.4 and 3.7"; ReFS 1.2 volumes of Windows
+Server 2012 R2, see "ReFS 1.x").
 The most complete public description is
 [forefst](https://github.com/xbqt/forefst) (GPL-3.0, documentation read,
 no code taken); refsprogs (GPL-2.0+) and libfsrefs are the other prior art
@@ -481,7 +482,9 @@ listed it, `refs check` clean; fixtures in CI).
 
 Windows Server 2012 R2 (build 9600) formats ReFS 1.2, with clusters of
 64 KiB only (`Format-Volume -FileSystem ReFS`; 4 KiB is refused, and there
-is no `fsutil fsinfo refsinfo`). The format is of the same family as 3.x,
+is no `fsutil fsinfo refsinfo`), also with every update Windows Update
+offers (`refs.sys` 6.3.9600.21617). It has named streams, symbolic links,
+junctions and sparse files, but no hard links and no block cloning. The format is of the same family as 3.x,
 told apart by the major version 1 in the boot sector (whose layout is
 3.x's, the container size 0):
 
@@ -511,18 +514,27 @@ told apart by the major version 1 in the boot sector (whose layout is
   times at 0x28..0x48 and the attributes at 0x48 as on 3.x, the size and
   the bytes allocated at 0x68 and 0x70.
 * Records have the attribute rows of 3.4 (see "ReFS 3.4 and 3.7"): $DATA
-  (0x80) the same header (the size at 0x3c), but the extent map's rows
-  are runs keyed by their first 16 bytes: (first block in the stream,
-  blocks, first block on the volume, flags), in blocks of 16 KiB; data
-  takes whole clusters (even 100 bytes). No resident data.
+  (0x80) the same header (the size at 0x3c, the checksum kind at 0x16),
+  but the extent map's rows are runs keyed by their first 16 bytes: (first
+  block in the stream, blocks, first block on the volume), in blocks of 16
+  KiB, then at 0x18 a checksum descriptor (kind at 0x1a: 2 on integrity
+  streams; the offset of the checksums from 0x18 at 0x1b, their bytes at
+  0x1c): a CRC-64 per block of the run, as 3.x keeps one per 16 KiB of a
+  64 KiB cluster. Data takes whole clusters (even 100 bytes); there is no
+  resident data, and a sparse file's holes have no runs. Named streams
+  (0xb0, resident, 120 000 bytes in parts as on 3.4) and reparse points
+  (0xc0) are those of 3.4.
 * The allocators (roots 1 and 2) are laid out otherwise (rows over
   0x100000 blocks) and not read.
 
-`refs` reads 1.x volumes this way (pages, directories, files; runs taken
-in clusters, refused if not whole clusters) and checks their pages and
-files (`refs check`: checksums, nodes, runs inside the volume and mapped
-once; not the allocators); writing them is refused (**verified**: a
-volume Windows Server 2012 R2 made, every file as Windows listed it).
+`refs` reads 1.x volumes this way (pages, directories, files, named
+streams, links; runs taken in clusters, refused if not whole clusters;
+integrity streams checked on every read) and checks their pages and files
+(`refs check`: checksums, nodes, runs inside the volume and mapped once;
+not the allocators); writing them is refused (**verified**: five volumes
+Server 2012 R2 made before and after its updates, `r12*`, read and mounted
+with every file and named stream as Windows listed it, damaged data of an
+integrity stream refused, `refs check` clean; fixtures in CI).
 
 ## Writing (Track B4)
 
@@ -852,6 +864,7 @@ created, which lost the directory's contents).
 
 LZ4 on QuickAssist hardware (format 3 is decoded as LZ4, no sample),
 extended attributes, EFS, the USN journal, snapshots of named streams (read by the same rules, no sample),
-ReFS 3.5, 3.6 and 3.8 to 3.13 (no sample: 3.9 and 3.10 of Windows 11
-22H2 and 23H2; read by the rules of 3.4 where records have its rows, else
-by those of 3.14) and ReFS 1.x/2.x.
+ReFS 3.1 to 3.3, 3.5, 3.6 and 3.8 to 3.13 (no sample: 3.1 of Server
+2016, 3.9 and 3.10 of Windows 11 22H2 and 23H2; read by the rules of 3.4
+where records have its rows, else by those of 3.14), ReFS 1.1 (Server
+2012) and 2.x (previews of Server 2016 only).

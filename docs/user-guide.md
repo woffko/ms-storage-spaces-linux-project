@@ -539,10 +539,10 @@ symbolic links and junctions, attributes and times, volumes with 4 KiB
 and 64 KiB clusters, CRC-64 or SHA-256 metadata checksums and integrity
 streams, and files Windows compressed with LZ4 or ZSTD (`Enable-ReFSDedup
 -Type DedupAndCompress`, `refsutil compression`; checked unit by unit)
-(verified on ReFS 3.14 volumes made by Windows 11 and on ReFS 3.7 and 3.4
-volumes made by Windows Server 2022 and 2019). Not verified: ReFS 3.5,
-3.6 and 3.8 to 3.13. Not
-read yet: encrypted files, ReFS 1.x/2.x. Only ReFS 3.14 volumes are
+(verified on ReFS 3.14 volumes made by Windows 11 and on ReFS 3.7, 3.4
+and 1.2 volumes made by Windows Server 2022, 2019 and 2012 R2). Not
+verified: ReFS 1.1, 3.1 to 3.3, 3.5, 3.6 and 3.8 to 3.13. Not read yet:
+encrypted files, ReFS 2.x. Only ReFS 3.14 volumes are
 written; the writing commands and `refs mount --rw` refuse other
 versions. Compressed files are
 changed by writing them whole, see above; their named streams, if

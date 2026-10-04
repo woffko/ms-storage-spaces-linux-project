@@ -597,8 +597,10 @@ impl<D: ReadAt> Volume<D> {
         if node.is_leaf() && self.v1 {
             // ReFS 1.x: rows of runs, the key the value's first 16 bytes:
             // (first block of the run in the stream, blocks, first block
-            // on the volume, flags), in blocks of 16 KiB; data takes whole
-            // clusters.
+            // on the volume), in blocks of 16 KiB; data takes whole
+            // clusters. At 0x18 a checksum descriptor: the kind at 0x1a (2
+            // on integrity streams: a CRC-64 per block), the offset of the
+            // checksums from 0x18 at 0x1b, their bytes at 0x1c.
             let per = self.cluster / crate::page::V1_BLOCK;
             for row in node.rows() {
                 let v = row?.value;
@@ -611,12 +613,23 @@ impl<D: ReadAt> Volume<D> {
                         "a data run of {n} blocks at block {block:#x}, not of whole clusters"
                     )));
                 }
+                let checksums = match v.get(0x1a).copied().unwrap_or(0) {
+                    0 => None,
+                    kind => {
+                        let at = 0x18 + usize::from(v[0x1b]);
+                        let len = usize::from(le16(v, 0x1c));
+                        let bytes = v
+                            .get(at..at + len)
+                            .ok_or_else(|| format_err!("run checksums outside its {} bytes", v.len()))?;
+                        Some(self.data_checksums(u16::from(kind), n / per, bytes)?)
+                    }
+                };
                 out.push(Extent {
                     vcn: vcn / per,
                     vlcn: block / per,
                     clusters: n / per,
                     written: true,
-                    checksums: None,
+                    checksums,
                 });
             }
             return Ok(());
