@@ -6,7 +6,8 @@ Windows' view of every file (Track B corpus, docs/plan.md).
 C:\sstest\refs\<Name>\disk.vhdx (a dynamic VHDX of 52 GiB: Dev Drive needs
 50 GB; only what ReFS writes takes space) gets a GPT, one partition and a
 Dev Drive (ReFS; Windows 11 Pro formats ReFS only as a Dev Drive), or on
-Windows Server 2019 (ReFS 3.4, no Dev Drives) a plain ReFS volume. Then
+Windows Server 2019 and 2022 (ReFS 3.4 and 3.7, no Dev Drives) a plain
+ReFS volume. Then
 the tree of the scenario is written and manifest.json lists every file and
 directory: path, kind, size, SHA-256 of the data and of each alternate
 stream, attributes, the four timestamps, hard link groups, link targets,
@@ -49,7 +50,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-if ($env:COMPUTERNAME -notin 'DESKTOP-BQ2J4NS', 'DESKTOP-ELS4LDK', 'WIN-R326LQ0OIA6') { throw 'Unexpected machine' }
+if ($env:COMPUTERNAME -notin 'DESKTOP-BQ2J4NS', 'DESKTOP-ELS4LDK', 'WIN-R326LQ0OIA6', 'WIN-4OUB3OQJKV6') { throw 'Unexpected machine' }
 # Dev Drives (and the refsutil commands of the features scenario) came with
 # Windows 11; older Windows formats plain ReFS.
 $devDrive = (Get-Command Format-Volume).Parameters.ContainsKey('DevDrive')
