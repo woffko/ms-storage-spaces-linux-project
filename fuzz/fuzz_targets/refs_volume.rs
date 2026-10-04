@@ -2,12 +2,12 @@
 //! superblock, checkpoint, container and object tables, directories,
 //! file records, extents, streams and reparse points, and compressed
 //! (compacted) containers, and checked as `refs check` does. The base is
-//! one of six fixtures of
+//! one of seven fixtures of
 //! crates/refs/tests (64 KiB clusters; 4 KiB clusters with integrity
 //! streams; stream snapshots and deduplicated files; LZ4 and ZSTD
-//! compression; ReFS 3.4 with its older file records), chosen by the
-//! first byte; the rest of the
-//! input patches their stored bytes: a u32 position (modulo the stored
+//! compression; ReFS 3.4 with its older file records; ReFS 3.7 with a
+//! named stream split over rows), chosen by the first byte; the rest of
+//! the input patches their stored bytes: a u32 position (modulo the stored
 //! bytes), a length byte (1 to 16) and the bytes. Fuzzing builds of the
 //! `refs` crate accept every checksum, so patched pages reach the parsers.
 #![no_main]
@@ -18,7 +18,7 @@ use libfuzzer_sys::fuzz_target;
 use refs::{Target, Volume};
 use storage_spaces::io::{ReadAt, SparseImage};
 
-static BASES: LazyLock<[SparseImage; 6]> = LazyLock::new(|| {
+static BASES: LazyLock<[SparseImage; 7]> = LazyLock::new(|| {
     [
         &include_bytes!("../../crates/refs/tests/fixtures/r314basic64k/disk.fixture")[..],
         &include_bytes!("../../crates/refs/tests/fixtures/r314integ/disk.fixture")[..],
@@ -26,6 +26,7 @@ static BASES: LazyLock<[SparseImage; 6]> = LazyLock::new(|| {
         &include_bytes!("../../crates/refs/tests/fixtures/r314compress/disk.fixture")[..],
         &include_bytes!("../../crates/refs/tests/fixtures/r314zstd/disk.fixture")[..],
         &include_bytes!("../../crates/refs/tests/fixtures/r34integ/disk.fixture")[..],
+        &include_bytes!("../../crates/refs/tests/fixtures/r37integ/disk.fixture")[..],
     ]
     .map(|b| SparseImage::read_from(b).unwrap())
 });
