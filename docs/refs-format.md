@@ -418,7 +418,10 @@ random files deduplicated, and the zero file).
 
 Windows Server 2019 (build 17763) formats ReFS 3.4 on any disk
 (`Format-Volume -FileSystem ReFS`; there are no Dev Drives;
-`fsutil fsinfo refsinfo` says "REFS Version : 3.4"). The bootstrap, the
+`fsutil fsinfo refsinfo` says "REFS Version : 3.4"), also with every update
+to September 2026 (build 17763.9245, `refs.sys` replaced; volumes formatted
+then have the same schema table and read the same way; the update by
+`tools/vm/Install-Updates.ps1`). The bootstrap, the
 B+-trees, the container and object tables and the directories follow the
 rules above (page references of 104 bytes with CRC-64). What differs:
 
