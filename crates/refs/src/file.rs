@@ -296,12 +296,78 @@ impl<D: ReadAt> Volume<D> {
     /// own row (type 0x10, where a junction keeps its reparse point).
     pub fn open_file(&self, entry: &Entry) -> Result<File> {
         let rows = self.attribute_rows(entry)?;
-        let levels = Levels::of(&rows);
         let mut file = File::default();
+        // Before 3.14: the older layout where the record has its rows (no
+        // sample of 3.5 to 3.13 yet, so the newer one is tried otherwise).
+        if self.legacy_records() {
+            let legacy = legacy_attributes(&rows)?;
+            if !legacy.is_empty() {
+                for (kind, name, value) in legacy {
+                    self.legacy_attribute(&mut file, kind, &name, &value)?;
+                }
+                return Ok(file);
+            }
+        }
+        let levels = Levels::of(&rows);
         for (k, v) in &rows {
             self.attribute(&mut file, k, v, &levels)?;
         }
         Ok(file)
+    }
+
+    /// Whether records have the attribute rows of ReFS before 3.14 (see
+    /// `legacy_attributes`; seen on 3.4).
+    pub(crate) fn legacy_records(&self) -> bool {
+        (self.checkpoint.major, self.checkpoint.minor) < (3, 14)
+    }
+
+    /// An attribute of a record in the older layout (`legacy_attributes`):
+    /// $DATA a header (the size at 0x3c, the valid length at 0x44; sparse
+    /// files bit 31 of 0x28 and the bytes allocated at 0x4c) with the
+    /// extent map's node, as a 3.14 level value has it (its records and
+    /// integrity checksums alike); a named stream the header of resident
+    /// data (the size at 0x20, the bytes from 0x3c; ReFS 3.4 keeps named
+    /// streams of up to 128 KiB, all resident); a reparse point as in 3.14.
+    fn legacy_attribute(&self, file: &mut File, kind: u32, name: &[u8], v: &[u8]) -> Result<()> {
+        match kind {
+            DATA => {
+                file.data = Some(Stream {
+                    size: le64(v, 0x3c),
+                    content: Content::Extents(self.extents(v)?),
+                });
+            }
+            NAMED => {
+                let name = utf16(name);
+                if le16(v, 2) & 0x1000 != 0 {
+                    return Err(Error::Unsupported(format!(
+                        "stream {name:?} in extents (ReFS before 3.14)"
+                    )));
+                }
+                let size = le64(v, 0x20);
+                let content = v
+                    .get(0x3c..0x3c + size as usize)
+                    .ok_or_else(|| format_err!("stream {name:?} of {size} bytes in a value of {}", v.len()))?;
+                file.streams.push((
+                    name,
+                    Stream {
+                        size,
+                        content: Content::Inline(content.to_vec()),
+                    },
+                ));
+            }
+            REPARSE => {
+                let len = le16(v, 0x10) as usize;
+                file.reparse = Some(Reparse {
+                    tag: le32(v, 0x0c),
+                    data: v
+                        .get(0x14..0x14 + len)
+                        .ok_or_else(|| format_err!("reparse data of {len} bytes in a value of {}", v.len()))?
+                        .to_vec(),
+                });
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// The raw attribute rows (key, value) of an entry's record, or of a
@@ -622,6 +688,51 @@ impl<D: ReadAt> Volume<D> {
 
 /// The default stream's levels are set 0 (the $DATA rows of the record).
 const OWN_SET: u64 = 0;
+
+/// An attribute of the older record layout: (type, name, value).
+type LegacyAttribute = (u32, Vec<u8>, Vec<u8>);
+
+/// The attributes of a record in the layout of ReFS before 3.14 (seen on
+/// 3.4): rows keyed (u32 the value's bytes, u32 where this row's part of
+/// the value starts, u32 the attribute type, the name in UTF-16), a value
+/// longer than a row may be split over rows by offset (named streams in
+/// parts of 4072 bytes). Joined here: (type, name, value) for $DATA (0x80),
+/// named streams (0xb0) and reparse points (0xc0); the name without
+/// trailing zeros.
+fn legacy_attributes(rows: &[(Vec<u8>, Vec<u8>)]) -> Result<Vec<LegacyAttribute>> {
+    type Parts<'a> = std::collections::BTreeMap<(u32, Vec<u8>), Vec<(u32, u32, &'a [u8])>>;
+    let mut parts: Parts<'_> = Default::default();
+    for (k, v) in rows {
+        let kind = le32(k, 8);
+        if k.len() >= 12 && matches!(kind, DATA | NAMED | REPARSE) {
+            let mut name = &k[12..];
+            while let [rest @ .., 0, 0] = name {
+                name = rest;
+            }
+            parts
+                .entry((kind, name.to_vec()))
+                .or_default()
+                .push((le32(k, 4), le32(k, 0), v.as_slice()));
+        }
+    }
+    let mut out = Vec::with_capacity(parts.len());
+    for ((kind, name), mut p) in parts {
+        p.sort_by_key(|&(offset, _, _)| offset);
+        let total = p[0].1 as usize;
+        let mut value = Vec::with_capacity(total.min(1 << 20));
+        for (offset, t, part) in p {
+            if offset as usize != value.len() || t as usize != total || value.len() + part.len() > total {
+                return Err(format_err!("attribute {kind:#x} in parts that do not join"));
+            }
+            value.extend_from_slice(part);
+        }
+        if value.len() != total {
+            return Err(format_err!("attribute {kind:#x} of {} bytes of {total}", value.len()));
+        }
+        out.push((kind, name, value));
+    }
+    Ok(out)
+}
 
 /// The data levels of a record by (set, id): the parent level's id and
 /// the level's value. $DATA rows (set 0) have the id at key 0x10 and the

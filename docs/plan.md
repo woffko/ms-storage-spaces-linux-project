@@ -608,8 +608,13 @@ rows of thin spaces not allocated yet (M7).
   volume run in CI (`tests/fixtures.rs`, made by `refs fixture`); the
   parsers are fuzzed (`refs_parsers`, `refs_volume`; fuzzing builds accept
   every checksum so that patched pages reach the parsers). The format is in
-  `docs/refs-format.md`. Open: ReFS 3.4 to 3.13 (no images yet: they need
-  Windows 10 or Server 2016 to 2022).
+  `docs/refs-format.md`. ReFS 3.4 (2026-10-04, Windows Server 2019 on a
+  second test VM): the same bootstrap and trees, file records in an older
+  layout (attribute rows keyed by type and name, no levels, no resident
+  data, named streams split over rows), full containers left out of the
+  medium allocator; read and mounted as Windows listed five volumes
+  (`r34*`), writing refused. Open: ReFS 3.5 to 3.13 (3.7 needs Server
+  2022; 3.9 and 3.10 Windows 11 22H2 and 23H2).
 * B2 (done): `refs mount` (FUSE, read-only;
   streams as extended attributes, links and junctions as symbolic links,
   hard links as one inode, directory listings cached), checked against Windows' listing of

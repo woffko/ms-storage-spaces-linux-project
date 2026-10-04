@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use storage_spaces::io::WriteAt;
+use storage_spaces::io::{ReadAt, WriteAt};
 
 use crate::checksum::{crc32c, crc64};
 use crate::error::{Error, Result, format_err};
@@ -1710,8 +1710,11 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
 
 impl<D: WriteAt> Volume<D> {
     /// Writes `data` from byte `at` of the volume; whatever the metadata
-    /// says, nothing is written outside the volume.
+    /// says, nothing is written outside the volume, and nothing to a
+    /// volume of another ReFS version than the one writing was worked out
+    /// on (3.14: older versions lay out records differently).
     fn write_volume(&self, at: u64, data: &[u8]) -> Result<()> {
+        self.writable_version()?;
         at.checked_add(data.len() as u64)
             .filter(|&end| end <= self.boot.volume_size())
             .ok_or_else(|| format_err!("a write at {at:#x} outside the volume"))?;
@@ -4020,6 +4023,23 @@ const MAX_INTEGRITY: usize = 2 << 30;
 /// The largest integrity stream `refs` overwrites (copied whole, through
 /// memory).
 const MAX_INTEGRITY_COPY: u64 = 64 << 20;
+/// The ReFS version `refs` writes (checkpoint major.minor).
+const WRITTEN_VERSION: (u16, u16) = (3, 14);
+
+impl<D: ReadAt> Volume<D> {
+    /// Whether `refs` writes volumes of this ReFS version (3.14 only:
+    /// older versions lay out records differently); every write checks.
+    pub fn writable_version(&self) -> Result<()> {
+        let c = &self.checkpoint;
+        if (c.major, c.minor) != WRITTEN_VERSION {
+            return Err(Error::Unsupported(format!(
+                "writing ReFS {}.{} volumes (only {}.{})",
+                c.major, c.minor, WRITTEN_VERSION.0, WRITTEN_VERSION.1
+            )));
+        }
+        Ok(())
+    }
+}
 /// A data band that names no allocator row (data goes where there is room).
 const NO_BAND: u64 = u64::MAX;
 /// Free clusters data leaves in a metadata container's row (for pages).

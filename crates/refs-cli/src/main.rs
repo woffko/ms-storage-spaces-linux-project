@@ -883,12 +883,14 @@ fn main() -> Result<()> {
             writeln!(out, "serial      {:#018x}", b.serial)?;
             writeln!(
                 out,
-                "checksums   {}",
-                match c.reference_size {
-                    0x30 => "CRC64",
-                    0x48 => "SHA-256",
-                    _ => "none (pre-3.10 layout)",
-                }
+                "checksums   {} ({}-byte page references)",
+                match c.roots.first().map(|r| r.checksum_kind) {
+                    Some(1) => "CRC32-C",
+                    Some(2) => "CRC64",
+                    Some(4) => "SHA-256",
+                    _ => "none",
+                },
+                c.reference_size
             )?;
             writeln!(
                 out,
@@ -981,6 +983,7 @@ fn main() -> Result<()> {
                     None => *find_volumes(&file)?.first().context("no ReFS volume on the device")?,
                 };
                 let vol = Volume::open(Box::new(file) as fuse::Rw, offset)?;
+                vol.writable_version()?;
                 if vol.log_state()?.needs_replay() {
                     bail!(
                         "the volume's log has changes its checkpoint lacks: attach it to Windows once and \

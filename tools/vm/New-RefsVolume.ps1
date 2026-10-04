@@ -5,7 +5,8 @@ Windows' view of every file (Track B corpus, docs/plan.md).
 
 C:\sstest\refs\<Name>\disk.vhdx (a dynamic VHDX of 52 GiB: Dev Drive needs
 50 GB; only what ReFS writes takes space) gets a GPT, one partition and a
-Dev Drive (ReFS; Windows 11 Pro formats ReFS only as a Dev Drive). Then
+Dev Drive (ReFS; Windows 11 Pro formats ReFS only as a Dev Drive), or on
+Windows Server 2019 (ReFS 3.4, no Dev Drives) a plain ReFS volume. Then
 the tree of the scenario is written and manifest.json lists every file and
 directory: path, kind, size, SHA-256 of the data and of each alternate
 stream, attributes, the four timestamps, hard link groups, link targets,
@@ -22,7 +23,8 @@ Scenarios:
           snapshots taken between overwrites, two separately written
           identical files deduplicated by refsutil, and then the volume
           compressed by refsutil (-Compression LZ4 or ZSTD, with
-          -CompressionLevel and -ChunkSize; NONE leaves it uncompressed)
+          -CompressionLevel and -ChunkSize; NONE leaves it uncompressed);
+          Windows 11 only (refsutil streamsnapshot, dedup, compression)
   small   a few files (resident, in extents, in a subdirectory): the base
           of write experiments (tools/vm/Invoke-RefsSteps.ps1)
   empty   the freshly formatted volume only
@@ -47,7 +49,11 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-if ($env:COMPUTERNAME -notin 'DESKTOP-BQ2J4NS', 'DESKTOP-ELS4LDK') { throw 'Unexpected machine' }
+if ($env:COMPUTERNAME -notin 'DESKTOP-BQ2J4NS', 'DESKTOP-ELS4LDK', 'WIN-R326LQ0OIA6') { throw 'Unexpected machine' }
+# Dev Drives (and the refsutil commands of the features scenario) came with
+# Windows 11; older Windows formats plain ReFS.
+$devDrive = (Get-Command Format-Volume).Parameters.ContainsKey('DevDrive')
+if (-not $devDrive -and $Scenario -eq 'features') { throw 'the features scenario needs Windows 11' }
 
 $dir = Join-Path $Root $Name
 if (Test-Path $dir) { throw "exists: $dir" }
@@ -93,18 +99,42 @@ try {
     }
     Initialize-Disk -Number $disk.Number -PartitionStyle GPT
     $part = New-Partition -DiskNumber $disk.Number -UseMaximumSize -AssignDriveLetter
-    $format = @{ Partition = $part; DevDrive = $true; NewFileSystemLabel = $Name; AllocationUnitSize = $ClusterSize; Force = $true; Confirm = $false }
+    $format = @{ Partition = $part; NewFileSystemLabel = $Name; AllocationUnitSize = $ClusterSize; Force = $true; Confirm = $false }
+    if ($devDrive) { $format.DevDrive = $true } else { $format.FileSystem = 'ReFS' }
     if ($Sha256Checksums) { $format.SHA256Checksums = $true }
     if ($IntegrityStreams) { $format.SetIntegrityStreams = $true }
     Format-Volume @format | Out-Null
     $part = Get-Partition -DiskNumber $disk.Number -PartitionNumber $part.PartitionNumber
     $drive = "$($part.DriveLetter):\"
+    # ReFS before 3.5 (Windows Server 2019) has no hard links and takes named
+    # streams of up to 128 KiB.
+    $refsVersion = [version]((fsutil fsinfo refsinfo $drive | Select-String 'REFS (Volume )?Version') -replace '.*:\s*', '')
+    $older = $refsVersion -lt [version]'3.5'
 
     # Deterministic content: SplitMix64 bytes seeded from the file's name.
     Add-Type -TypeDefinition @'
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 public static class RefsGen {
+    [StructLayout(LayoutKind.Sequential)]
+    struct DuplicateExtentsData { public IntPtr FileHandle; public long SourceFileOffset, TargetFileOffset, ByteCount; }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DeviceIoControl(Microsoft.Win32.SafeHandles.SafeFileHandle h, uint code, ref DuplicateExtentsData input,
+        int inputSize, IntPtr output, int outputSize, out int returned, IntPtr overlapped);
+    // A block clone of the whole file (FSCTL_DUPLICATE_EXTENTS_TO_FILE),
+    // `cluster` the volume's cluster size.
+    public static void Clone(string src, string dst, long cluster) {
+        using (var s = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using (var d = new FileStream(dst, FileMode.CreateNew, FileAccess.ReadWrite)) {
+            d.SetLength(s.Length);
+            var data = new DuplicateExtentsData { FileHandle = s.SafeFileHandle.DangerousGetHandle(),
+                ByteCount = (s.Length + cluster - 1) / cluster * cluster };
+            int returned;
+            if (!DeviceIoControl(d.SafeFileHandle, 0x00098344, ref data, Marshal.SizeOf(data), IntPtr.Zero, 0, out returned, IntPtr.Zero))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+    }
     static ulong Next(ref ulong s) {
         s += 0x9E3779B97F4A7C15UL;
         ulong z = s;
@@ -248,11 +278,13 @@ public static class RefsGen {
         New-File 'streams\host.txt' 2000
         $h = Join-Path $drive 'streams\host.txt'
         Set-Content -Path $h -Stream small -Value 'a small stream' -NoNewline
-        $big = New-Object byte[] 200000; (New-Object Random 7).NextBytes($big); Set-Content -Path $h -Stream big -Value $big -Encoding Byte
+        $big = New-Object byte[] $(if ($older) { 120000 } else { 200000 }); (New-Object Random 7).NextBytes($big); Set-Content -Path $h -Stream big -Value $big -Encoding Byte
         # Links.
         New-File 'links\target.txt' 3000
-        New-Item -ItemType HardLink -Path (Join-Path $drive 'links\hard1.txt') -Target (Join-Path $drive 'links\target.txt') | Out-Null
-        New-Item -ItemType HardLink -Path (Join-Path $drive 'names\hard2.txt') -Target (Join-Path $drive 'links\target.txt') | Out-Null
+        if (-not $older) {
+            New-Item -ItemType HardLink -Path (Join-Path $drive 'links\hard1.txt') -Target (Join-Path $drive 'links\target.txt') | Out-Null
+            New-Item -ItemType HardLink -Path (Join-Path $drive 'names\hard2.txt') -Target (Join-Path $drive 'links\target.txt') | Out-Null
+        }
         New-Item -ItemType SymbolicLink -Path (Join-Path $drive 'links\sym_file') -Target (Join-Path $drive 'links\target.txt') | Out-Null
         cmd /c mklink "$(Join-Path $drive 'links\sym_rel')" target.txt | Out-Null
         New-Item -ItemType SymbolicLink -Path (Join-Path $drive 'links\sym_dir') -Target (Join-Path $drive 'deep') | Out-Null
@@ -271,6 +303,8 @@ public static class RefsGen {
         New-Item -ItemType Directory -Force (Join-Path $drive 'clones') | Out-Null
         Copy-Item (Join-Path $drive 'sizes\size_10485760.bin') (Join-Path $drive 'clones\copy1.bin')
         Copy-Item (Join-Path $drive 'sizes\size_10485760.bin') (Join-Path $drive 'clones\copy2.bin')
+        # Without Dev Drives Copy-Item copies: a block clone made directly.
+        if (-not $devDrive) { [RefsGen]::Clone((Join-Path $drive 'sizes\size_10485760.bin'), (Join-Path $drive 'clones\clone3.bin'), $ClusterSize) }
         # Deleted and renamed.
         New-File 'gone\deleted.txt' 5000; Remove-Item (Join-Path $drive 'gone\deleted.txt')
         New-File 'gone\old_name.txt' 5000; Rename-Item (Join-Path $drive 'gone\old_name.txt') 'new_name.txt'
@@ -343,7 +377,8 @@ public static class RefsGen {
     $manifest = [ordered]@{
         name = $Name; kind = 'refs'; scenario = $Scenario
         windows_build = [Environment]::OSVersion.Version.ToString()
-        refs_version = (($info | Select-String 'REFS Volume Version') -replace '.*:\s*', '')
+        # "REFS Volume Version" on Windows 11, "REFS Version" on Server 2019.
+        refs_version = (($info | Select-String 'REFS (Volume )?Version') -replace '.*:\s*', '')
         cluster_size = $ClusterSize; sha256_checksums = [bool]$Sha256Checksums; integrity_streams = [bool]$IntegrityStreams
         label = $vol.FileSystemLabel; volume_size = $vol.Size; free = $vol.SizeRemaining
         serial = (($info | Select-String 'Volume Serial Number') -replace '.*:\s*', '')

@@ -12,7 +12,9 @@
 # The VM is DESKTOP-BQ2J4NS (Windows 11 24H2, sshuser@10.0.77.97, key login
 # as a member of Administrators). The previous VM DESKTOP-ELS4LDK (Insider
 # build 26340, which created the first corpus) is reached with
-# WIN_VM_HOST=root@192.168.189.129 WIN_VM_HOSTKEY_ALIAS=192.168.189.138.
+# WIN_VM_HOST=root@192.168.189.129 WIN_VM_HOSTKEY_ALIAS=192.168.189.138; the
+# Windows Server 2019 VM for ReFS 3.4 samples with
+# WIN_VM_HOST=Administrator@10.0.77.11.
 set -euo pipefail
 host=${WIN_VM_HOST:-sshuser@10.0.77.97}
 ssh_opts=(-F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes

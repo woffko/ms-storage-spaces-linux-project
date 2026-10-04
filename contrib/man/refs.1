@@ -311,9 +311,14 @@ checkpoint lacks (a volume detached without being dismounted;
 .B refs info
 shows it): attach it to Windows once and remove it safely first.
 .SH LIMITS
-Verified against Windows on ReFS 3.14 volumes with 4 KiB and 64 KiB
-clusters, CRC-64 and SHA-256 metadata checksums and integrity streams.
-Other ReFS 3.x versions are read by the same rules but were not verified.
+Verified against Windows on ReFS 3.14 volumes (Windows 11) with 4 KiB and
+64 KiB clusters, CRC-64 and SHA-256 metadata checksums and integrity
+streams, and on ReFS 3.4 volumes (Windows Server 2019), whose file records
+are laid out differently. Other ReFS 3.x versions are read by the same
+rules but were not verified. Only ReFS 3.14 volumes are written; the
+writing commands and
+.B mount \-\-rw
+refuse others.
 Encrypted files and ReFS 1.x and 2.x are not read yet;
 stream snapshots are read by
 .B cat

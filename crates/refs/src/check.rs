@@ -88,6 +88,32 @@ impl Allocator {
             }
             Ok(())
         })?;
+        // ReFS before 3.14 (3.4) leaves a container whose clusters are all
+        // used out of the medium allocator; its row in the container table
+        // counts its used clusters (u64 at 0x20).
+        if root == 1 && vol.legacy_records() {
+            let cpc = vol.clusters_per_container;
+            let mut full = Vec::new();
+            vol.walk(
+                &vol.checkpoint.roots[crate::volume::ROOT_CONTAINERS].clone(),
+                true,
+                &mut |row| {
+                    let v = row.value;
+                    if v.len() >= 0x30 && le32(v, 0x14) == 0 && le64(v, 0x20) == cpc {
+                        full.push(le64(v, v.len() - 16));
+                    }
+                    Ok(())
+                },
+            )?;
+            for start in full {
+                let overlaps = rows
+                    .iter()
+                    .any(|&(s, n, _)| s < start.saturating_add(cpc) && start < s.saturating_add(n));
+                if !overlaps {
+                    rows.push((start, cpc, Bits::Uniform(true)));
+                }
+            }
+        }
         rows.sort_by_key(|r| r.0);
         Ok(Allocator(rows))
     }
