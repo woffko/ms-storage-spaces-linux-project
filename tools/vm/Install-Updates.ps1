@@ -58,6 +58,8 @@ if ($PackageUrl) {
 `$ProgressPreference = 'SilentlyContinue'
 try {
     `$file = 'C:\sstest\update.msu'
+    # (.NET on Server 2012 R2 and 2016 offers TLS 1.0 by default.)
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     "download `$(Get-Date -Format s) $PackageUrl"
     Invoke-WebRequest -UseBasicParsing -Uri '$PackageUrl' -OutFile `$file
     `$hash = (Get-FileHash -Algorithm SHA1 `$file).Hash.ToLowerInvariant()
