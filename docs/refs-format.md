@@ -6,9 +6,9 @@ marks statements backed by a test against volumes Windows created
 ReFS 3.14 Dev Drives of Windows 11 Insider 26340, 4 KiB and 64 KiB
 clusters, CRC64 and SHA-256 metadata checksums, integrity streams, stream
 snapshots and deduplicated files, a volume inside a two-way mirror space
-read through `storage-spaces`; ReFS 3.4 and 3.7 volumes of Windows
-Server 2019 and 2022, see "ReFS 3.4 and 3.7"; ReFS 1.2 volumes of Windows
-Server 2012 R2, see "ReFS 1.x").
+read through `storage-spaces`; ReFS 3.1, 3.4 and 3.7 volumes of Windows
+Server 2016, 2019 and 2022, see "ReFS 3.1, 3.4 and 3.7"; ReFS 1.2 volumes
+of Windows Server 2012 R2, see "ReFS 1.x").
 The most complete public description is
 [forefst](https://github.com/xbqt/forefst) (GPL-3.0, documentation read,
 no code taken); refsprogs (GPL-2.0+) and libfsrefs are the other prior art
@@ -415,7 +415,7 @@ times: a 5 MiB file of zeros became 1280 one-cluster runs of one cluster.
 Nothing else is needed to read them (**verified**: identical text and
 random files deduplicated, and the zero file).
 
-## ReFS 3.4 and 3.7 (Windows Server 2019 and 2022)
+## ReFS 3.1, 3.4 and 3.7 (Windows Server 2016, 2019 and 2022)
 
 Windows Server 2019 (build 17763) formats ReFS 3.4 on any disk
 (`Format-Volume -FileSystem ReFS`; there are no Dev Drives;
@@ -443,9 +443,10 @@ rules above (page references of 104 bytes with CRC-64). What differs:
     the same kind (0x38, 0x90 `$I30`, and 0xc0 for a junction).
   * No hard links (Windows: "The request is not supported").
 * The medium allocator has no row for a container whose clusters are all
-  used: the container table row counts a container's used clusters (u64
-  at 0x20, otherwise the set bits of its allocator row). Rows of kind 5
-  are bitmaps (wholly free in the rows seen).
+  used, of data or of metadata: the container table row counts a
+  container's used clusters (u64 at 0x20, otherwise the set bits of its
+  allocator row). Rows of kind 5 are bitmaps (wholly free in the rows
+  seen).
 * Block clones (`FSCTL_DUPLICATE_EXTENTS_TO_FILE`; `Copy-Item` copies on
   Server 2019): the clone's extents name the source's clusters and the
   block reference count table has rows of counts as on 3.14 (kind 1, 0x400
@@ -462,9 +463,13 @@ uniform rows, hard links), but keeps the data of small files in extents
 too (100 bytes in a cluster), and named streams resident only, of up to
 128 KiB.
 
-Windows Server 2016 (build 14393) formats ReFS 3.1: the boot sector's
-container size is 0 (the container table's rows give it; from 3.4 on the
-boot sector names it too), and records are laid out as on 3.4. Its log has
+Windows Server 2016 (build 14393) formats ReFS 3.1, also with every
+update to September 2026 (build 14393.9512, `refs.sys` 10.0.14393.9507;
+Windows Update stopped at July 2025, the rest came from the catalog): the
+boot sector's container size is 0 (the container table's rows give it;
+from 3.4 on the boot sector names it too); records, allocators and the
+limits on named streams and hard links are those of 3.4; block clones
+(`FSCTL_DUPLICATE_EXTENTS_TO_FILE`) are counted as on 3.4. Its log has
 record pages from 4 KiB page 0x24001 on, but no control page where 3.14
 keeps one (`refs` reads no log there; writing is refused anyway).
 
@@ -479,10 +484,10 @@ on 64 KiB clusters.
 otherwise by the rules of 3.14), counts full containers as used where the
 container table counts used clusters, and refuses to write any version
 but 3.14
-(**verified**: five volumes each version made, `r34*` and `r37*`, with 4
-KiB and 64 KiB clusters, integrity streams, a block clone and, on 3.7,
-hard links, read and mounted with every file and named stream as Windows
-listed it, `refs check` clean; fixtures in CI).
+(**verified**: five volumes each version made, `r31*`, `r34*` and `r37*`,
+with 4 KiB and 64 KiB clusters, integrity streams, a block clone and, on
+3.7, hard links, read and mounted with every file and named stream as
+Windows listed it, `refs check` clean; fixtures in CI).
 
 ## ReFS 1.x (Windows Server 2012 R2)
 
@@ -870,7 +875,7 @@ created, which lost the directory's contents).
 
 LZ4 on QuickAssist hardware (format 3 is decoded as LZ4, no sample),
 extended attributes, EFS, the USN journal, snapshots of named streams (read by the same rules, no sample),
-ReFS 3.1 to 3.3, 3.5, 3.6 and 3.8 to 3.13 (no sample: 3.1 of Server
-2016, 3.9 and 3.10 of Windows 11 22H2 and 23H2; read by the rules of 3.4
-where records have its rows, else by those of 3.14), ReFS 1.1 (Server
-2012) and 2.x (previews of Server 2016 only).
+ReFS 3.2, 3.3, 3.5, 3.6 and 3.8 to 3.13 (no sample: 3.2 and 3.3 of
+Windows 10 1703 and 1709, 3.9 and 3.10 of Windows 11 22H2 and 23H2; read
+by the rules of 3.4 where records have its rows, else by those of 3.14),
+ReFS 1.1 (Server 2012) and 2.x (previews of Server 2016 only).

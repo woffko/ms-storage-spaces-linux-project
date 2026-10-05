@@ -20,8 +20,9 @@
   `WIN_VM_HOST=Administrator@10.0.77.11`; ReFS 3.4, volumes `r34*`) and Server 2022 Evaluation
   (WIN-4OUB3OQJKV6, `WIN_VM_HOST=Administrator@10.0.77.10`; ReFS 3.7, volumes `r37*`) and Server 2012 R2
   Evaluation (WIN-2P4MLM1IG2G, `WIN_VM_HOST=Administrator@10.0.77.12`; ReFS 1.2, 64 KiB clusters only,
-  Windows PowerShell 4.0, Win32-OpenSSH; volumes `r12*`), key login. The user runs one such VM at a time
-  (Server 2016 for ReFS 3.1 is next): ask for the next one when needed.
+  Windows PowerShell 4.0, Win32-OpenSSH; volumes `r12*`) and Server 2016 Evaluation (WIN-LA8L93TB06T,
+  `WIN_VM_HOST=Administrator@10.0.77.20`; ReFS 3.1, Win32-OpenSSH; volumes `r31*`), key login. The user runs
+  one such VM at a time; every Windows that the evaluation center offers has been sampled.
   `tools/vm/New-RefsVolume.ps1` formats plain ReFS where there are no Dev Drives;
   `tools/vm/Install-Updates.ps1` installs Windows updates there (as SYSTEM, since Windows Update refuses
   network logons).

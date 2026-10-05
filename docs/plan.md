@@ -623,8 +623,13 @@ rows of thin spaces not allocated yet (M7).
   headers, 32-byte node headers), no container table, the records of 3.4
   with runs of blocks (integrity checksums per block); five volumes
   (`r12*`) read and mounted as Windows listed them, `refs check` without
-  the allocators. Open: ReFS 3.1 (Server 2016, next), 3.9 and 3.10
-  (Windows 11 22H2 and 23H2, no installation media at hand).
+  the allocators. ReFS 3.1 (Windows Server 2016, 2026-10-05): the boot
+  sector names no container size, otherwise the layout of 3.4; five
+  volumes (`r31*`) read and mounted as Windows listed them (full metadata
+  containers, too, are left out of the medium allocator). Every server
+  brought up to date first. Open: ReFS 3.2, 3.3 (Windows 10 1703, 1709),
+  3.9 and 3.10 (Windows 11 22H2, 23H2), 1.1 (Server 2012): no installation
+  media at hand.
 * B2 (done): `refs mount` (FUSE, read-only;
   streams as extended attributes, links and junctions as symbolic links,
   hard links as one inode, directory listings cached), checked against Windows' listing of

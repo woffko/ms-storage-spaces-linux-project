@@ -88,15 +88,15 @@ impl Allocator {
             }
             Ok(())
         })?;
-        // ReFS before 3.14 (3.4) leaves a container whose clusters are all
-        // used out of the medium allocator; its row in the container table
-        // counts its used clusters (u64 at 0x20).
+        // ReFS before 3.14 (3.1, 3.4) leaves a container whose clusters are
+        // all used out of the medium allocator, data or metadata; its row
+        // in the container table counts its used clusters (u64 at 0x20).
         if root == 1 && vol.legacy_records() {
             let cpc = vol.clusters_per_container;
             let mut full = Vec::new();
             vol.walk(&vol.root(crate::volume::ROOT_CONTAINERS)?, true, &mut |row| {
                 let v = row.value;
-                if v.len() >= 0x30 && le32(v, 0x14) == 0 && le64(v, 0x20) == cpc {
+                if v.len() >= 0x30 && matches!(le32(v, 0x14), 0 | 1) && le64(v, 0x20) == cpc {
                     full.push(le64(v, v.len() - 16));
                 }
                 Ok(())
