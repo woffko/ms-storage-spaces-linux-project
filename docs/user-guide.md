@@ -55,7 +55,7 @@ disks are never written, unless a space is attached read-write
 | From a checkout: `cargo build --release && sudo contrib/install.sh` | `spaces`, `refs`, `mount.ReFS`, man pages, udev rule, systemd unit, module list | any distribution |
 | Debian/Ubuntu package: `contrib/deb/build-deb.sh && sudo apt install ./target/deb/storage-spaces_*.deb` | the same, as a package | Debian, Ubuntu |
 | Arch Linux: `(cd contrib/arch && makepkg -si)` | the same, as a package | Arch |
-| The releases page of the repository | a static `spaces` binary (x86_64, musl) and a `.deb`, with `SHA256SUMS`; the 1.0.0 files predate `refs`, build from a checkout for it | trying it out; `sha256sum -c SHA256SUMS` first |
+| The releases page of the repository | static `spaces` and `refs` binaries (x86_64, musl) and a `.deb`, with `SHA256SUMS` (from 1.1.0; 1.0.0 had no `refs`) | trying it out; `sha256sum -c SHA256SUMS` first |
 | `cargo install --locked --path crates/spaces-cli` (and `crates/refs-cli`) | the binary only, no udev rule or unit | development |
 
 `contrib/install.sh` (as root; it takes the path of `spaces` if it was

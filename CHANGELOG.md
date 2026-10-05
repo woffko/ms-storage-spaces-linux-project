@@ -1,5 +1,70 @@
 # Changelog
 
+## 1.1.0 (2026-10-05)
+
+ReFS: `refs` reads, mounts, checks and (3.14) writes ReFS volumes, checked
+against what Windows makes. Storage Spaces itself is unchanged apart from
+the hardening below.
+
+### ReFS
+
+* `refs` (new command, `man refs`): `ls`, `cat`, `stat`, `mount` (FUSE,
+  read-only or `--rw`), `check`, `info`, and the writing commands `set`,
+  `overwrite`, `write`, `create`, `rename`, `move`, `link`, `clone`,
+  `delete`, `mkdir` (each only with `--yes`). It works on volumes on disks,
+  images and spaces of pools (`--space`).
+* Reads: files (resident, in extents, sparse, block-cloned, deduplicated,
+  compressed with LZ4 or ZSTD), directories of any size, named streams,
+  stream snapshots, hard links, symbolic links and junctions, attributes
+  and times; integrity streams checked on every read; 4 KiB and 64 KiB
+  clusters, CRC-64 and SHA-256 metadata checksums.
+* Versions, each verified against volumes the Windows that makes them
+  created (every file as Windows lists it, `refs check` clean, fixtures in
+  CI): 3.14 (Windows 11), 3.7 (Server 2022), 3.4 (Server 2019), 3.1
+  (Server 2016), 1.2 (Server 2012 R2). Not verified, for lack of Windows
+  to make them: 1.1, 2.x, 3.2, 3.3, 3.5, 3.6, 3.8 to 3.13.
+* Writes, 3.14 only (every change checked by Windows: `refsutil leak` and
+  `triage`, and Windows reading and changing the result): files up to 64
+  GiB changed in place as Windows does, created, renamed, moved, linked,
+  deleted (block-cloned and deduplicated files too), directories, times,
+  attributes, named streams, integrity streams, files with stream
+  snapshots, block clones (also whole-file copies through the mount),
+  compressed files (written whole into ordinary clusters). Other versions
+  are refused.
+* `refs mount`, also for udisks2 and `mount -t ReFS` through
+  `contrib/mount.refs`; `refs check` checks pages, allocators and shared
+  clusters (not the allocators of 1.x).
+* The format is described in `docs/refs-format.md`, as far as it was found.
+
+### Hardening (code audit, `docs/security.md`)
+
+* The attach unit, the servers it starts and `mount.ReFS` run with limits
+  (no new privileges, read-only file system, no namespaces or network,
+  fewer capabilities): `systemd-analyze security` 9.5 UNSAFE down to 5.1
+  MEDIUM; on a systemd that does not know a property the servers start
+  without limits, with a warning.
+* Hostile volumes: bounds on ReFS 1.x run rows and cluster sizes, on the
+  unit size of compressed containers, on what `refs write --append` holds
+  in memory and on the chunk size of a pool's write-back cache; the FUSE
+  mount forgets inodes and bounds its caches, and survives a panic in one
+  request.
+* Release builds check integer overflow (no measurable cost); the four
+  crates forbid `unsafe` code; CI runs `cargo deny` and `cargo audit` on
+  every push and every week.
+* New tests: damaged volumes of every ReFS version, random bytes to the
+  parsers. Fuzzing: 4-hour runs of the ReFS targets after each change, all
+  clean; the 24 h run of every target was not repeated for this release
+  (the Storage Spaces parsers changed in two lines).
+
+### Installing
+
+* `contrib/uninstall.sh`; the Installing section of the user guide says
+  what is needed and what each way of installing gives.
+* The Debian package and `contrib/install.sh` include `refs`,
+  `mount.ReFS` and the man pages; the package recommends `fuse3`.
+* Assets: static `spaces` and `refs` (x86_64, musl), the `.deb`, and
+  `SHA256SUMS`.
+
 ## 1.0.0 (2026-10-02)
 
 Pool management, the way Windows 11 24H2 does it: Windows takes pools

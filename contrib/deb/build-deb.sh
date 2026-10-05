@@ -1,9 +1,13 @@
 #!/bin/bash
 # Build a Debian/Ubuntu package from a release build.
-# Usage: contrib/deb/build-deb.sh [output dir]
+# Usage: [BIN_DIR=dir] contrib/deb/build-deb.sh [output dir]
 #   (after cargo build --release -p spaces-cli -p refs-cli)
+# BIN_DIR is where spaces and refs are (default target/release). A package for
+# every distribution wants the static musl build: BIN_DIR=target/x86_64-unknown-linux-musl/release
+# (a build on a new distribution links its glibc, which older ones lack).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
+bin=${BIN_DIR:-$root/target/release}
 out=${1:-$root/target/deb}
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)
 arch=$(dpkg --print-architecture)
@@ -11,8 +15,8 @@ stage=$(mktemp -d)
 chmod 755 "$stage"
 trap 'rm -rf "$stage"' EXIT
 
-install -D -m 755 "$root/target/release/spaces" "$stage/usr/sbin/spaces"
-install -D -m 755 "$root/target/release/refs" "$stage/usr/bin/refs"
+install -D -m 755 "$bin/spaces" "$stage/usr/sbin/spaces"
+install -D -m 755 "$bin/refs" "$stage/usr/bin/refs"
 install -D -m 755 "$root/contrib/mount.refs" "$stage/usr/sbin/mount.ReFS"
 ln -sf mount.ReFS "$stage/usr/sbin/mount.refs"
 install -D -m 644 "$root/contrib/udev/69-storage-spaces.rules" "$stage/usr/lib/udev/rules.d/69-storage-spaces.rules"

@@ -581,6 +581,12 @@ rows of thin spaces not allocated yet (M7).
   release for v1.0.0. The crates stay off crates.io until decided
   otherwise.
 
+* Release `v1.1.0` (2026-10-05): ReFS (reading 3.14, 3.7, 3.4, 3.1 and 1.2,
+  writing 3.14, FUSE mount), the audit's hardening, installation docs;
+  static `spaces` and `refs` (musl), the `.deb` with `refs` and
+  `mount.ReFS`, `SHA256SUMS`. The 24 h fuzz run of every target was not
+  repeated (the ReFS targets ran 4 hours after each change).
+
 ### Track B (from 2026-10-02)
 
 * Corpus: Windows 11 Pro formats ReFS only as a Dev Drive (at least 50 GB),
