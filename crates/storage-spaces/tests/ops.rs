@@ -708,3 +708,11 @@ fn extents_beyond_their_disk_stop_the_planners() {
     let err = plan_create_space(&pool, &spec("t", 1, 1024, false), &mut new_guid).unwrap_err();
     assert!(err.to_string().contains("reach beyond"), "{err}");
 }
+
+#[test]
+fn a_pool_without_disks_or_a_name_is_refused() {
+    let mut new_guid = guids();
+    assert!(plan_create_pool(&[], "pool", None, &mut new_guid).is_err());
+    let (_, disks) = blank(1);
+    assert!(plan_create_pool(&disks, "", None, &mut new_guid).is_err());
+}

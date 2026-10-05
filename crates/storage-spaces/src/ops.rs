@@ -148,7 +148,7 @@ impl Slabs {
             .max_by_key(|&&d| (self.free(d), std::cmp::Reverse(d)))
             .copied()?;
         let start = self.first_run(disk, n)?;
-        let ranges = &mut self.disks.get_mut(&disk).unwrap().1;
+        let ranges = &mut self.disks.get_mut(&disk)?.1;
         ranges.push((start, n));
         ranges.sort_unstable();
         Some((disk, start))
@@ -198,7 +198,11 @@ pub fn plan_create_pool(
     if name.is_empty() || name.encode_utf16().count() > 256 {
         return Err(Error::Pool("the pool needs a name of 1 to 256 characters".into()));
     }
-    let widest = disks.iter().map(|d| d.logical_sector).max().unwrap() as u32;
+    let widest = disks
+        .iter()
+        .map(|d| d.logical_sector)
+        .max()
+        .ok_or_else(|| Error::Pool("a pool needs at least one disk".into()))? as u32;
     let logical = logical_sector.unwrap_or(widest);
     if logical < widest || !(logical == 512 || logical == 4096) {
         return Err(Error::Pool(format!(
@@ -214,7 +218,7 @@ pub fn plan_create_pool(
             .iter()
             .map(|d| d.physical_sector)
             .max()
-            .unwrap()
+            .unwrap_or(0)
             .max(logical as u64) as u32,
         metadata_guid: guids(),
         created: now,
