@@ -13,6 +13,7 @@
 //! }
 //! # Ok::<(), storage_spaces::Error>(())
 //! ```
+#![forbid(unsafe_code)]
 
 pub mod cache;
 mod crc;

@@ -1,5 +1,6 @@
 //! `refs`: read Microsoft ReFS volumes (images, disks, partitions, or a
 //! space of a Storage Spaces pool).
+#![forbid(unsafe_code)]
 
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 mod fuse;

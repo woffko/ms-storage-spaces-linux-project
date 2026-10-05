@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    # Advisories appear after a release: look again every week.
+    - cron: "17 4 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,12 +22,26 @@ jobs:
           components: rustfmt, clippy
       - name: Format
         run: cargo fmt --all --check
+      - name: No unsafe code in the project
+        run: |
+          missing=$(grep -L 'forbid(unsafe_code)' crates/*/src/lib.rs crates/*/src/main.rs 2>/dev/null || true)
+          test -z "$missing" || { echo "no #![forbid(unsafe_code)] in: $missing"; exit 1; }
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Tests (fixtures; the image corpus is not in the repository)
         run: cargo test --all-targets
       - name: Build without optional backends
         run: cargo build -p spaces-cli -p refs-cli --no-default-features
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Licenses, advisories, sources (deny.toml)
+        uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Advisories (RustSec)
+        run: cargo install cargo-audit --locked && cargo audit
 
   msrv:
     runs-on: ubuntu-latest
