@@ -1265,7 +1265,7 @@ fn main() -> Result<()> {
                     None => file.data.as_ref(),
                 };
                 if let Some(s) = current {
-                    old.resize(s.size as usize, 0);
+                    old.resize(in_memory(s.size)?, 0);
                     let mut at = 0;
                     while at < old.len() {
                         let n = vol.read_stream(s, at as u64, &mut old[at..])?;
@@ -1415,4 +1415,30 @@ fn main() -> Result<()> {
         } => fixture(&volume_dir, &output, data_limit, &exclude)?,
     }
     Ok(())
+}
+
+/// The most of a stream `refs write --append` holds in memory (the
+/// stream writer takes it whole).
+const MAX_IN_MEMORY: u64 = 256 << 20;
+
+/// A stream's size as a length to reserve, or an error: the size comes
+/// from the volume and may be anything.
+fn in_memory(size: u64) -> Result<usize> {
+    if size > MAX_IN_MEMORY {
+        bail!("the stream has {size} bytes; --append holds at most {MAX_IN_MEMORY} in memory");
+    }
+    Ok(size as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn appending_does_not_reserve_what_the_volume_claims() {
+        assert_eq!(in_memory(0).unwrap(), 0);
+        assert_eq!(in_memory(MAX_IN_MEMORY).unwrap(), MAX_IN_MEMORY as usize);
+        assert!(in_memory(MAX_IN_MEMORY + 1).is_err());
+        assert!(in_memory(u64::MAX).is_err());
+    }
 }

@@ -35,6 +35,8 @@ use crate::util::{le16, le32, le64};
 
 /// The container table's class of a compacted container.
 pub(crate) const COMPACTED: u32 = 0xa;
+/// The largest unit of a compacted container taken (Windows: 64 KiB).
+pub(crate) const MAX_UNIT: u32 = 1 << 20;
 /// Where its row counts the clusters files reference (u32).
 pub(crate) const REFERENCED: usize = 0x20;
 /// The root 10 row type of the bitmap of those clusters, and where the
@@ -79,13 +81,19 @@ impl Compacted {
         if v.len() < 0x48 {
             return Err(format_err!("compacted container row of {} bytes", v.len()));
         }
+        // Windows makes units of 64 KiB; the size decides how much is
+        // reserved and read for one, so it is bounded.
+        let unit = le32(v, 0x34);
+        if unit == 0 || unit > MAX_UNIT {
+            return Err(format_err!("compressed units of {unit} bytes"));
+        }
         Ok(Compacted {
             data: le64(v, v.len() - 16),
             clusters: le64(v, v.len() - 8),
             format: le32(v, 0x30),
             referenced: le32(v, REFERENCED),
             referenced_map: Vec::new(),
-            unit: u64::from(le32(v, 0x34)),
+            unit: u64::from(unit),
             kept: Vec::new(),
             ranges: Vec::new(),
         })
@@ -316,3 +324,27 @@ pub fn zstd_frame(src: &[u8], size: usize) -> Result<Vec<u8>> {
 
 /// The compacted containers of a volume, by id, with their root 10 rows.
 pub(crate) type Map = BTreeMap<u64, Compacted>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A container table row of class 0xa with the given unit size.
+    fn row(unit: u32) -> Vec<u8> {
+        let mut v = vec![0u8; 0xa0];
+        v[0x14..0x18].copy_from_slice(&COMPACTED.to_le_bytes());
+        v[0x30..0x34].copy_from_slice(&1u32.to_le_bytes());
+        v[0x34..0x38].copy_from_slice(&unit.to_le_bytes());
+        v
+    }
+
+    #[test]
+    fn units_are_of_plausible_sizes() {
+        // Windows makes units of 64 KiB; a row asking for gigabytes would
+        // make `refs` reserve and read them.
+        assert!(Compacted::from_row(&row(0x10000)).is_ok());
+        for unit in [0, u32::MAX, 1 << 30, (1 << 20) + 1] {
+            assert!(Compacted::from_row(&row(unit)).is_err(), "unit {unit:#x}");
+        }
+    }
+}

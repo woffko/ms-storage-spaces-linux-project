@@ -590,6 +590,38 @@ impl<D: ReadAt> Volume<D> {
         Ok(())
     }
 
+    /// A ReFS 1.x run row (see `extent_node`) as an extent in clusters.
+    pub(crate) fn v1_run(&self, v: &[u8]) -> Result<Extent> {
+        let per = self.cluster / crate::page::V1_BLOCK;
+        if v.len() < 0x18 {
+            return Err(format_err!("data run of {} bytes", v.len()));
+        }
+        let (vcn, n, block) = (le64(v, 0), le64(v, 8), le64(v, 0x10));
+        if !vcn.is_multiple_of(per) || !n.is_multiple_of(per) || !block.is_multiple_of(per) {
+            return Err(Error::Unsupported(format!(
+                "a data run of {n} blocks at block {block:#x}, not of whole clusters"
+            )));
+        }
+        let checksums = match v.get(0x1a).copied().unwrap_or(0) {
+            0 => None,
+            kind => {
+                let at = 0x18 + usize::from(v.get(0x1b).copied().unwrap_or(0));
+                let len = usize::from(le16(v, 0x1c));
+                let bytes = v
+                    .get(at..at + len)
+                    .ok_or_else(|| format_err!("run checksums outside its {} bytes", v.len()))?;
+                Some(self.data_checksums(u16::from(kind), n / per, bytes)?)
+            }
+        };
+        Ok(Extent {
+            vcn: vcn / per,
+            vlcn: block / per,
+            clusters: n / per,
+            written: true,
+            checksums,
+        })
+    }
+
     fn extent_node(&self, node: &Node<'_>, depth: usize, kind: u16, out: &mut Vec<Extent>) -> Result<()> {
         if depth > 16 {
             return Err(format_err!("extent map deeper than 16 levels"));
@@ -601,36 +633,8 @@ impl<D: ReadAt> Volume<D> {
             // clusters. At 0x18 a checksum descriptor: the kind at 0x1a (2
             // on integrity streams: a CRC-64 per block), the offset of the
             // checksums from 0x18 at 0x1b, their bytes at 0x1c.
-            let per = self.cluster / crate::page::V1_BLOCK;
             for row in node.rows() {
-                let v = row?.value;
-                if v.len() < 0x18 {
-                    return Err(format_err!("data run of {} bytes", v.len()));
-                }
-                let (vcn, n, block) = (le64(v, 0), le64(v, 8), le64(v, 0x10));
-                if !vcn.is_multiple_of(per) || !n.is_multiple_of(per) || !block.is_multiple_of(per) {
-                    return Err(Error::Unsupported(format!(
-                        "a data run of {n} blocks at block {block:#x}, not of whole clusters"
-                    )));
-                }
-                let checksums = match v.get(0x1a).copied().unwrap_or(0) {
-                    0 => None,
-                    kind => {
-                        let at = 0x18 + usize::from(v[0x1b]);
-                        let len = usize::from(le16(v, 0x1c));
-                        let bytes = v
-                            .get(at..at + len)
-                            .ok_or_else(|| format_err!("run checksums outside its {} bytes", v.len()))?;
-                        Some(self.data_checksums(u16::from(kind), n / per, bytes)?)
-                    }
-                };
-                out.push(Extent {
-                    vcn: vcn / per,
-                    vlcn: block / per,
-                    clusters: n / per,
-                    written: true,
-                    checksums,
-                });
+                out.push(self.v1_run(row?.value)?);
             }
             return Ok(());
         }
@@ -921,5 +925,31 @@ mod tests {
         assert_eq!(cut[0].checksums.as_ref().map(|c| &c.values[..]), Some(&[1, 2][..]));
         assert_eq!(cut[2].checksums.as_ref().map(|c| &c.values[..]), Some(&[7, 8][..]));
         assert_eq!(overlay(Vec::new(), vec![x(5, 1, 1)]), [x(5, 1, 1)]);
+    }
+
+    /// A ReFS 1.2 volume (the fixture of Server 2012 R2) to call the
+    /// parsers of a volume on.
+    fn v1_volume() -> Volume<storage_spaces::io::SparseImage> {
+        let image =
+            storage_spaces::io::SparseImage::read_from(&include_bytes!("../tests/fixtures/r12small/disk.fixture")[..])
+                .unwrap();
+        Volume::open(image, 0x810_0000).unwrap()
+    }
+
+    #[test]
+    fn damaged_run_rows_of_reafs_1x_are_errors_not_panics() {
+        let vol = v1_volume();
+        // Every length a row may have, with the checksum kind set: the
+        // descriptor at 0x1a..0x1e is cut short at some of them.
+        for len in 0..0x60 {
+            let mut row = vec![0u8; len];
+            if len > 0x1a {
+                row[0x1a] = 2;
+            }
+            let _ = vol.v1_run(&row);
+        }
+        // Whole clusters of 64 KiB, so a row of zeros is a run of none.
+        let run = vol.v1_run(&[0u8; 0x18]).unwrap();
+        assert_eq!((run.vcn, run.clusters), (0, 0));
     }
 }
