@@ -517,6 +517,9 @@ const CHECKPOINT_HEADER: usize = 0x50;
 const CHECKPOINT_ENTRIES: usize = 0x200;
 /// The largest checkpoint read.
 const MAX_CHECKPOINT: usize = 16 << 20;
+/// The largest chunk taken: the owner's full data stripe, columns x
+/// interleave (16 MiB with 16 columns of 1 MiB), with room to spare.
+const MAX_CHUNK: u32 = 64 << 20;
 
 /// A checkpoint of the chunk map ("SPCHECK\0", in one of the checkpoint
 /// areas after the slot area): the owner GUID (mixed-endian), u32 1, u32
@@ -757,6 +760,7 @@ impl CacheHeader {
             || h.slot_count > 1 << 16
             || (h.slot_size as u64) * (h.slot_count as u64) > 64 << 20
             || h.chunk_size == 0
+            || h.chunk_size > MAX_CHUNK
             || !h.chunk_size.is_multiple_of(4096)
             // Keeps cache offsets far from overflowing (real caches: GiBs).
             || h.data_offset > 1 << 56
@@ -1114,6 +1118,19 @@ mod tests {
         // Offsets near the end of the address space would overflow lookups.
         assert!(with(0x50, &u64::MAX.to_le_bytes()).is_err());
         assert!(with(0x58, &0xffff_f000u32.to_le_bytes()).is_err());
+        // A chunk is the owner's whole data stripe (columns x interleave: 16
+        // MiB at most in practice); every cached chunk costs a flag per
+        // sector, so a header asking for gigabytes is refused.
+        let sized = |chunk: u32| {
+            let mut h = b.clone();
+            h[0x58..0x5c].copy_from_slice(&chunk.to_le_bytes());
+            let crc = crc32_excluding(&h, 0x24);
+            h[0x24..0x28].copy_from_slice(&crc.to_le_bytes());
+            CacheHeader::parse(&h)
+        };
+        assert!(sized(16 << 20).unwrap().is_some());
+        assert!(sized(1 << 28).is_err());
+        assert!(sized(0xffff_f000).is_err());
     }
 
     fn header() -> CacheHeader {
