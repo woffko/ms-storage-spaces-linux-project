@@ -51,8 +51,47 @@ struct Dir {
     by_name: HashMap<String, usize>,
 }
 
-/// Directories kept read (the cache is emptied when full).
+/// Directories kept read (the cache is emptied when full), and the entries
+/// they may hold together (a hostile directory can have millions).
 const DIRECTORIES_KEPT: usize = 256;
+const DIR_ENTRIES_KEPT: usize = 200_000;
+/// Files whose decoded record is kept (each holds its whole extent list).
+const FILES_KEPT: usize = 1024;
+/// Inodes kept that the kernel has not looked up (a listing makes them; the
+/// kernel looks them up one by one, or never, and tells us when it forgets
+/// the ones it did).
+const INODES_KEPT: usize = 1 << 16;
+
+/// The guard of a lock whose holder panicked: one failing handler must not
+/// make every later one fail with it (the data is consistent: handlers
+/// only change it in single steps).
+trait Unpoison<T> {
+    type Guard<'a>
+    where
+        Self: 'a;
+    fn lock_ok(&self) -> Self::Guard<'_>;
+}
+impl<T> Unpoison<T> for Mutex<T> {
+    type Guard<'a>
+        = std::sync::MutexGuard<'a, T>
+    where
+        Self: 'a;
+    fn lock_ok(&self) -> Self::Guard<'_> {
+        self.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+trait UnpoisonRw<T> {
+    fn read_ok(&self) -> std::sync::RwLockReadGuard<'_, T>;
+    fn write_ok(&self) -> std::sync::RwLockWriteGuard<'_, T>;
+}
+impl<T> UnpoisonRw<T> for RwLock<T> {
+    fn read_ok(&self) -> std::sync::RwLockReadGuard<'_, T> {
+        self.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn write_ok(&self) -> std::sync::RwLockWriteGuard<'_, T> {
+        self.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
 
 /// A file opened for writing: its whole content in a temporary file
 /// (unlinked; in $REFS_TMPDIR, else the system's), written back on flush.
@@ -147,8 +186,124 @@ struct State {
     records: HashMap<(u64, u64), u64>,
     next: u64,
     dirs: HashMap<u64, Arc<Dir>>,
+    /// The entries the cached listings hold together.
+    dir_entries: usize,
     files: HashMap<String, Arc<RefsFile>>,
     pending: HashMap<u64, Pending>,
+    /// The lookups the kernel holds per inode (`forget` gives them back).
+    lookups: HashMap<u64, u64>,
+}
+
+impl State {
+    fn new() -> Self {
+        let mut s = State {
+            paths: HashMap::new(),
+            inodes: HashMap::new(),
+            records: HashMap::new(),
+            next: 2,
+            dirs: HashMap::new(),
+            dir_entries: 0,
+            files: HashMap::new(),
+            pending: HashMap::new(),
+            lookups: HashMap::new(),
+        };
+        s.paths.insert(INodeNo::ROOT.0, vec!["/".to_owned()]);
+        s.inodes.insert("/".to_owned(), INodeNo::ROOT.0);
+        s
+    }
+
+    /// The inode of a path, made on first sight; the names of one record
+    /// (`record`: its home and ordinal) share it.
+    fn inode(&mut self, path: &str, record: Option<(u64, u64)>) -> u64 {
+        if let Some(&ino) = self.inodes.get(path) {
+            if let Some(r) = record {
+                self.records.entry(r).or_insert(ino);
+            }
+            return ino;
+        }
+        if self.inodes.len() > INODES_KEPT {
+            self.trim();
+        }
+        let ino = match record.and_then(|r| self.records.get(&r).copied()) {
+            Some(ino) => ino,
+            None => {
+                let ino = self.next;
+                self.next += 1;
+                if let Some(r) = record {
+                    self.records.insert(r, ino);
+                }
+                ino
+            }
+        };
+        self.inodes.insert(path.to_owned(), ino);
+        self.paths.entry(ino).or_default().push(path.to_owned());
+        ino
+    }
+
+    /// The kernel was told about the inode (a reply with an entry).
+    fn looked_up(&mut self, ino: u64) {
+        *self.lookups.entry(ino).or_default() += 1;
+    }
+
+    /// The kernel gives `n` lookups back; with none left it forgets the
+    /// inode, and so do we (the root stays).
+    fn forget(&mut self, ino: u64, n: u64) {
+        let Some(held) = self.lookups.get_mut(&ino) else {
+            return;
+        };
+        *held = held.saturating_sub(n);
+        if *held == 0 {
+            self.lookups.remove(&ino);
+            self.drop_inode(ino);
+        }
+    }
+
+    fn drop_inode(&mut self, ino: u64) {
+        if ino == INodeNo::ROOT.0 || self.pending.contains_key(&ino) {
+            return;
+        }
+        for name in self.paths.remove(&ino).unwrap_or_default() {
+            self.inodes.remove(&name);
+        }
+        self.records.retain(|_, i| *i != ino);
+    }
+
+    /// Drops the inodes the kernel never looked up (a later lookup makes
+    /// them again, under a new number the kernel has not seen).
+    fn trim(&mut self) {
+        let idle: Vec<u64> = self
+            .paths
+            .keys()
+            .copied()
+            .filter(|i| !self.lookups.contains_key(i))
+            .collect();
+        for ino in idle {
+            self.drop_inode(ino);
+        }
+    }
+
+    /// Keeps a listing, within the budget of entries.
+    fn cache_dir(&mut self, oid: u64, d: Arc<Dir>) {
+        let n = d.entries.len();
+        if n > DIR_ENTRIES_KEPT {
+            return;
+        }
+        if self.dirs.len() >= DIRECTORIES_KEPT || self.dir_entries + n > DIR_ENTRIES_KEPT {
+            self.dirs.clear();
+            self.dir_entries = 0;
+        }
+        if let Some(old) = self.dirs.insert(oid, d) {
+            self.dir_entries = self.dir_entries.saturating_sub(old.entries.len());
+        }
+        self.dir_entries += n;
+    }
+
+    fn cache_file(&mut self, path: String, f: Arc<RefsFile>) {
+        if self.files.len() >= FILES_KEPT {
+            self.files.clear();
+        }
+        self.files.insert(path, f);
+    }
 }
 
 struct RefsFs {
@@ -211,27 +366,7 @@ impl RefsFs {
             Some(Target::Split { home, ordinal }) => Some((*home, *ordinal)),
             _ => None,
         };
-        let mut s = self.state.lock().unwrap();
-        if let Some(&ino) = s.inodes.get(path) {
-            if let Some(r) = record {
-                s.records.entry(r).or_insert(ino);
-            }
-            return ino;
-        }
-        let ino = match record.and_then(|r| s.records.get(&r).copied()) {
-            Some(ino) => ino,
-            None => {
-                let ino = s.next;
-                s.next += 1;
-                if let Some(r) = record {
-                    s.records.insert(r, ino);
-                }
-                ino
-            }
-        };
-        s.inodes.insert(path.to_owned(), ino);
-        s.paths.entry(ino).or_default().push(path.to_owned());
-        ino
+        self.state.lock_ok().inode(path, record)
     }
 
     fn path(&self, ino: u64) -> Result<String, Errno> {
@@ -247,8 +382,9 @@ impl RefsFs {
     /// Forgets what was read before a change (listings and records), and
     /// the paths below `gone` when it went away.
     fn changed(&self, gone: Option<&str>) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock_ok();
         s.dirs.clear();
+        s.dir_entries = 0;
         s.files.clear();
         if let Some(gone) = gone {
             let below = format!("{gone}/");
@@ -275,7 +411,7 @@ impl RefsFs {
     /// Moves the paths of `from` (and below it) to `to`.
     fn moved(&self, from: &str, to: &str) {
         self.changed(Some(to));
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock_ok();
         let below = format!("{from}/");
         let moved: Vec<(String, u64)> = s
             .inodes
@@ -297,7 +433,7 @@ impl RefsFs {
 
     /// The entries of directory `oid` (cached).
     fn listing(&self, vol: &Volume<Rw>, oid: u64) -> Result<Arc<Dir>, Errno> {
-        if let Some(d) = self.state.lock().unwrap().dirs.get(&oid) {
+        if let Some(d) = self.state.lock_ok().dirs.get(&oid) {
             return Ok(d.clone());
         }
         let entries = vol
@@ -305,11 +441,7 @@ impl RefsFs {
             .map_err(|e| errno(&format!("directory {oid:#x}"), e))?;
         let by_name = entries.iter().enumerate().map(|(i, e)| (e.name.clone(), i)).collect();
         let d = Arc::new(Dir { entries, by_name });
-        let mut s = self.state.lock().unwrap();
-        if s.dirs.len() >= DIRECTORIES_KEPT {
-            s.dirs.clear();
-        }
-        s.dirs.insert(oid, d.clone());
+        self.state.lock_ok().cache_dir(oid, d.clone());
         Ok(d)
     }
 
@@ -359,12 +491,12 @@ impl RefsFs {
 
     /// The decoded record of a file (cached).
     fn file(&self, vol: &Volume<Rw>, path: &str) -> Result<Arc<RefsFile>, Errno> {
-        if let Some(f) = self.state.lock().unwrap().files.get(path) {
+        if let Some(f) = self.state.lock_ok().files.get(path) {
             return Ok(f.clone());
         }
         let entry = self.resolve(vol, path)?.ok_or(Errno::EISDIR)?;
         let file = Arc::new(vol.open_file(&entry).map_err(|e| errno(path, e))?);
-        self.state.lock().unwrap().files.insert(path.to_owned(), file.clone());
+        self.state.lock_ok().cache_file(path.to_owned(), file.clone());
         Ok(file)
     }
 
@@ -414,7 +546,7 @@ impl RefsFs {
                 (FileType::RegularFile, e.size, 0o444 | writable, e.times)
             }
         };
-        if let Some(p) = self.state.lock().unwrap().pending.get(&ino) {
+        if let Some(p) = self.state.lock_ok().pending.get(&ino) {
             size = p.len;
         }
         let (uid, gid) = if self.writable { self.owner } else { (0, 0) };
@@ -488,7 +620,7 @@ impl RefsFs {
         if !self.writable {
             return Err(Errno::EROFS);
         }
-        let mut vol = self.vol.write().unwrap();
+        let mut vol = self.vol.write_ok();
         let r = f(&mut vol).map_err(|e| errno(what, e));
         drop(vol);
         self.changed(None);
@@ -499,7 +631,7 @@ impl RefsFs {
     /// what was written (`update_file`), or the file anew.
     fn write_back(&self, ino: u64) -> Result<(), Errno> {
         let (file, len, ranges, whole) = {
-            let mut s = self.state.lock().unwrap();
+            let mut s = self.state.lock_ok();
             match s.pending.get_mut(&ino) {
                 Some(p) if p.dirty => {
                     p.dirty = false;
@@ -521,11 +653,14 @@ impl RefsFs {
 
     /// The entry reply for a path just made.
     fn entry_reply(&self, path: &str, reply: ReplyEntry) {
-        let vol = self.vol.read().unwrap();
+        let vol = self.vol.read_ok();
         let entry = self.resolve(&vol, path).ok().flatten();
         let ino = self.inode(path, entry.as_ref());
         match self.attr(&vol, ino) {
-            Ok(attr) => reply.entry(&TTL, &attr, fuser::Generation(0)),
+            Ok(attr) => {
+                self.state.lock_ok().looked_up(ino);
+                reply.entry(&TTL, &attr, fuser::Generation(0))
+            }
             Err(e) => reply.error(e),
         }
     }
@@ -542,7 +677,7 @@ impl Filesystem for RefsFs {
             Ok(p) => p,
             Err(e) => return reply.error(e),
         };
-        let vol = self.vol.read().unwrap();
+        let vol = self.vol.read_ok();
         if let Err(e) = self.directory(&vol, split(&path).0) {
             return reply.error(e);
         }
@@ -554,13 +689,20 @@ impl Filesystem for RefsFs {
         };
         let ino = self.inode(&path, entry.as_ref());
         match self.attr(&vol, ino) {
-            Ok(attr) => reply.entry(&TTL, &attr, fuser::Generation(0)),
+            Ok(attr) => {
+                self.state.lock_ok().looked_up(ino);
+                reply.entry(&TTL, &attr, fuser::Generation(0))
+            }
             Err(e) => reply.error(e),
         }
     }
 
+    fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
+        self.state.lock_ok().forget(ino.0, nlookup);
+    }
+
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
-        let vol = self.vol.read().unwrap();
+        let vol = self.vol.read_ok();
         match self.attr(&vol, ino.0) {
             Ok(attr) => reply.attr(&TTL, &attr),
             Err(e) => reply.error(e),
@@ -591,14 +733,14 @@ impl Filesystem for RefsFs {
                 if size > MAX_WRITTEN {
                     return Err(Errno::EFBIG);
                 }
-                let pending = self.state.lock().unwrap().pending.contains_key(&ino.0);
+                let pending = self.state.lock_ok().pending.contains_key(&ino.0);
                 if pending {
-                    let mut s = self.state.lock().unwrap();
+                    let mut s = self.state.lock_ok();
                     let p = s.pending.get_mut(&ino.0).unwrap();
                     p.set_len(size)?;
                     p.dirty = true;
                 } else {
-                    let mut p = self.content(&self.vol.read().unwrap(), &path)?;
+                    let mut p = self.content(&self.vol.read_ok(), &path)?;
                     p.set_len(size)?;
                     let ranges = std::mem::take(&mut p.ranges);
                     let source = PendingData(&p.file, p.len);
@@ -606,10 +748,7 @@ impl Filesystem for RefsFs {
                 }
             }
             if atime.is_some() || mtime.is_some() || crtime.is_some() {
-                let mut times = self
-                    .resolve(&self.vol.read().unwrap(), &path)?
-                    .ok_or(Errno::EPERM)?
-                    .times;
+                let mut times = self.resolve(&self.vol.read_ok(), &path)?.ok_or(Errno::EPERM)?.times;
                 let pick = |t: TimeOrNow| match t {
                     TimeOrNow::Now => now(),
                     TimeOrNow::SpecificTime(t) => filetime(t),
@@ -628,7 +767,7 @@ impl Filesystem for RefsFs {
             }
             if let Some(mode) = mode {
                 // The write bits: Windows' read-only attribute.
-                let entry = self.resolve(&self.vol.read().unwrap(), &path)?.ok_or(Errno::EPERM)?;
+                let entry = self.resolve(&self.vol.read_ok(), &path)?.ok_or(Errno::EPERM)?;
                 if !entry.is_dir() && !Self::is_link(&entry) {
                     let ro = mode & 0o222 == 0;
                     if ro != (entry.attributes & 1 != 0) {
@@ -646,7 +785,7 @@ impl Filesystem for RefsFs {
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
-        let vol = self.vol.read().unwrap();
+        let vol = self.vol.read_ok();
         match self.path(ino.0).ok().and_then(|p| self.link(&vol, &p)) {
             Some(target) => reply.data(target.as_bytes()),
             None => reply.error(Errno::EINVAL),
@@ -698,7 +837,7 @@ impl Filesystem for RefsFs {
             if flags.contains(RenameFlags::RENAME_EXCHANGE) {
                 return Err(Errno::EINVAL);
             }
-            let exists = match self.resolve(&self.vol.read().unwrap(), &to) {
+            let exists = match self.resolve(&self.vol.read_ok(), &to) {
                 Err(Errno::ENOENT) => None,
                 r => r?,
             };
@@ -708,7 +847,7 @@ impl Filesystem for RefsFs {
                 }
                 // The name only changes case: Windows' names ignore case.
                 if !from.eq_ignore_ascii_case(&to) {
-                    let source = self.resolve(&self.vol.read().unwrap(), &from)?.ok_or(Errno::EBUSY)?;
+                    let source = self.resolve(&self.vol.read_ok(), &from)?.ok_or(Errno::EBUSY)?;
                     if source.is_dir() != target.is_dir() {
                         return Err(if target.is_dir() { Errno::EISDIR } else { Errno::ENOTDIR });
                     }
@@ -738,11 +877,11 @@ impl Filesystem for RefsFs {
             let to = self.name_path(newparent, newname)?;
             self.change(&to, |v| v.link_file(&path, &to, now()))?;
             // The new name is the same inode.
-            let mut s = self.state.lock().unwrap();
+            let mut s = self.state.lock_ok();
             s.inodes.insert(to.clone(), ino.0);
             s.paths.entry(ino.0).or_default().push(to.clone());
             drop(s);
-            let vol = self.vol.read().unwrap();
+            let vol = self.vol.read_ok();
             if let Ok(Some(e)) = self.resolve(&vol, &to) {
                 self.inode(&to, Some(&e));
             }
@@ -757,7 +896,7 @@ impl Filesystem for RefsFs {
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let r = (|| -> Result<(), Errno> {
             let path = self.path(ino.0)?;
-            let vol = self.vol.read().unwrap();
+            let vol = self.vol.read_ok();
             self.file(&vol, &path)?;
             if flags.0 & 3 == 0 {
                 return Ok(());
@@ -766,7 +905,7 @@ impl Filesystem for RefsFs {
                 return Err(Errno::EROFS);
             }
             let truncate = flags.0 & O_TRUNC != 0;
-            let mut s = self.state.lock().unwrap();
+            let mut s = self.state.lock_ok();
             if let Some(p) = s.pending.get_mut(&ino.0) {
                 p.handles += 1;
                 if truncate {
@@ -784,7 +923,7 @@ impl Filesystem for RefsFs {
             };
             p.dirty = truncate;
             p.whole = truncate;
-            self.state.lock().unwrap().pending.insert(ino.0, p);
+            self.state.lock_ok().pending.insert(ino.0, p);
             Ok(())
         })();
         match r {
@@ -809,11 +948,14 @@ impl Filesystem for RefsFs {
             let ino = self.inode(&path, None);
             let mut p = Pending::new()?;
             p.whole = true;
-            self.state.lock().unwrap().pending.insert(ino, p);
-            self.attr(&self.vol.read().unwrap(), ino)
+            self.state.lock_ok().pending.insert(ino, p);
+            self.attr(&self.vol.read_ok(), ino)
         })();
         match r {
-            Ok(attr) => reply.created(&TTL, &attr, fuser::Generation(0), FileHandle(0), FopenFlags::empty()),
+            Ok(attr) => {
+                self.state.lock_ok().looked_up(attr.ino.0);
+                reply.created(&TTL, &attr, fuser::Generation(0), FileHandle(0), FopenFlags::empty())
+            }
             Err(e) => reply.error(e),
         }
     }
@@ -829,13 +971,13 @@ impl Filesystem for RefsFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        if let Some(p) = self.state.lock().unwrap().pending.get(&ino.0) {
+        if let Some(p) = self.state.lock_ok().pending.get(&ino.0) {
             return match p.read_at(offset, size) {
                 Ok(b) => reply.data(&b),
                 Err(e) => reply.error(e),
             };
         }
-        let vol = self.vol.read().unwrap();
+        let vol = self.vol.read_ok();
         let file = match self.path(ino.0).and_then(|p| self.file(&vol, &p)) {
             Ok(f) => f,
             Err(e) => return reply.error(e),
@@ -865,7 +1007,7 @@ impl Filesystem for RefsFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock_ok();
         let Some(p) = s.pending.get_mut(&ino.0) else {
             return reply.error(Errno::EBADF);
         };
@@ -903,7 +1045,7 @@ impl Filesystem for RefsFs {
             }
             let (src, dst) = (self.path(ino_in.0)?, self.path(ino_out.0)?);
             let (buffered, src_dirty, dst_len) = {
-                let s = self.state.lock().unwrap();
+                let s = self.state.lock_ok();
                 let dst = s.pending.get(&ino_out.0).ok_or(Errno::EBADF)?;
                 let src = s.pending.get(&ino_in.0);
                 (src.map(|p| p.len), src.is_some_and(|p| p.dirty), dst.len)
@@ -911,7 +1053,7 @@ impl Filesystem for RefsFs {
             let size = match buffered {
                 Some(len) => len,
                 None => {
-                    let vol = self.vol.read().unwrap();
+                    let vol = self.vol.read_ok();
                     self.file(&vol, &src)?.data.as_ref().map_or(0, |s| s.size)
                 }
             };
@@ -925,10 +1067,10 @@ impl Filesystem for RefsFs {
                 self.write_back(ino_out.0)?;
                 if self.change(&dst, |v| v.clone_file(&src, &dst, now())).is_ok() {
                     // The copy's buffer: its new content, nothing to write.
-                    let vol = self.vol.read().unwrap();
+                    let vol = self.vol.read_ok();
                     let mut p = self.content(&vol, &dst)?;
                     drop(vol);
-                    let mut s = self.state.lock().unwrap();
+                    let mut s = self.state.lock_ok();
                     p.handles = s.pending.get(&ino_out.0).map_or(1, |old| old.handles);
                     s.pending.insert(ino_out.0, p);
                     return Ok(size as u32);
@@ -938,14 +1080,14 @@ impl Filesystem for RefsFs {
             if offset_out.saturating_add(n) > MAX_WRITTEN {
                 return Err(Errno::EFBIG);
             }
-            let data = match self.state.lock().unwrap().pending.get(&ino_in.0) {
+            let data = match self.state.lock_ok().pending.get(&ino_in.0) {
                 Some(p) => Some(p.read_at(offset_in, n as u32)?),
                 None => None,
             };
             let data = match data {
                 Some(d) => d,
                 None => {
-                    let vol = self.vol.read().unwrap();
+                    let vol = self.vol.read_ok();
                     let file = self.file(&vol, &src)?;
                     let mut buf = vec![0u8; n as usize];
                     if let Some(stream) = &file.data {
@@ -957,7 +1099,7 @@ impl Filesystem for RefsFs {
                     buf
                 }
             };
-            let mut s = self.state.lock().unwrap();
+            let mut s = self.state.lock_ok();
             let p = s.pending.get_mut(&ino_out.0).ok_or(Errno::EBADF)?;
             p.write_at(offset_out, &data)?;
             p.dirty = true;
@@ -994,7 +1136,7 @@ impl Filesystem for RefsFs {
         reply: ReplyEmpty,
     ) {
         let r = self.write_back(ino.0);
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock_ok();
         if let Some(p) = s.pending.get_mut(&ino.0) {
             p.handles = p.handles.saturating_sub(1);
             if p.handles == 0 && !p.dirty {
@@ -1008,7 +1150,7 @@ impl Filesystem for RefsFs {
     }
 
     fn readdir(&self, _req: &Request, ino: INodeNo, _fh: FileHandle, offset: u64, mut reply: ReplyDirectory) {
-        let vol = self.vol.read().unwrap();
+        let vol = self.vol.read_ok();
         let path = match self.path(ino.0) {
             Ok(p) => p,
             Err(e) => return reply.error(e),
@@ -1040,14 +1182,14 @@ impl Filesystem for RefsFs {
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
-        let vol = self.vol.read().unwrap();
+        let vol = self.vol.read_ok();
         let blocks = vol.boot.volume_size() / vol.cluster;
         let free = vol.free_clusters().unwrap_or(0);
         reply.statfs(blocks, free, free, 0, 0, vol.cluster as u32, 255, vol.cluster as u32);
     }
 
     fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
-        let vol = self.vol.read().unwrap();
+        let vol = self.vol.read_ok();
         let names: Vec<u8> = match self.path(ino.0).and_then(|p| self.file(&vol, &p)) {
             Ok(f) => f
                 .streams
@@ -1070,7 +1212,7 @@ impl Filesystem for RefsFs {
         let Some(stream_name) = name.strip_prefix("user.") else {
             return reply.error(Errno::NO_XATTR);
         };
-        let vol = self.vol.read().unwrap();
+        let vol = self.vol.read_ok();
         let Ok(file) = self.path(ino.0).and_then(|p| self.file(&vol, &p)) else {
             return reply.error(Errno::NO_XATTR);
         };
@@ -1109,7 +1251,7 @@ impl Filesystem for RefsFs {
             let name = name.to_str().ok_or(Errno::EINVAL)?;
             let stream = name.strip_prefix("user.").ok_or(Errno::EOPNOTSUPP)?;
             let path = self.path(ino.0)?;
-            let file = self.file(&self.vol.read().unwrap(), &path)?;
+            let file = self.file(&self.vol.read_ok(), &path)?;
             let exists = file.streams.iter().any(|(n, _)| n.eq_ignore_ascii_case(stream));
             if exists && flags & XATTR_CREATE != 0 {
                 return Err(Errno::EEXIST);
@@ -1184,17 +1326,7 @@ pub fn serve(
     let owner = std::fs::metadata(&mountpoint)
         .map(|m| (m.uid(), m.gid()))
         .unwrap_or((0, 0));
-    let mut state = State {
-        paths: HashMap::new(),
-        inodes: HashMap::new(),
-        records: HashMap::new(),
-        next: 2,
-        dirs: HashMap::new(),
-        files: HashMap::new(),
-        pending: HashMap::new(),
-    };
-    state.paths.insert(INodeNo::ROOT.0, vec!["/".to_owned()]);
-    state.inodes.insert("/".to_owned(), INodeNo::ROOT.0);
+    let state = State::new();
     let fs = RefsFs {
         vol: RwLock::new(vol),
         writable,
@@ -1206,4 +1338,91 @@ pub fn serve(
         .with_context(|| format!("cannot mount on {}", mountpoint.display()))?;
     session.join().context("FUSE session failed")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn entry(name: &str) -> Entry {
+        Entry {
+            name: name.to_owned(),
+            attributes: 0,
+            times: Default::default(),
+            size: 0,
+            allocated: 0,
+            target: Target::Embedded(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn inodes_the_kernel_forgot_are_dropped() {
+        let mut s = State::new();
+        let a = s.inode("/a", None);
+        s.looked_up(a);
+        s.looked_up(a);
+        s.forget(a, 1);
+        assert!(s.paths.contains_key(&a), "one lookup is still held");
+        s.forget(a, 1);
+        assert!(!s.paths.contains_key(&a) && !s.inodes.contains_key("/a"));
+        // The root is not the kernel's to forget.
+        s.forget(INodeNo::ROOT.0, 1000);
+        assert!(s.paths.contains_key(&INodeNo::ROOT.0));
+    }
+
+    #[test]
+    fn inodes_nothing_looked_up_are_bounded() {
+        // Listing a directory makes inodes the kernel then looks up one by
+        // one, or never; a walk over a big volume must not keep them all.
+        let mut s = State::new();
+        let held = s.inode("/held", None);
+        s.looked_up(held);
+        for i in 0..INODES_KEPT + 100 {
+            s.inode(&format!("/f{i}"), None);
+        }
+        assert!(s.inodes.len() <= INODES_KEPT + 1, "{} inodes", s.inodes.len());
+        assert!(s.paths.contains_key(&held) && s.paths.contains_key(&INodeNo::ROOT.0));
+    }
+
+    #[test]
+    fn cached_listings_and_files_are_bounded() {
+        let mut s = State::new();
+        let big = Arc::new(Dir {
+            entries: (0..DIR_ENTRIES_KEPT / 2 + 1).map(|i| entry(&i.to_string())).collect(),
+            by_name: HashMap::new(),
+        });
+        for oid in 0..5 {
+            s.cache_dir(oid, big.clone());
+            assert!(s.dir_entries <= DIR_ENTRIES_KEPT, "{} entries", s.dir_entries);
+        }
+        let huge = Arc::new(Dir {
+            entries: (0..DIR_ENTRIES_KEPT + 1).map(|i| entry(&i.to_string())).collect(),
+            by_name: HashMap::new(),
+        });
+        s.cache_dir(9, huge);
+        assert!(!s.dirs.contains_key(&9), "a listing over the budget is not kept");
+        let file = Arc::new(RefsFile::default());
+        for i in 0..FILES_KEPT + 10 {
+            s.cache_file(format!("/f{i}"), file.clone());
+        }
+        assert!(s.files.len() <= FILES_KEPT);
+    }
+
+    #[test]
+    fn a_panic_in_one_handler_does_not_end_the_mount() {
+        let m = Arc::new(Mutex::new(1u32));
+        let l = Arc::new(RwLock::new(1u32));
+        let (m2, l2) = (m.clone(), l.clone());
+        let _ = std::thread::spawn(move || {
+            let _a = m2.lock_ok();
+            let _b = l2.write_ok();
+            panic!("a handler fails");
+        })
+        .join();
+        assert!(m.is_poisoned() && l.is_poisoned());
+        assert_eq!(*m.lock_ok(), 1);
+        assert_eq!(*l.read_ok(), 1);
+        *l.write_ok() = 2;
+    }
 }
