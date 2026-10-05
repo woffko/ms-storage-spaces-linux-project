@@ -400,12 +400,12 @@ fn start_server(unit: &str, kind: &str, paths: &[PathBuf], space: &str, extra: &
         "--property=Before=shutdown.target".into(),
     ];
     let private = if kind == "fuse" { &[][..] } else { SERVER_PRIVATE_VIEW };
-    args.extend(
-        SERVER_RESTRICTIONS
-            .iter()
-            .chain(private)
-            .map(|p| format!("--property={p}")),
-    );
+    let restrictions: Vec<String> = SERVER_RESTRICTIONS
+        .iter()
+        .chain(private)
+        .map(|p| format!("--property={p}"))
+        .collect();
+    let head = std::mem::take(&mut args);
     args.extend(["--".into(), exe.display().to_string()]);
     args.push(format!("serve-{kind}"));
     args.extend(paths.iter().map(|p| p.display().to_string()));
@@ -417,8 +417,17 @@ fn start_server(unit: &str, kind: &str, paths: &[PathBuf], space: &str, extra: &
     ]);
     args.extend(extra.iter().map(|s| s.to_string()));
     args.extend(crate::inherited_args());
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run("systemd-run", &refs, None)?;
+    let launch = |limits: &[String]| {
+        let all: Vec<&str> = head.iter().chain(limits).chain(&args).map(String::as_str).collect();
+        run("systemd-run", &all, None)
+    };
+    // A systemd that does not know one of the properties (they date from
+    // 231 to 247) refuses the whole unit: start the server without limits
+    // rather than not at all, and say so.
+    if let Err(e) = launch(&restrictions) {
+        eprintln!("warning: starting {unit} with limits failed ({e:#}); starting it without");
+        launch(&[])?;
+    }
     // Opening a space read-write destages its write-back cache first, which
     // can take minutes.
     let timeout = Duration::from_secs(if extra.contains(&"--rw") { 3600 } else { 30 });

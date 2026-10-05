@@ -34,8 +34,8 @@ Version: $version
 Architecture: $arch
 Maintainer: storage-spaces developers <noreply@example.invalid>
 Depends: dmsetup, systemd, udev
-Recommends: nbd-client
-Suggests: fuse3, ntfs-3g
+Recommends: nbd-client, fuse3
+Suggests: ntfs-3g
 Section: admin
 Homepage: https://github.com/woffko/ms-storage-spaces-linux-project
 Priority: optional

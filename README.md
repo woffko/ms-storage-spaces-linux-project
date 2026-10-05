@@ -53,8 +53,9 @@ against pools created by Windows.
 ## Quick start
 
 ```sh
-cargo build --release
-sudo contrib/install.sh            # /usr/local/sbin/spaces, udev rule, systemd unit
+cargo build --release              # Rust 1.89+, libclang-dev
+sudo contrib/install.sh            # spaces, refs, mount.ReFS, man pages, udev rule, systemd unit
+                                   # (contrib/uninstall.sh removes it again)
 
 sudo spaces scan                   # pool members found among the block devices
 sudo spaces attach                 # attach every complete pool
@@ -70,8 +71,12 @@ attached only with `--degraded`; `spaces info <disks...>` shows the pool, its
 disks and whether each space is healthy, degraded or failed.
 
 Packages: `contrib/deb/build-deb.sh` builds a Debian/Ubuntu package,
-`contrib/arch/PKGBUILD` an Arch Linux one, and CI builds a static musl
-binary. Without installing anything, pools can be inspected and copied out:
+`contrib/arch/PKGBUILD` an Arch Linux one, and the
+[releases page](https://github.com/woffko/ms-storage-spaces-linux-project/releases)
+has a static x86_64 `spaces` and a `.deb` (with `SHA256SUMS`); what the
+installation needs and puts where is in the
+[user guide](docs/user-guide.md#installing). Without installing anything,
+pools can be inspected and copied out:
 
 ```sh
 spaces info /dev/sdb /dev/sdc

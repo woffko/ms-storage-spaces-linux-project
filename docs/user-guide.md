@@ -35,20 +35,47 @@ disks are never written, unless a space is attached read-write
 
 ## Installing
 
-From a checkout:
+### What it needs
 
-```sh
-cargo build --release
-sudo contrib/install.sh              # /usr/local/sbin/spaces, udev rule, systemd unit
-# or build a package
-contrib/deb/build-deb.sh && sudo apt install ./target/deb/storage-spaces_*.deb
-(cd contrib/arch && makepkg -si)     # Arch Linux
-```
+* Linux with device-mapper (`dmsetup`), systemd and udev for the attach at
+  boot. The backends beyond device-mapper: `ublk` (kernel 6.0 or later,
+  module `ublk_drv`) for parity, caches, tiers and degraded pools; `nbd`
+  (`nbd-client`, module `nbd`) where there is no ublk; FUSE (`fuse3`,
+  `losetup`) as the last resort and for `refs mount`.
+* To use what is inside a space: a file system driver (`ntfs3`, `ntfs-3g`,
+  ...); ReFS volumes need none, `refs` reads them.
+* To build: Rust 1.89 or later and `libclang` (the ublk bindings; on
+  Debian/Ubuntu `libclang-dev`). `--no-default-features` builds without
+  the ublk and FUSE backends and without `libclang`.
 
-Only the `spaces` binary: `cargo install --locked --path crates/spaces-cli`.
+### Which way
+
+| Way | Gives | For |
+|---|---|---|
+| From a checkout: `cargo build --release && sudo contrib/install.sh` | `spaces`, `refs`, `mount.ReFS`, man pages, udev rule, systemd unit, module list | any distribution |
+| Debian/Ubuntu package: `contrib/deb/build-deb.sh && sudo apt install ./target/deb/storage-spaces_*.deb` | the same, as a package | Debian, Ubuntu |
+| Arch Linux: `(cd contrib/arch && makepkg -si)` | the same, as a package | Arch |
+| The releases page of the repository | a static `spaces` binary (x86_64, musl) and a `.deb`, with `SHA256SUMS`; the 1.0.0 files predate `refs`, build from a checkout for it | trying it out; `sha256sum -c SHA256SUMS` first |
+| `cargo install --locked --path crates/spaces-cli` (and `crates/refs-cli`) | the binary only, no udev rule or unit | development |
+
+`contrib/install.sh` (as root; it takes the path of `spaces` if it was
+built elsewhere) puts `spaces` in `/usr/local/sbin`, `refs` and its man
+page in `/usr/local/bin` when it was built next to `spaces`,
+`mount.ReFS` (and `mount.refs`) in `/sbin`, the udev rule and the
+unit, lists `ublk_drv` and `nbd` in `/etc/modules-load.d`, and enables
+`storage-spaces-attach.service`. `contrib/uninstall.sh` (`-n` lists what it
+would do) removes it again; detach spaces first (`spaces detach`).
 
 The udev rule starts `storage-spaces-attach.service` whenever a pool member
-appears, so pools are attached at boot and when their disks are plugged in.
+appears, so pools are attached at boot and when their disks are plugged in
+(read-only; see Hardening below). To attach by hand only, remove
+`/etc/udev/rules.d/69-storage-spaces.rules`.
+
+Check the installation: `spaces --version`, `refs --version`,
+`systemctl status storage-spaces-attach.service`, and `spaces scan` with a
+pool's disks plugged in. Man pages: `man spaces`, `man refs`. Upgrading is
+installing again; attached spaces keep running the old servers until they
+are detached and attached again.
 
 ## Attaching and mounting
 
@@ -569,10 +596,13 @@ security`, scores 9.5 UNSAFE before, 5.1 MEDIUM after):
   new privileges, namespaces or most capabilities; the mount is visible to
   the host as before. Without systemd it falls back to a plain process.
 
-The udev rule attaches, read-only, every pool whose member disks appear:
-a disk with the Storage Spaces partition type starts the parsing without
-anyone asking. To attach by hand only, remove
-`/etc/udev/rules.d/69-storage-spaces.rules`.
+The limits need systemd 231 or later for the unit file and 247 for the
+servers' (older ones refuse the unknown property): then `spaces attach`
+says so and starts the server without limits, rather than not at all.
+The udev rule starts parsing a disk with the Storage Spaces partition type
+without anyone asking (see Installing for turning it off). The code
+itself has no `unsafe` (`#![forbid(unsafe_code)]`), is built with integer
+overflow checks, and its parsers are fuzzed (`docs/security.md`).
 
 ## Troubleshooting
 
