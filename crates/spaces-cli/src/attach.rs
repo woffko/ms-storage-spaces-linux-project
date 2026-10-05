@@ -349,6 +349,40 @@ fn wait_for(path: &Path, unit: &str, timeout: Duration) -> Result<()> {
 
 /// Starts `spaces serve-<kind>` as a transient systemd unit and waits for
 /// its ready file.
+/// What a server parsing a pool's disks (hostile input, run as root) may
+/// not do. Nothing here changes what it can open or mount.
+const SERVER_RESTRICTIONS: &[&str] = &[
+    "NoNewPrivileges=yes",
+    "ProtectControlGroups=yes",
+    "ProtectKernelLogs=yes",
+    "ProtectHostname=yes",
+    "RestrictNamespaces=yes",
+    "RestrictRealtime=yes",
+    "RestrictSUIDSGID=yes",
+    "LockPersonality=yes",
+    "SystemCallArchitectures=native",
+    "MemoryDenyWriteExecute=yes",
+    "UMask=0077",
+    "RestrictAddressFamilies=AF_UNIX AF_NETLINK",
+    "CapabilityBoundingSet=~CAP_SYS_PTRACE CAP_SYS_BOOT CAP_SYS_TIME CAP_SYS_PACCT CAP_SYS_TTY_CONFIG \
+        CAP_SYSLOG CAP_NET_ADMIN CAP_NET_RAW CAP_AUDIT_CONTROL CAP_AUDIT_READ CAP_AUDIT_WRITE \
+        CAP_LINUX_IMMUTABLE CAP_MAC_ADMIN CAP_MAC_OVERRIDE CAP_WAKE_ALARM CAP_BLOCK_SUSPEND \
+        CAP_PERFMON CAP_BPF CAP_CHECKPOINT_RESTORE CAP_SETPCAP CAP_SYS_CHROOT CAP_SETUID CAP_SETGID \
+        CAP_KILL",
+];
+
+/// Restrictions that give the server its own view of the file system: not
+/// for the FUSE server, whose mount must be seen by the host. Home
+/// directories stay readable (pool disks may be image files there).
+const SERVER_PRIVATE_VIEW: &[&str] = &[
+    "ProtectSystem=strict",
+    "ReadWritePaths=/run",
+    "ProtectHome=read-only",
+    "PrivateTmp=yes",
+    "ProtectKernelTunables=yes",
+    "ProtectProc=invisible",
+];
+
 fn start_server(unit: &str, kind: &str, paths: &[PathBuf], space: &str, extra: &[&str]) -> Result<String> {
     fs::create_dir_all(STATE_DIR)?;
     let ready = Path::new(STATE_DIR).join(format!("{unit}.ready"));
@@ -364,9 +398,15 @@ fn start_server(unit: &str, kind: &str, paths: &[PathBuf], space: &str, extra: &
         "--property=DefaultDependencies=no".into(),
         "--property=Conflicts=shutdown.target".into(),
         "--property=Before=shutdown.target".into(),
-        "--".into(),
-        exe.display().to_string(),
     ];
+    let private = if kind == "fuse" { &[][..] } else { SERVER_PRIVATE_VIEW };
+    args.extend(
+        SERVER_RESTRICTIONS
+            .iter()
+            .chain(private)
+            .map(|p| format!("--property={p}")),
+    );
+    args.extend(["--".into(), exe.display().to_string()]);
     args.push(format!("serve-{kind}"));
     args.extend(paths.iter().map(|p| p.display().to_string()));
     args.extend([
@@ -552,5 +592,31 @@ pub fn teardown(state: &State) -> Result<()> {
         Ok(())
     } else {
         bail!("{}", errors.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    #[test]
+    fn server_properties_are_systemd_assignments() {
+        // They go to `systemd-run --property=`: a typo would make attach
+        // fail at boot, where nobody sees it.
+        for p in SERVER_RESTRICTIONS.iter().chain(SERVER_PRIVATE_VIEW) {
+            let (key, value) = p.split_once('=').unwrap_or_else(|| panic!("{p}"));
+            assert!(
+                key.chars().all(|c| c.is_ascii_alphanumeric()) && !value.is_empty(),
+                "{p}"
+            );
+        }
+        // The FUSE server must not get a private view of the file system:
+        // its mount has to be visible to the host.
+        assert!(SERVER_PRIVATE_VIEW.iter().any(|p| p.starts_with("ProtectSystem")));
+        assert!(
+            !SERVER_RESTRICTIONS
+                .iter()
+                .any(|p| p.starts_with("Protect") && p.contains("System"))
+        );
     }
 }

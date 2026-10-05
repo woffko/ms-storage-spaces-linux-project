@@ -58,16 +58,39 @@ if [ $allow_other = 1 ]; then set -- "$@" --allow-other; fi
 
 # refs serves the mount in the foreground: run it in its own session and
 # return once the mount is there (or report why it is not).
+#
+# As root (as mount(8) and udisks2 run this) it parses a disk that may be
+# anyone's, so under systemd it runs as a transient service with the limits
+# that leave the mount visible to the host: no network, no new privileges,
+# no namespaces, only the capabilities mounting and reading disks need.
+# (ProtectSystem and the like would hide the mount in a private namespace.)
 log=$(mktemp)
-setsid "$refs" mount "$@" "$source" "$dir" >"$log" 2>&1 </dev/null &
-pid=$!
+unit=
+if [ "$(id -u)" = 0 ] && [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1; then
+  unit=refs-mount-$$
+  if ! systemd-run --quiet --collect --unit="$unit" \
+    -p NoNewPrivileges=yes -p PrivateNetwork=yes -p RestrictNamespaces=yes \
+    -p RestrictRealtime=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes \
+    -p MemoryDenyWriteExecute=yes -p SystemCallArchitectures=native -p UMask=0077 \
+    -p "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER CAP_SETUID CAP_SETGID" \
+    -p "StandardOutput=file:$log" -p "StandardError=file:$log" \
+    -- "$refs" mount "$@" "$source" "$dir"; then
+    unit=
+  fi
+fi
+if [ -z "$unit" ]; then
+  setsid "$refs" mount "$@" "$source" "$dir" >"$log" 2>&1 </dev/null &
+  pid=$!
+fi
 i=0
 while [ $i -lt 100 ]; do
   if mountpoint -q "$dir"; then
     rm -f "$log"
     exit 0
   fi
-  if ! kill -0 $pid 2>/dev/null; then
+  if [ -n "$unit" ]; then
+    systemctl -q is-active "$unit" 2>/dev/null || break
+  elif ! kill -0 $pid 2>/dev/null; then
     break
   fi
   sleep 0.1
@@ -75,5 +98,9 @@ while [ $i -lt 100 ]; do
 done
 cat "$log" >&2
 rm -f "$log"
-kill $pid 2>/dev/null || true
+if [ -n "$unit" ]; then
+  systemctl stop "$unit" 2>/dev/null || true
+else
+  kill $pid 2>/dev/null || true
+fi
 exit 32

@@ -548,6 +548,32 @@ versions. Compressed files are
 changed by writing them whole, see above; their named streams, if
 compressed, are not changed.
 
+## Hardening
+
+Everything that parses a disk runs as root, and a disk can be anyone's: a
+USB stick plugged in, a pool handed over. So the parts that do it are
+limited to what they need (checked on Ubuntu 22.04 with `systemd-analyze
+security`, scores 9.5 UNSAFE before, 5.1 MEDIUM after):
+
+* `storage-spaces-attach.service` (installed by `contrib/install.sh`):
+  no new privileges, the file system read-only except `/run`, a private
+  `/tmp`, no namespaces, no network but local sockets and netlink, only
+  the capabilities device-mapper and the module loader need. Home
+  directories stay readable, as pool disks may be image files.
+* The servers `spaces attach` starts (`serve-ublk`, `serve-nbd`,
+  `serve-fuse`, as transient `storage-spaces-<guid>.service` units) get
+  the same limits from the program itself, but for the FUSE server a
+  private view of the file system, whose mount the host could not see.
+* `mount.ReFS` (what `mount -t ReFS` and udisks2 call, as root) runs
+  `refs mount` as a transient `refs-mount-<pid>.service` without network,
+  new privileges, namespaces or most capabilities; the mount is visible to
+  the host as before. Without systemd it falls back to a plain process.
+
+The udev rule attaches, read-only, every pool whose member disks appear:
+a disk with the Storage Spaces partition type starts the parsing without
+anyone asking. To attach by hand only, remove
+`/etc/udev/rules.d/69-storage-spaces.rules`.
+
 ## Troubleshooting
 
 * `no Storage Spaces pool members found`: the disks are not visible
