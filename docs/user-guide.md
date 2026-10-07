@@ -528,11 +528,29 @@ checked on every read too: damaged data is an error (EIO in the mount),
 never returned.
 
 `refs` reads the volume's last checkpoint. A volume that was detached
-without being dismounted (the disk image detached, the cable pulled) can
-have newer changes in its log, which Windows replays when it attaches the
-volume again; `refs info` says so ("records past the checkpoint"), and the
-writing commands refuse such a volume: attach it to Windows once and take
-it offline or safely remove it before writing with `refs`.
+without being dismounted (the disk image detached, the cable pulled, or
+Windows' fast startup) can have newer changes in its log, which Windows
+replays when it attaches the volume again; `refs info` says so ("records
+past the checkpoint"), and the writing commands refuse such a volume:
+attach it to Windows once and take it offline or safely remove it before
+writing with `refs`.
+
+Before `refs mount` (and so `mount -t ReFS` and udisks2) mounts a volume,
+it runs the quick checks `refs check --quick` prints: the boot sector, the
+superblock and its two copies, both checkpoints, and that log. A volume
+that is not healthy (such a log makes it suspect) is not mounted unless
+asked, read-only:
+
+```sh
+refs check --quick /dev/sdb2         # the report, with the evidence
+sudo mount -t ReFS -o force /dev/sdb2 /mnt
+```
+
+A refused mount says the first failing check and where its report is
+(`/run/storage-spaces/reports/refs-<serial>.txt`); udisks2 shows that line.
+A volume on a space `spaces attach` attached past its verdict (with
+`--degraded` or `--force`) needs `force` too. `refs ls`, `cat`, `stat` and
+`info` read a volume that is not healthy and say so.
 
 Changing a file's times or attributes is the first write `refs` does
 (experimental; a ReFS volume that is not attached anywhere else; only

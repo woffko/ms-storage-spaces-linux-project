@@ -28,6 +28,11 @@ refs \- read Microsoft ReFS volumes on Linux
 .B refs mount
 .I source mountpoint
 .RB [ \-\-allow\-other ]
+.RB [ \-\-force ]
+.br
+.B refs check
+.I source
+.RB [ \-\-quick ]
 .br
 .B refs set
 .I device
@@ -234,12 +239,48 @@ lets other users read it (needs
 .B user_allow_other
 in
 .IR /etc/fuse.conf ).
+Before it mounts, the quick checks run (see
+.BR "check \-\-quick" ):
+a volume that is not healthy is refused unless
+.B \-\-force
+is given, and is then read-only; a failed one is not mounted at all. For
+a device of a space
+.B spaces attach
+attached (\fI/dev/mapper/ss\-*\fR), the verdict the space got counts too:
+a space attached past its verdict mounts only with
+.BR \-\-force .
+.B mount.ReFS
+passes the option
+.B force
+on as
+.BR \-\-force ;
+a refused mount says the first failing check and, as root, where the
+report is
+.RI ( /run/storage\-spaces/reports/refs\- serial .txt ),
+which udisks2 shows instead of an unknown error.
 .TP
 .B check
 Check the volume's consistency without writing: every page's checksum
 and structure (as Windows checks pages), every page and file cluster
 used in its allocator, and clusters several files map counted in the
 block reference count table. Exits with 1 when it finds a problem.
+With
+.B \-\-quick
+only what mounting checks: the boot sector, the superblock and its copies
+at the end of the volume, both checkpoints and the log (records newer
+than the checkpoint mean Windows let go of the volume without dismounting
+it: what refs reads is older than what Windows shows), and for
+.B \-\-space
+or a device of an attached space the checks of the pool and the space; a
+report with the evidence and the verdict (healthy, degraded, suspect,
+failed), exiting with 1 unless healthy.
+.BR ls ,
+.BR cat ,
+.B stat
+and
+.B info
+read a volume that is not healthy and say so on standard error; the
+writing commands refuse it.
 .TP
 .B set
 Change a file's times (UTC, "YYYY-MM-DD hh:mm:ss" or a FILETIME number)

@@ -4,6 +4,7 @@
 
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 mod fuse;
+mod guard;
 
 use std::fs::File;
 use std::io::Write;
@@ -97,6 +98,10 @@ enum Command {
         /// mount is in place into this file (for mount.refs).
         #[arg(long, hide = true)]
         status_file: Option<PathBuf>,
+        /// Mount a volume that is not healthy (degraded or suspect; refs
+        /// check --quick says why), read-only.
+        #[arg(long, conflicts_with = "rw")]
+        force: bool,
     },
     /// Unmount a mount of `refs mount` when the process serving it ends
     /// (started by that process, its stdin a pipe from it).
@@ -294,6 +299,11 @@ enum Command {
     Check {
         #[command(flatten)]
         source: Source,
+        /// Only the quick checks mount makes (boot sector, superblock and its
+        /// copies, checkpoints, log; for --space or an attached space also
+        /// the space's): a report with the evidence and the verdict.
+        #[arg(long)]
+        quick: bool,
     },
     /// Every cluster the volume uses, by physical cluster: superblocks,
     /// checkpoints, the pages of each tree, the data runs of each file
@@ -429,8 +439,28 @@ fn mount(
     mountpoint: &std::path::Path,
     allow_other: bool,
     rw: bool,
+    force: bool,
     status: &fuse::MountStatus,
 ) -> Result<()> {
+    // The guard: a volume that is not healthy only with --force, read-only.
+    let gate = |dev: &dyn ReadAt, offset: u64| -> Result<()> {
+        let report = report_for(source, dev, offset);
+        let verdict = report.verdict();
+        if verdict == storage_spaces::report::Verdict::Healthy {
+            return Ok(());
+        }
+        let path = guard::write_report(&report, &report_name(dev, offset, &report));
+        let report_at = path.map_or(String::new(), |p| format!("; report {}", p.display()));
+        let first = guard::first_line(&report);
+        if verdict == storage_spaces::report::Verdict::Failed {
+            bail!("{first}; not mounted: a failed volume is not read{report_at}");
+        }
+        if !force {
+            bail!("{first}; not mounted: mount it with -o force (refs mount --force) to read it read-only{report_at}");
+        }
+        eprintln!("warning: {first}; mounted read-only (--force){report_at}");
+        Ok(())
+    };
     let vol: Volume<fuse::Rw> = if rw {
         if source.space.is_some() || source.devices.len() != 1 {
             bail!("--rw mounts one image, disk or partition (not --space)");
@@ -444,6 +474,12 @@ fn mount(
             Some(o) => o,
             None => *find_volumes(&file)?.first().context("no ReFS volume on the device")?,
         };
+        // Writing needs a healthy volume.
+        let report = guard::volume_report(&file, offset, &source.devices[0]);
+        if report.verdict() != storage_spaces::report::Verdict::Healthy {
+            gate(&file, offset)?;
+            bail!("{}; writing needs a healthy volume", guard::first_line(&report));
+        }
         let vol = Volume::open(Box::new(file) as fuse::Rw, offset)?;
         vol.writable_version()?;
         if vol.log_state()?.needs_replay() {
@@ -461,6 +497,7 @@ fn mount(
                 .first()
                 .context("no ReFS volume on the device (or its partitions)")?,
         };
+        gate(dev.as_ref(), offset)?;
         Volume::open(Box::new(ReadOnly(dev)) as fuse::Rw, offset)?
     };
     let name = match &source.space {
@@ -550,6 +587,58 @@ fn open_volume(source: &Source) -> Result<Volume<Device>> {
             .context("no ReFS volume on the device (or its partitions)")?,
     };
     Ok(Volume::open(dev, offset)?)
+}
+
+/// The volume `source` names and the guard's report on it.
+fn checked_volume(source: &Source) -> Result<(Volume<Device>, storage_spaces::report::Report)> {
+    let dev = open_device(source)?;
+    let offset = match source.offset {
+        Some(o) => o,
+        None => *find_volumes(dev.as_ref())?
+            .first()
+            .context("no ReFS volume on the device (or its partitions)")?,
+    };
+    let report = report_for(source, dev.as_ref(), offset);
+    Ok((Volume::open(dev, offset)?, report))
+}
+
+/// The guard's report on the volume at `offset` of `dev`, which `source`
+/// names: for --space the checks of the pool and the space with its file
+/// systems, else those of the volume (and of the space a device of an
+/// attached space belongs to).
+fn report_for(source: &Source, dev: &dyn ReadAt, offset: u64) -> storage_spaces::report::Report {
+    if let Some(name) = &source.space {
+        let files: std::io::Result<Vec<File>> = source.devices.iter().map(File::open).collect();
+        if let Ok(files) = files
+            && let Ok(pool) = storage_spaces::Pool::open(files)
+            && let Some(r) = guard::space_report(&pool, &source.devices, name)
+        {
+            return r;
+        }
+    }
+    guard::volume_report(dev, offset, &source.devices[0])
+}
+
+/// What writing to the ReFS volume at `offset` of `device` (opened as
+/// `file`) needs: a healthy volume.
+fn require_healthy(file: &File, offset: u64, device: &std::path::Path) -> Result<()> {
+    guard::require_healthy(&guard::volume_report(file, offset, device))
+}
+
+/// The name of the report of a volume refs refuses: its serial number.
+fn report_name(dev: &dyn ReadAt, offset: u64, report: &storage_spaces::report::Report) -> String {
+    if let Some((_, guid)) = &report.space {
+        return format!("refs-space-{guid}");
+    }
+    let mut sector = vec![0u8; refs::boot::BOOT_SECTOR_SIZE];
+    match dev
+        .read_exact_at(&mut sector, offset)
+        .ok()
+        .and_then(|_| refs::boot::BootSector::parse(&sector).ok())
+    {
+        Some(b) => format!("refs-{:016x}", b.serial),
+        None => format!("refs-at-{offset:x}"),
+    }
 }
 
 /// FILETIME as "YYYY-MM-DD hh:mm:ss" (UTC).
@@ -679,6 +768,9 @@ fn open_writable(device: &std::path::Path, offset: Option<u64>, write: bool) -> 
         Some(o) => o,
         None => *find_volumes(&file)?.first().context("no ReFS volume on the device")?,
     };
+    if write {
+        require_healthy(&file, offset, device)?;
+    }
     Ok(Volume::open(file, offset)?)
 }
 
@@ -961,7 +1053,8 @@ fn main() -> Result<()> {
     let mut out = std::io::stdout().lock();
     match cli.command {
         Command::Info { source } => {
-            let vol = open_volume(&source)?;
+            let (vol, report) = checked_volume(&source)?;
+            guard::warn(&report);
             let b = &vol.boot;
             let c = &vol.checkpoint;
             writeln!(out, "ReFS {}.{} (checkpoint {}.{})", b.major, b.minor, c.major, c.minor)?;
@@ -1012,7 +1105,8 @@ fn main() -> Result<()> {
             long,
             recursive,
         } => {
-            let vol = open_volume(&source)?;
+            let (vol, report) = checked_volume(&source)?;
+            guard::warn(&report);
             let oid = directory_of(&vol, &path)?;
             ls(&vol, oid, "", long, recursive, &mut out)?;
         }
@@ -1022,7 +1116,8 @@ fn main() -> Result<()> {
             stream,
             snapshot,
         } => {
-            let vol = open_volume(&source)?;
+            let (vol, report) = checked_volume(&source)?;
+            guard::warn(&report);
             let e = vol.lookup(&path)?;
             let file = vol.open_file(&e)?;
             let named = |list: &[(String, refs::Stream)], name: &str, what: &str| {
@@ -1049,7 +1144,8 @@ fn main() -> Result<()> {
             }
         }
         Command::Stat { source, path } => {
-            let vol = open_volume(&source)?;
+            let (vol, report) = checked_volume(&source)?;
+            guard::warn(&report);
             let e = vol.lookup(&path)?;
             stat(&vol, &e, &mut out)?;
         }
@@ -1060,9 +1156,10 @@ fn main() -> Result<()> {
             allow_other,
             rw,
             status_file,
+            force,
         } => {
             let status = fuse::MountStatus::start(status_file);
-            if let Err(e) = mount(&source, &mountpoint, allow_other, rw, &status) {
+            if let Err(e) = mount(&source, &mountpoint, allow_other, rw, force, &status) {
                 status.failed(&format!("{e:#}"));
                 return Err(e);
             }
@@ -1090,6 +1187,9 @@ fn main() -> Result<()> {
                 Some(o) => o,
                 None => *find_volumes(&file)?.first().context("no ReFS volume on the device")?,
             };
+            if yes {
+                require_healthy(&file, offset, &device)?;
+            }
             let mut vol = Volume::open(file, offset)?;
             let e = vol.lookup(&path)?;
             let mut times = e.times;
@@ -1148,6 +1248,9 @@ fn main() -> Result<()> {
                 Some(o) => o,
                 None => *find_volumes(&file)?.first().context("no ReFS volume on the device")?,
             };
+            if yes {
+                require_healthy(&file, offset, &device)?;
+            }
             let mut vol = Volume::open(file, offset)?;
             writeln!(out, "{path}: {} bytes at {at}", bytes.len())?;
             if !yes {
@@ -1177,6 +1280,9 @@ fn main() -> Result<()> {
                 Some(o) => o,
                 None => *find_volumes(&file)?.first().context("no ReFS volume on the device")?,
             };
+            if yes {
+                require_healthy(&file, offset, &device)?;
+            }
             let mut vol = Volume::open(file, offset)?;
             writeln!(out, "{path}: {} bytes", refs::write::Source::len(&source))?;
             if !yes {
@@ -1406,7 +1512,22 @@ fn main() -> Result<()> {
                 Ok(())
             })?;
         }
-        Command::Check { source } => {
+        Command::Check { source, quick: true } => {
+            let dev = open_device(&source)?;
+            let offset = match source.offset {
+                Some(o) => o,
+                None => *find_volumes(dev.as_ref())?
+                    .first()
+                    .context("no ReFS volume on the device (or its partitions)")?,
+            };
+            let report = report_for(&source, dev.as_ref(), offset);
+            write!(out, "{}", report.to_text())?;
+            if report.verdict() != storage_spaces::report::Verdict::Healthy {
+                out.flush()?;
+                std::process::exit(1);
+            }
+        }
+        Command::Check { source, quick: false } => {
             let vol = open_volume(&source)?;
             let report = vol.check(&[])?;
             writeln!(

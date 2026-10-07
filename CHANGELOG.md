@@ -32,6 +32,14 @@
   `--degraded`; a pool with no more than half of its database copies
   (Windows takes it read-only) needs `--force` now, also with half of
   its disks.
+* `refs mount` runs the quick checks of the volume first (`refs check
+  --quick`: boot sector, superblock and its copies, checkpoints, log) and
+  mounts a volume that is not healthy only with `--force`, read-only
+  (`mount -t ReFS -o force`, also through udisks2); a refused mount says
+  the first failing check and where its report is. A volume on a space
+  `spaces attach` attached gets the space's verdict too. `refs ls`,
+  `cat`, `stat` and `info` read such a volume with a warning; the writing
+  commands refuse it.
 * Opening a space refuses metadata that breaks what the format implies
   (a slab mapped twice, extents or log entries outside the space, journal
   entries that do not cover their run), naming the values.

@@ -6,7 +6,9 @@
 # Usage (as mount(8) calls it): mount.refs SOURCE DIR [-sfnv] [-o OPTIONS]
 #
 # Read-only unless the options hold both "rw" and "refs.rw": writing is
-# experimental, and udisks2 asks for "rw" by default. Mounted by root (as
+# experimental, and udisks2 asks for "rw" by default. A volume that is not
+# healthy (refs check --quick says why) is refused unless the options hold
+# "force", and is then read-only. Mounted by root (as
 # mount(8) and udisks2 do), every user may enter it (FUSE's allow_other,
 # with the permissions the mount shows), unless "noallow_other"; mounted
 # by a user, only "allow_other" lets others in. Other options (nosuid,
@@ -37,7 +39,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-rw=0 refs_rw=0 allow_other=0
+rw=0 refs_rw=0 allow_other=0 force=0
 if [ "$(id -u)" = 0 ]; then allow_other=1; fi
 old_ifs=$IFS
 IFS=,
@@ -48,12 +50,17 @@ for o in $options; do
     refs.rw) refs_rw=1 ;;
     allow_other) allow_other=1 ;;
     noallow_other) allow_other=0 ;;
+    force) force=1 ;;
   esac
 done
 IFS=$old_ifs
 
 set --
-if [ $rw = 1 ] && [ $refs_rw = 1 ]; then set -- "$@" --rw; fi
+if [ $force = 1 ]; then
+  set -- "$@" --force
+elif [ $rw = 1 ] && [ $refs_rw = 1 ]; then
+  set -- "$@" --rw
+fi
 if [ $allow_other = 1 ]; then set -- "$@" --allow-other; fi
 
 # refs serves the mount in the foreground: run it in its own session and
