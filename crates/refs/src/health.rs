@@ -241,8 +241,13 @@ pub fn quick_checks<D: ReadAt + ?Sized>(
                     ),
                 )
                 .evidence(
+                    Evidence::new("the log sequence number the current checkpoint covers")
+                        .at(locate(at(current.n) + 0x70))
+                        .found(format!("{:#x}:{:#x}", log.checkpoint.high, log.checkpoint.low)),
+                )
+                .evidence(
                     Evidence::new("the newest record of the log")
-                        .at(locate(at(current.n)))
+                        .at(locate(offset + log.newest_page.unwrap_or(0) * 4096))
                         .expected(format!(
                             "older than the checkpoint's log sequence number {:#x}:{:#x}",
                             log.checkpoint.high, log.checkpoint.low

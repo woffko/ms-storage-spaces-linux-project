@@ -25,6 +25,15 @@ spaces \- read, write and manage Microsoft Storage Spaces pools on Linux
 .br
 .B spaces status
 .br
+.B spaces check
+.RB [ \-\-json ]
+.RB [ \-\-deep ]
+.RB [ \-\-space
+.IR name ]
+.RB [ \-\-bundle
+.IR file ]
+.RI [ device ...]
+.br
 .B spaces info
 .RB [ \-\-all ]
 .IR device ...
@@ -151,6 +160,40 @@ of all attached spaces, and stops their serving processes.
 .B status
 Lists attached spaces, their backends and partition devices (also for users
 other than root).
+.TP
+.B check
+Checks the spaces of every pool found (or of the pool whose devices are
+given) as
+.B attach
+does before it reads them, and prints a report per space: every check
+(pool.quorum, pool.members, pool.database, pool.clean, space.state,
+space.layout, space.cache, space.journal, space.drl, space.partitions,
+fs.ntfs, fs.refs.boot, fs.refs.superblock, fs.refs.checkpoint,
+fs.refs.log) with its status (ok, info, warning, skipped, degraded,
+suspect, failed), its evidence (where: device and byte offset, LBA, and
+for a byte of the space the slab, disk and physical offset that hold it;
+what was expected and what was found, bytes in hex), where the truth
+comes from (Windows' metadata, a cross-check, the format) and what to do.
+A space's verdict is its worst status: healthy, degraded, suspect or
+failed.
+.B \-\-json
+prints the reports as JSON with stable check ids and statuses;
+.B \-\-deep
+also compares every copy (deep.scrub, as
+.B pool scrub
+does), checks ReFS volumes whole (deep.refs, as
+.B refs check
+does) and every stripe the parity journal does not record as consistent
+(otherwise up to 1 GiB is read);
+.B \-\-bundle
+.I file
+also writes a .tar.gz with the reports,
+.BR "spaces dump" ,
+.B spaces extents
+and the first and last 64 KiB of each space (its partition table) for a
+bug report: no file data, but the names and GUIDs of pools, spaces and
+disks (review it before sharing it). Exits with 1 unless every space is
+healthy.
 .TP
 .B info\fR, \fBextents\fR, \fBexport\fR, \fBdm\-table
 Inspect a pool given by its member devices or images: pool, disks (usage,

@@ -1449,6 +1449,11 @@ pub struct Scrub {
 /// side of a difference is known to be the right one; the repair plan
 /// keeps the first mirror copy and the parity spaces' data.
 pub fn scrub<D: ReadAt>(pool: &Pool<D>) -> Result<Scrub> {
+    scrub_spaces(pool, None)
+}
+
+/// [`scrub`] of user space `only`, or of every user space.
+pub fn scrub_spaces<D: ReadAt>(pool: &Pool<D>, only: Option<u64>) -> Result<Scrub> {
     use crate::format::Resiliency;
     check_pool(pool)?;
     let mut out = Scrub {
@@ -1465,7 +1470,7 @@ pub fn scrub<D: ReadAt>(pool: &Pool<D>) -> Result<Scrub> {
             .ok_or_else(|| Error::Pool(format!("disk {disk} is not at hand")))?;
         Ok((Target::Member(device), at + offset))
     };
-    for space in pool.user_spaces() {
+    for space in pool.user_spaces().filter(|s| only.is_none_or(|id| s.id() == id)) {
         let reader = pool.open_space(space.id())?;
         let l = reader.layout().clone();
         let skipped = match l.resiliency {

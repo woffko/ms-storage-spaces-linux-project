@@ -421,6 +421,15 @@ partition table will not be found.
 
 ## Checking a pool
 
+`spaces check` checks the spaces of every pool found (or of the pool whose
+devices are given: `spaces check DEVICES...`) the way `spaces attach` does
+before it reads them, and prints a report per space: every check with its
+status and evidence, and the verdict of the space (healthy, degraded,
+suspect or failed). `--json` gives the same for programs, `--deep` adds the
+checks that read whole spaces, and `--bundle FILE.tar.gz` packs the reports
+and the pool's metadata (no file data) for a bug report. It exits with 1
+unless every space is healthy.
+
 `spaces info <disks...>` prints the pool, its disks and every space with its
 state:
 

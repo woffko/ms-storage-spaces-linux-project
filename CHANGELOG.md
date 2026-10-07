@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.0 (unreleased)
+
+### Health guard
+
+* `spaces check` checks the spaces of every pool found (or of the pool
+  whose devices are given) and prints a report per space: each check with
+  its status, the evidence (the device and offset, LBA, slab, disk and
+  physical offset; what was expected and what was found, in hex), where
+  the truth comes from and what to do, and the verdict (healthy,
+  degraded, suspect, failed). `--json` for programs, `--deep` for the
+  checks that read whole spaces, `--bundle FILE` for a bug report (the
+  metadata, no file data). It checks the pool's quorum, disks and
+  database copies, Windows' state of the space, its slab map, write-back
+  cache, parity journal and dirty region log, both copies of its
+  partition table, and the file systems in it: the NTFS boot sector and
+  its copy, the ReFS boot sector, superblock copies, checkpoints and log.
+* Opening a space refuses metadata that breaks what the format implies
+  (a slab mapped twice, extents or log entries outside the space, journal
+  entries that do not cover their run), naming the values.
+
 ## 1.1.1 (2026-10-07)
 
 Fixes from a user's report of 1.1.0 on Ubuntu 26.10 (systemd 261, AppArmor

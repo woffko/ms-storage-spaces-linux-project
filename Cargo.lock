@@ -1092,6 +1092,8 @@ dependencies = [
  "clap",
  "fuser",
  "libublk",
+ "refs",
+ "serde_json",
  "signal-hook",
  "storage-spaces",
 ]

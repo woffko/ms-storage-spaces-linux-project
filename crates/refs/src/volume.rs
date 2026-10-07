@@ -933,21 +933,28 @@ pub(crate) fn log_state<D: ReadAt + ?Sized>(
         return Err(format_err!("log of pages {start:#x}..{end:#x}"));
     }
     // Every record page of the current epoch, a MiB at a time.
-    let mut newest = None;
+    let mut newest: Option<(Lsn, u64)> = None;
     let mut buf = vec![0u8; 256 * PAGE as usize];
     let mut page = start;
     while page < end {
         let n = (end - page).min(256);
         let chunk = &mut buf[..(n * PAGE) as usize];
         dev.read_exact_at(chunk, offset + page * PAGE)?;
-        for head in chunk.as_chunks::<{ PAGE as usize }>().0 {
+        for (i, head) in chunk.as_chunks::<{ PAGE as usize }>().0.iter().enumerate() {
             if &head[0..4] == b"MLog" && le32(head, 4) == signature && le64(head, 0x20) == epoch {
-                newest = newest.max(Some(Lsn::from(le64(head, 0x28))));
+                let lsn = Lsn::from(le64(head, 0x28));
+                if newest.is_none_or(|(n, _)| lsn > n) {
+                    newest = Some((lsn, page + i as u64));
+                }
             }
         }
         page += n;
     }
-    Ok(LogState { checkpoint, newest })
+    Ok(LogState {
+        checkpoint,
+        newest: newest.map(|n| n.0),
+        newest_page: newest.map(|n| n.1),
+    })
 }
 
 /// A log sequence number: (wrap, sequence) as ReFS stores it (u32 low
@@ -973,6 +980,8 @@ pub struct LogState {
     pub checkpoint: Lsn,
     /// The newest record in the log.
     pub newest: Option<Lsn>,
+    /// Its 4 KiB page, from the start of the volume.
+    pub newest_page: Option<u64>,
 }
 
 impl LogState {

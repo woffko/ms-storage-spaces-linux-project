@@ -98,7 +98,7 @@ fn corpus_volumes_pass_as_windows_left_them() {
         assert_eq!(log.status, expected, "{name}: {log:#?}");
         if expected == Status::Suspect {
             assert_eq!(verdict(&checks), Verdict::Suspect);
-            assert!(log.evidence[0].expected.as_deref().unwrap().starts_with("older than"));
+            assert!(log.evidence[1].expected.as_deref().unwrap().starts_with("older than"));
         } else {
             assert_eq!(verdict(&checks), Verdict::Healthy, "{name}");
         }
@@ -343,7 +343,7 @@ fn a_log_newer_than_the_checkpoint_is_suspect() {
     let c = checks(&image, offset);
     let log = status(&c, "fs.refs.log");
     assert_eq!(log.status, Status::Suspect, "{log:#?}");
-    let e = &log.evidence[0];
+    let e = &log.evidence[1];
     let newer = format!("{:#x}:{:#x}", (lsn + 1) >> 32, (lsn + 1) as u32);
     assert_eq!(e.found.as_deref(), Some(newer.as_str()));
     assert!(log.advice.as_deref().unwrap().contains("shut it down fully"));

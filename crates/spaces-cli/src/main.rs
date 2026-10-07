@@ -7,6 +7,8 @@ use anyhow::{Context, Result, bail};
 
 #[cfg(target_os = "linux")]
 mod attach;
+mod bundle;
+mod check;
 mod dump;
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 mod fuse;
@@ -98,6 +100,28 @@ enum Command {
     /// List attached spaces.
     #[cfg(target_os = "linux")]
     Status,
+    /// Check pools and their spaces as attach does before it reads them:
+    /// every check with its status and evidence, and a verdict per space
+    /// (healthy, degraded, suspect, failed). Exits with 1 unless every
+    /// space is healthy.
+    Check {
+        /// The reports as JSON (stable check ids and statuses).
+        #[arg(long)]
+        json: bool,
+        /// Also the deep checks: every stripe the parity journal lists, a
+        /// scrub of mirror and parity spaces, ReFS volumes checked whole.
+        #[arg(long)]
+        deep: bool,
+        /// Only this space (name or GUID).
+        #[arg(short, long)]
+        space: Option<String>,
+        /// Also write a .tar.gz of the reports and the pools' metadata
+        /// (no file data) for a bug report.
+        #[arg(long, value_name = "FILE")]
+        bundle: Option<PathBuf>,
+        /// Member devices of one pool (default: every pool scan finds).
+        devices: Vec<PathBuf>,
+    },
     /// Show the pool, its disks and spaces.
     Info {
         /// Pool member disks, partitions or images.
@@ -418,6 +442,20 @@ fn main() -> Result<()> {
         Command::Detach { space } => cmd_detach(space.as_deref()),
         #[cfg(target_os = "linux")]
         Command::Status => cmd_status(),
+        Command::Check {
+            json,
+            deep,
+            space,
+            bundle,
+            devices,
+        } => {
+            let healthy = check::run(json, deep, space.as_deref(), bundle.as_deref(), &devices)?;
+            if !healthy {
+                std::io::stdout().flush()?;
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Command::Dump { devices } => {
             for line in dump::dump(&open_pool(&devices)?) {
                 println!("{line}");
@@ -787,14 +825,24 @@ fn info(pool: &Pool<File>, all: bool) -> Result<()> {
 }
 
 fn extents(pool: &Pool<File>, space: &Space) -> Result<()> {
+    print!("{}", extents_text(pool, space));
+    Ok(())
+}
+
+/// What `spaces extents` prints: the slab allocation of a space.
+pub(crate) fn extents_text<D: ReadAt>(pool: &Pool<D>, space: &Space) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
     let mut list = space.extents.clone();
     list.sort_by_key(|e| (e.virtual_slab, e.column, e.copy));
-    println!(
+    let _ = writeln!(
+        out,
         "{:>8} {:>6} {:>4} {:>6} {:>5} {:>12}",
         "vslab", "column", "copy", "slabs", "disk", "phys offset"
     );
     for e in list {
-        println!(
+        let _ = writeln!(
+            out,
             "{:>8} {:>6} {:>4} {:>6} {:>5} {:>#12x}",
             e.virtual_slab,
             e.column,
@@ -805,9 +853,9 @@ fn extents(pool: &Pool<File>, space: &Space) -> Result<()> {
         );
     }
     for child in pool.children(space.id()) {
-        println!("child space {} ({} extents)", child.id(), child.extents.len());
+        let _ = writeln!(out, "child space {} ({} extents)", child.id(), child.extents.len());
     }
-    Ok(())
+    out
 }
 
 fn export(pool: &Pool<File>, space: &Space, output: &PathBuf) -> Result<()> {
