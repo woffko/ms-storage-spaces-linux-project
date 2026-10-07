@@ -1,7 +1,8 @@
 //! A ReFS volume read end to end: the partition table, boot sector,
 //! superblock, checkpoint, container and object tables, directories,
 //! file records, extents, streams and reparse points, and compressed
-//! (compacted) containers, and checked as `refs check` does. The base is
+//! (compacted) containers, checked as `refs check` does, and the quick
+//! checks of the guard (`refs::health`). The base is
 //! one of eight fixtures of
 //! crates/refs/tests (64 KiB clusters; 4 KiB clusters with integrity
 //! streams; stream snapshots and deduplicated files; LZ4 and ZSTD
@@ -72,6 +73,8 @@ fuzz_target!(|data: &[u8]| {
         image.insert(at, bytes);
     }
     for offset in volumes(&image) {
+        // The guard's quick checks: superblocks, checkpoints, the log.
+        let _ = refs::health::quick_checks(&image, offset, "p1", &|o| format!("{o:#x}"));
         let Ok(vol) = Volume::open(&image, offset) else {
             continue;
         };

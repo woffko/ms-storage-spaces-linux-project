@@ -9,6 +9,7 @@ pub mod checksum;
 pub mod compress;
 pub mod error;
 pub mod file;
+pub mod health;
 pub mod node;
 pub mod page;
 mod refcount;

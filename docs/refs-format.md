@@ -73,7 +73,12 @@ GUID; 0x70/0x74: offset and count (2) of the checkpoint clusters; 0x78/
 0x7c: offset and length of the page's own reference. That reference's
 checksum covers the first cluster with the whole reference zeroed: CRC32-C
 on 4 KiB clusters (**verified**), CRC64 on 64 KiB clusters and SHA-256 on
-SHA-256 volumes (**verified**: those volumes open, which needs it).
+SHA-256 volumes (**verified**: those volumes open, which needs it). The
+copies differ from the primary only where each names itself: the page
+header's clusters (0x20) and the cluster and checksum of the reference to
+itself (**verified** on every corpus volume, 3.1 to 3.14, and on ReFS 1.2,
+whose copies are the last blocks but 2 and 3 and name themselves by the
+block number at 0). The guard's `fs.refs.superblock` compares them so.
 
 ### Checkpoint
 
