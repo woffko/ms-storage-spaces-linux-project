@@ -139,7 +139,8 @@ fn writes_on_corrupted_metadata_stay_in_the_pool_partitions() {
 
 /// A user space that claims a part of an address space as tiers do (found
 /// by fuzzing pool_write: its writes started below the layout) is not
-/// written.
+/// written: the writer refuses a layout that does not start at the
+/// space's start, and opening refuses extents outside the range first.
 #[test]
 fn a_user_space_with_a_range_is_not_written() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/simple2c");
@@ -153,7 +154,10 @@ fn a_user_space_with_a_range_is_not_written() {
     let space = pool.spaces.get_mut(&id).unwrap();
     space.info.range = Some((0, 1 << 30));
     let err = pool.open_space_rw(id).err().unwrap().to_string();
-    assert!(err.contains("layout does not start"), "{err}");
+    assert!(
+        err.contains("layout does not start") || err.contains("outside the space"),
+        "{err}"
+    );
     // Starting beyond the first slabs, with the extents moved along.
     let space = pool.spaces.get_mut(&id).unwrap();
     space.info.range = Some((2 * SLAB_SIZE, 1 << 30));
@@ -161,7 +165,10 @@ fn a_user_space_with_a_range_is_not_written() {
         e.virtual_slab += 2;
     }
     let err = pool.open_space_rw(id).err().unwrap().to_string();
-    assert!(err.contains("layout does not start"), "{err}");
+    assert!(
+        err.contains("layout does not start") || err.contains("outside the space"),
+        "{err}"
+    );
     assert!(disks.iter().all(|d| d.written_pages().is_empty()));
 }
 

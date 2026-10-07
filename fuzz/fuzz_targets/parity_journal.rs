@@ -57,6 +57,7 @@ fuzz_target!(|data: &[u8]| {
     };
     if let Ok(Some(journal)) = ParityJournal::load(Guid::from_slice(&owner).unwrap(), read) {
         let _ = journal.dirty_runs();
+        let _ = journal.check_inside(1 << 30);
         for run in [0, 1 << 28, u64::MAX] {
             for stripe in [0, 1, 4095, u64::MAX] {
                 let _ = journal.is_dirty(run, stripe);

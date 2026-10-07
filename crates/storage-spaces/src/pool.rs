@@ -403,6 +403,76 @@ impl<D: ReadAt> Pool<D> {
         present * 2 >= self.disks.len()
     }
 
+    /// Why the slab map of space `id` cannot be trusted, if it cannot: a
+    /// physical slab that another extent of the pool maps as well (of any
+    /// space, also of this one), or slabs beyond the end of a partition of
+    /// a disk at hand. (Within a column copy, overlapping extents are the
+    /// layout's to refuse.)
+    pub fn slab_map_problem(&self, id: u64) -> Option<String> {
+        let space = self.spaces.get(&id)?;
+        let run = |e: &ExtentRecord| {
+            e.physical_slab
+                .checked_add(e.slab_count)
+                .map(|end| (e.physical_slab, end))
+        };
+        for e in &space.extents {
+            let Some((start, end)) = run(e) else {
+                return Some(format!("an extent of space {id} with implausible slab numbers"));
+            };
+            if let Some(m) = self.disks.get(&e.disk_id).and_then(|d| d.member) {
+                let fit = self.members[m].partition.length.saturating_sub(DATA_AREA_OFFSET) / SLAB_SIZE;
+                if end > fit {
+                    return Some(format!(
+                        "slabs {start}..{end} of disk {} (space {id}, virtual slab {}) reach beyond the end of its partition, which holds {fit}",
+                        e.disk_id, e.virtual_slab
+                    ));
+                }
+            }
+        }
+        // Every extent on the disks this space uses, by disk and start; an
+        // extent that starts before the furthest end so far overlaps the
+        // extent with that end (and if this space's overlaps any, such a
+        // pair includes it).
+        let used: std::collections::BTreeSet<u64> = space.extents.iter().map(|e| e.disk_id).collect();
+        let mut on: BTreeMap<u64, Vec<(u64, u64, u64, &ExtentRecord)>> = BTreeMap::new();
+        for s in self.spaces.values() {
+            for f in s.extents.iter().filter(|f| used.contains(&f.disk_id)) {
+                if let Some((start, end)) = run(f) {
+                    on.entry(f.disk_id).or_default().push((start, end, s.id(), f));
+                }
+            }
+        }
+        for (disk, list) in &mut on {
+            list.sort_by_key(|x| (x.0, x.1));
+            let mut furthest: Option<(u64, usize)> = None;
+            for (i, x) in list.iter().enumerate() {
+                if let Some((end, j)) = furthest
+                    && x.0 < end
+                {
+                    let y = &list[j];
+                    if x.2 == id || y.2 == id {
+                        let place = |(_, _, s, e): &(u64, u64, u64, &ExtentRecord)| {
+                            format!(
+                                "space {s} (virtual slab {}, column {}, copy {})",
+                                e.virtual_slab, e.column, e.copy
+                            )
+                        };
+                        return Some(format!(
+                            "slab {} of disk {disk} is mapped twice: by {} and by {}",
+                            x.0.max(y.0),
+                            place(y),
+                            place(x)
+                        ));
+                    }
+                }
+                if furthest.is_none_or(|(end, _)| x.1 > end) {
+                    furthest = Some((x.1, i));
+                }
+            }
+        }
+        None
+    }
+
     /// Virtual disks visible to the user.
     pub fn user_spaces(&self) -> impl Iterator<Item = &Space> {
         self.spaces.values().filter(|s| s.is_user())
@@ -412,6 +482,22 @@ impl<D: ReadAt> Pool<D> {
     pub fn find_space(&self, key: &str) -> Option<&Space> {
         self.user_spaces()
             .find(|s| s.name() == key || s.info.guid.to_string().eq_ignore_ascii_case(key))
+    }
+
+    /// A space and every hidden space under it (tiers, write-back cache,
+    /// dirty region log, parity journal), each once (parent links of
+    /// corrupt metadata may form a cycle).
+    pub fn family(&self, id: u64) -> Vec<&Space> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out: Vec<&Space> = self.spaces.get(&id).into_iter().collect();
+        seen.insert(id);
+        let mut i = 0;
+        while i < out.len() {
+            let next: Vec<&Space> = self.children(out[i].id()).filter(|c| seen.insert(c.id())).collect();
+            out.extend(next);
+            i += 1;
+        }
+        out
     }
 
     /// Direct children of a space.
@@ -685,5 +771,69 @@ mod tests {
             "{:?}",
             pool.warnings
         );
+    }
+
+    #[test]
+    fn slabs_mapped_twice_or_beyond_the_partition_are_refused() {
+        let mut pool = Pool::open(fixture("mirror3")).unwrap();
+        let user = pool.user_spaces().next().unwrap().id();
+        pool.open_space(user).unwrap();
+        let e = pool.spaces[&user].extents[0];
+        let other = *pool.spaces.keys().find(|&&id| id != user).unwrap();
+        // Another space claims a slab the user space holds.
+        let mut twice = e;
+        twice.space_id = other;
+        pool.spaces.get_mut(&other).unwrap().extents.push(twice);
+        let err = pool.open_space(user).err().expect("opened").to_string();
+        assert!(
+            err.contains(&format!(
+                "slab {} of disk {} is mapped twice",
+                e.physical_slab, e.disk_id
+            )),
+            "{err}"
+        );
+        assert!(err.contains(&format!("space {other}")), "{err}");
+        pool.spaces.get_mut(&other).unwrap().extents.pop();
+        pool.open_space(user).unwrap();
+        // A slab beyond the end of the disk's partition.
+        let len = pool.members[pool.disks[&e.disk_id].member.unwrap()].partition.length;
+        pool.spaces.get_mut(&user).unwrap().extents[0].physical_slab = (len - DATA_AREA_OFFSET) / SLAB_SIZE;
+        let err = pool.open_space(user).err().expect("opened").to_string();
+        assert!(err.contains("beyond the end of its partition"), "{err}");
+    }
+
+    #[test]
+    fn extents_outside_the_space_are_refused() {
+        let mut pool = Pool::open(fixture("mirror3")).unwrap();
+        let user = pool.user_spaces().next().unwrap().id();
+        let space = &pool.spaces[&user];
+        let columns = space.info.policy.unwrap().columns;
+        let rows = space
+            .extents
+            .iter()
+            .map(|e| e.virtual_slab / columns + e.slab_count)
+            .max()
+            .unwrap();
+        pool.spaces.get_mut(&user).unwrap().info.size = Some((rows - 1) * SLAB_SIZE * columns);
+        let err = pool.open_space(user).err().expect("opened").to_string();
+        assert!(err.contains("outside the space"), "{err}");
+    }
+
+    #[test]
+    fn a_family_whose_parents_form_a_cycle_ends() {
+        // Found by fuzzing the guard: parent links in a circle made the
+        // walk over a space's hidden spaces grow without end.
+        let mut pool = Pool::open(fixture("mirror3")).unwrap();
+        let user = pool.user_spaces().next().unwrap().id();
+        let child = pool.children(user).next().unwrap().id();
+        pool.spaces.get_mut(&user).unwrap().info.parent = Some(child);
+        let family: Vec<u64> = pool.family(user).iter().map(|s| s.id()).collect();
+        assert_eq!(family[0], user);
+        assert!(family.contains(&child));
+        let mut unique = family.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), family.len());
+        assert!(crate::health::health(&pool).is_ok());
     }
 }

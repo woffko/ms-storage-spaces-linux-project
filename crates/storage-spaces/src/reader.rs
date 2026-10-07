@@ -85,9 +85,41 @@ impl<D: ReadAt> Mapped<'_, D> {
             ))
         })?;
         let base = space.info.range.map_or(0, |(start, _)| start);
+        let layout = Layout::with_base(&policy, &space.extents, base)?;
+        if let Some(problem) = pool.slab_map_problem(space.id()) {
+            return Err(Error::Format(problem));
+        }
+        // The extents lie inside the space (a tier: inside its range),
+        // whole rows of it.
+        let bounds = match (space.info.range, space.info.size) {
+            (Some(range), _) => Some(range),
+            (None, Some(size)) => Some((0, size)),
+            (None, None) => None,
+        };
+        if let Some((start, len)) = bounds {
+            let row = SLAB_SIZE * layout.data_columns;
+            let end = len.checked_next_multiple_of(row).and_then(|l| l.checked_add(start));
+            for e in &space.extents {
+                let first = e.virtual_slab.checked_mul(SLAB_SIZE);
+                let last = e
+                    .slab_count
+                    .checked_mul(layout.data_columns)
+                    .and_then(|n| n.checked_add(e.virtual_slab))
+                    .and_then(|n| n.checked_mul(SLAB_SIZE));
+                let inside = matches!((first, last, end), (Some(f), Some(l), Some(end)) if f >= start && l <= end);
+                if !inside {
+                    return Err(format_err!(
+                        "the extent of space {} at virtual slab {} ({} rows) lies outside the space ({start:#x} and {len:#x} bytes)",
+                        space.id(),
+                        e.virtual_slab,
+                        e.slab_count
+                    ));
+                }
+            }
+        }
         Ok(Mapped {
             pool,
-            layout: Layout::with_base(&policy, &space.extents, base)?,
+            layout,
             journal: None,
             drt: None,
             unclean: UncleanParity::default(),
@@ -491,6 +523,16 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
         let drt = Self::open_drt(pool, space)
             .map_err(|e| (Part::DirtyRegions, e))?
             .map(Arc::new);
+        // What the logs name lies inside the space.
+        if let Some((_, index)) = &cache {
+            index.check_inside(size).map_err(|e| (Part::Cache, e))?;
+        }
+        if let Some(j) = &journal {
+            j.check_inside(size).map_err(|e| (Part::Journal, e))?;
+        }
+        if let Some(d) = &drt {
+            d.check_inside(size).map_err(|e| (Part::DirtyRegions, e))?;
+        }
         for m in std::iter::once(&mut base).chain(tiers.iter_mut()) {
             m.journal = journal.clone();
             m.drt = drt.clone();

@@ -614,11 +614,19 @@ pub fn attach_space(
             }
         }
         state.dm.push(name.clone());
-        for p in read_partitions(&reader, sector as u64)? {
-            let part = format!("{name}-p{}", p.number);
-            let table = format!("0 {} linear /dev/mapper/{name} {}\n", p.length / 512, p.offset / 512);
-            dm_create(&part, &table, rw)?;
-            state.dm.push(part);
+        // Partitions become devices only when they lie inside the space
+        // and apart (an attach forced past the partition check gets the
+        // whole space only).
+        let parts = read_partitions(&reader, sector as u64)?;
+        if let Err(e) = storage_spaces::gpt::check_partitions(&parts, reader.size()) {
+            eprintln!("{:?}: no devices for its partitions: {e}", space.name());
+        } else {
+            for p in parts {
+                let part = format!("{name}-p{}", p.number);
+                let table = format!("0 {} linear /dev/mapper/{name} {}\n", p.length / 512, p.offset / 512);
+                dm_create(&part, &table, rw)?;
+                state.dm.push(part);
+            }
         }
         Ok(())
     })();

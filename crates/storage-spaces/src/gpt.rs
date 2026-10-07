@@ -118,6 +118,37 @@ pub fn read_mbr<D: ReadAt + ?Sized>(dev: &D, sector: u64) -> Result<Option<Vec<P
     Ok((!parts.is_empty()).then_some(parts))
 }
 
+/// Fails unless every partition lies inside a device of `size` bytes and
+/// none overlaps another (what device-mapper partitions are made of).
+pub fn check_partitions(parts: &[Partition], size: u64) -> Result<()> {
+    for p in parts {
+        if p.offset.checked_add(p.length).is_none_or(|end| end > size) {
+            return Err(crate::error::format_err!(
+                "partition {} ({:#x} bytes at {:#x}) reaches beyond the end of the {size:#x} bytes",
+                p.number,
+                p.length,
+                p.offset
+            ));
+        }
+    }
+    let mut sorted: Vec<&Partition> = parts.iter().collect();
+    sorted.sort_by_key(|p| p.offset);
+    for w in sorted.windows(2) {
+        if w[0].offset + w[0].length > w[1].offset {
+            return Err(crate::error::format_err!(
+                "partitions {} and {} overlap ({:#x}..{:#x} and {:#x}..{:#x})",
+                w[0].number,
+                w[1].number,
+                w[0].offset,
+                w[0].offset + w[0].length,
+                w[1].offset,
+                w[1].offset + w[1].length
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Lists the partitions of a device: GPT first, then MBR.
 pub fn read_partitions<D: ReadAt + ?Sized>(dev: &D, sector: u64) -> Result<Vec<Partition>> {
     if let Some(parts) = read_gpt(dev, sector)? {
@@ -220,6 +251,26 @@ mod tests {
             (parts[0].offset, parts[0].length, parts[0].kind.as_str()),
             (5120, 25600, "mbr:0x07")
         );
+    }
+
+    #[test]
+    fn partitions_to_map_lie_inside_and_apart() {
+        let p = |number, offset, length| Partition {
+            number,
+            offset,
+            length,
+            kind: String::new(),
+            name: String::new(),
+        };
+        assert!(check_partitions(&[p(1, 1 << 20, 1 << 20), p(2, 2 << 20, 1 << 20)], 4 << 20).is_ok());
+        let err = check_partitions(&[p(1, 1 << 20, 2 << 20), p(2, 2 << 20, 1 << 20)], 4 << 20)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("partitions 1 and 2 overlap"), "{err}");
+        let err = check_partitions(&[p(3, 3 << 20, 2 << 20)], 4 << 20)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("partition 3") && err.contains("beyond the end"), "{err}");
     }
 }
 

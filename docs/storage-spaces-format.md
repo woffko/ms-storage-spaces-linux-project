@@ -1058,6 +1058,30 @@ The mirror dirty region log (SPACEDRT, role 6) was unchanged in the mirror
 crash experiment, and Windows' reads returned copy 0 there. The thin space crash (cache in use) read exactly like Windows'
 recovered space.
 
+## Invariants the readers check
+
+What the format implies but no checksum guards: a misread of ordinary data
+that has no second copy would go unnoticed, so opening a space refuses
+metadata that breaks these (each error names the structure and the
+values; `spaces check` reports it as failed). All hold for every pool and
+scenario state of the corpus.
+
+* No physical slab is mapped twice, by extents of the same or of different
+  spaces, current or out of date, and the slabs of a disk at hand lie in
+  its partition's data area.
+* Within a column copy, extents do not overlap (the layout's rule), and
+  every extent lies inside its space: for a space with a size, inside its
+  size rounded up to whole rows; for a tier, inside its range.
+* The write-back cache maps chunks inside its space only; current mappings
+  never share a cache block (the newest entry of a block wins).
+* A parity journal entry of state 2 covers exactly the stripes of its run
+  (the header's run size over its stripe size), a state 1 bitmap has a
+  bit for each stripe in whole bytes, and every entry names a run inside
+  the space.
+* The dirty region log lists extent runs inside the space.
+* Partitions that become device-mapper devices lie inside the space and
+  do not overlap.
+
 ## Open questions
 
 * SDBB entries carry no checksum of their own: a torn copy of equal

@@ -1064,6 +1064,18 @@ impl CacheIndex {
         self.chunks.len()
     }
 
+    /// Fails when the cache maps a chunk at or beyond `owner_size`, the
+    /// size of the space it caches.
+    pub fn check_inside(&self, owner_size: u64) -> Result<()> {
+        match self.mappings().iter().find(|m| m.0 >= owner_size) {
+            Some(m) => Err(format_err!(
+                "the write-back cache maps the chunk at owner offset {:#x}, beyond the space's {owner_size:#x} bytes",
+                m.0
+            )),
+            None => Ok(()),
+        }
+    }
+
     pub fn lookup(&self, offset: u64) -> Lookup {
         let chunk = self.header.chunk_size as u64;
         let within = offset % chunk;
@@ -1664,6 +1676,14 @@ mod tests {
         bad[0x40] ^= 1;
         let i = index(&[slot(1, &[(0, 2)]), bad]);
         assert_eq!(hit(&i, 0), Some(0x10_0000 + 2 * CHUNK));
+    }
+
+    #[test]
+    fn chunks_beyond_the_space_are_refused() {
+        let i = index(&[slot(1, &[(0, 2), (4 * CHUNK, 3)])]);
+        assert!(i.check_inside(5 * CHUNK).is_ok());
+        let err = i.check_inside(4 * CHUNK).unwrap_err().to_string();
+        assert!(err.contains(&format!("{:#x}", 4 * CHUNK)), "{err}");
     }
 }
 

@@ -38,6 +38,7 @@ fuzz_target!(|data: &[u8]| {
     };
     if let Ok(Some(d)) = DirtyRegions::load(len as u64, read) {
         let _ = d.dirty_runs();
+        let _ = d.check_inside(4 << 30);
         let _ = d.is_dirty(0);
         // Encoding a valid copy reproduces the part its checksum covers,
         // and decodes to the same header.

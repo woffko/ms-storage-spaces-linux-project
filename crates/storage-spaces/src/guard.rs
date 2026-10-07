@@ -321,12 +321,7 @@ fn clean_check<D>(pool: &Pool<D>, names: &[String]) -> Check {
 /// The spaces of `space`'s family (tiers, cache, logs) with copies on the
 /// disks for which `missing` holds: (disk label, extents).
 fn extents_on<D: ReadAt>(pool: &Pool<D>, space: &Space, missing: impl Fn(u64) -> bool) -> Vec<(String, usize)> {
-    let mut family = vec![space];
-    let mut i = 0;
-    while i < family.len() {
-        family.extend(pool.children(family[i].id()));
-        i += 1;
-    }
+    let family = pool.family(space.id());
     let mut by_disk = std::collections::BTreeMap::new();
     for e in family.iter().flat_map(|s| &s.extents).filter(|e| missing(e.disk_id)) {
         *by_disk.entry(e.disk_id).or_insert(0) += 1;
@@ -394,19 +389,12 @@ fn state_check<D: ReadAt>(pool: &Pool<D>, space: &Space, health: &Result<Health,
                 .found("missing"),
         );
     }
-    let stale: usize = {
-        let mut family = vec![space];
-        let mut i = 0;
-        while i < family.len() {
-            family.extend(pool.children(family[i].id()));
-            i += 1;
-        }
-        family
-            .iter()
-            .flat_map(|s| &s.extents)
-            .filter(|e| !e.is_current())
-            .count()
-    };
+    let stale = pool
+        .family(space.id())
+        .iter()
+        .flat_map(|s| &s.extents)
+        .filter(|e| !e.is_current())
+        .count();
     if stale > 0 {
         check = check.evidence(
             Evidence::new(format!("{stale} copies of extents marked out of date"))
@@ -1425,6 +1413,26 @@ mod tests {
         assert_eq!(layout.status, Status::Failed, "{}", r.to_text());
         assert!(layout.evidence[0].found.as_deref().unwrap().contains("overlapping"));
         assert_eq!(check(r, "space.cache").status, Status::Skipped);
+        assert_eq!(r.verdict(), Verdict::Failed);
+    }
+
+    #[test]
+    fn a_slab_mapped_twice_fails_the_space_with_both_extents_named() {
+        let disks = images("fixtures/mirror3");
+        let mut pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+        let user = pool.user_spaces().next().unwrap().id();
+        let other = *pool.spaces.keys().find(|&&id| id != user).unwrap();
+        let mut twice = pool.spaces[&user].extents[0];
+        twice.space_id = other;
+        pool.spaces.get_mut(&other).unwrap().extents.push(twice);
+        let r = &reports(&pool, &Options::default())[0];
+        let layout = check(r, "space.layout");
+        assert_eq!(layout.status, Status::Failed, "{}", r.to_text());
+        let found = layout.evidence[0].found.as_deref().unwrap();
+        assert!(
+            found.contains("is mapped twice") && found.contains(&format!("space {other}")),
+            "{found}"
+        );
         assert_eq!(r.verdict(), Verdict::Failed);
     }
 

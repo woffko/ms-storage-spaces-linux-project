@@ -141,6 +141,22 @@ impl DirtyRegions {
     pub fn copies(&self) -> &[DrtCopy] {
         &self.copies
     }
+
+    /// Fails when the log lists an extent run that starts at or beyond
+    /// `owner_size`, the size of the mirror space it tracks.
+    pub fn check_inside(&self, owner_size: u64) -> Result<()> {
+        let slab = crate::format::SLAB_SIZE;
+        match self
+            .runs
+            .iter()
+            .find(|&&v| v.checked_mul(slab).is_none_or(|o| o >= owner_size))
+        {
+            Some(v) => Err(crate::error::format_err!(
+                "the dirty region log lists the extent run at virtual slab {v}, beyond the space's {owner_size:#x} bytes"
+            )),
+            None => Ok(()),
+        }
+    }
 }
 
 /// The log as Windows keeps it in memory and writes it (the model the
@@ -352,5 +368,16 @@ mod tests {
             .map(|i| u64::from_le_bytes(page[0x18 + 8 * i..0x20 + 8 * i].try_into().unwrap()))
             .collect();
         assert_eq!(stale, [1, 1, 3]);
+    }
+
+    #[test]
+    fn runs_beyond_the_space_are_refused() {
+        let mut space = vec![0u8; 0x10000];
+        space[..HEADER].copy_from_slice(&header(2, &[0, 4]));
+        let d = load(&space).unwrap();
+        let slab = crate::format::SLAB_SIZE;
+        assert!(d.check_inside(5 * slab).is_ok());
+        let err = d.check_inside(4 * slab).unwrap_err().to_string();
+        assert!(err.contains("virtual slab 4"), "{err}");
     }
 }

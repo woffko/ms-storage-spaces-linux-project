@@ -85,6 +85,8 @@ fuzz_target!(|data: &[u8]| {
         for offset in [0, 4096, 1 << 20, u64::MAX / 2, u64::MAX] {
             let _ = index.lookup(offset);
         }
+        let _ = index.check_inside(1 << 30);
+        let _ = index.conflicting_offsets();
     }
     // A quarter of the inputs also drive the model (it is slower).
     if data[0] & 3 == 0 {

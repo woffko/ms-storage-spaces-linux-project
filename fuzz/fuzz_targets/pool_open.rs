@@ -1,6 +1,6 @@
-//! Whole-pool open and reads on the committed metadata fixtures with byte
-//! patches from the input: (pool, disk, range, position, value) records of
-//! 8 bytes each.
+//! Whole-pool open, reads and the guard's checks on the committed metadata
+//! fixtures with byte patches from the input: (pool, disk, range,
+//! position, value) records of 8 bytes each.
 #![no_main]
 
 use std::fs::File;
@@ -51,4 +51,10 @@ fuzz_target!(|data: &[u8]| {
         let _ = reader.read_exact_at(&mut buf, size / 2);
         let _ = reader.segments();
     }
+    // The guard's checks of every space (the partition table and NTFS
+    // included), reading at most 1 MiB of listed parity stripes.
+    let options = storage_spaces::guard::Options {
+        journal_budget: Some(1 << 20),
+    };
+    let _ = storage_spaces::guard::pool_reports(&pool, &[], &options, &mut storage_spaces::guard::ntfs_hook);
 });

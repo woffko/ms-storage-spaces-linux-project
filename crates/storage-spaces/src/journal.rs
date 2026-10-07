@@ -103,6 +103,10 @@ impl ParityJournal {
         if !(0x40..=0x10000).contains(&slot_size) || slot_count > 1 << 16 || slot_size * slot_count > 64 << 20 {
             return Err(format_err!("implausible parity journal geometry"));
         }
+        // Stripes per extent run: the run's size over the stripe's (both
+        // from the header; unknown when they do not divide).
+        let (run_size, stripe) = (le_u64(&head[0x50..]), u64::from(le_u32(&head[0x58..])));
+        let stripes = (stripe > 0 && run_size > 0 && run_size.is_multiple_of(stripe)).then(|| run_size / stripe);
         let copies = read.read_slot_copies(slot_offset, slot_size * slot_count)?;
         let merged = merge_slot_copies(&copies, slot_size);
         let mut checkpoint_geometry = (le_u64(&head[0x40..]), le_u32(&head[0x48..]), le_u32(&head[0x4c..]));
@@ -114,7 +118,7 @@ impl ParityJournal {
         let (cp_offset, cp_size, cp_count) = checkpoint_geometry;
         let checkpoints = load_checkpoints(&mut read, owner, cp_offset, cp_size, cp_count)?;
         let checkpoint = checkpoints.iter().flatten().max_by_key(|c| c.sequence).cloned();
-        let current = Self::parse(&merged, slot_size, checkpoint.as_ref())?;
+        let current = Self::parse(&merged, slot_size, checkpoint.as_ref(), stripes)?;
         let mut runs: HashMap<u64, Vec<Consistency>> = HashMap::new();
         let mut add = |entries: Entries| {
             for (offset, (c, _)) in entries {
@@ -133,7 +137,7 @@ impl ParityJournal {
                 checkpoint.as_ref()
             };
             if *copy != merged || own != checkpoint.as_ref() {
-                add(Self::parse(copy, slot_size, own)?);
+                add(Self::parse(copy, slot_size, own, stripes)?);
             }
         }
         Ok(Some(ParityJournal {
@@ -151,11 +155,11 @@ impl ParityJournal {
     /// checkpoint's entries, then the slots from the one it names on while
     /// their sequences increase (from slot 0 without a checkpoint); the
     /// newest entry per run counts.
-    fn parse(area: &[u8], slot_size: usize, checkpoint: Option<&Checkpoint>) -> Result<Entries> {
+    fn parse(area: &[u8], slot_size: usize, checkpoint: Option<&Checkpoint>, stripes: Option<u64>) -> Result<Entries> {
         type Versioned = ((u64, usize), Consistency, Vec<u8>);
         let mut newest: HashMap<u64, Versioned> = HashMap::new();
         let mut apply = |sequence: u64, bytes: &[u8], count: usize| -> Result<()> {
-            for (index, (offset, consistency, raw)) in decode_entries(bytes, count)?.into_iter().enumerate() {
+            for (index, (offset, consistency, raw)) in decode_entries(bytes, count, stripes)?.into_iter().enumerate() {
                 let version = (sequence, index);
                 if newest.get(&offset).is_none_or(|(v, _, _)| version > *v) {
                     newest.insert(offset, (version, consistency, raw));
@@ -257,6 +261,17 @@ impl ParityJournal {
         w.loaded_bytes = self.current.iter().map(|(k, (_, raw))| (*k, raw.clone())).collect();
         w.listed = self.current.keys().copied().collect();
         w
+    }
+
+    /// Fails when an entry is for an extent run that starts at or beyond
+    /// `owner_size`, the size of the parity space.
+    pub fn check_inside(&self, owner_size: u64) -> Result<()> {
+        match self.runs.keys().filter(|&&k| k >= owner_size).min() {
+            Some(k) => Err(format_err!(
+                "the parity journal has an entry for the run at {k:#x}, beyond the space's {owner_size:#x} bytes"
+            )),
+            None => Ok(()),
+        }
     }
 
     /// Number of extent runs with possibly inconsistent stripes.
@@ -491,8 +506,10 @@ impl JournalWriter {
 }
 
 /// The entries of a journal slot or checkpoint (`count` of them, from the
-/// start of `bytes`): run offset, consistency and the entry's bytes.
-fn decode_entries(bytes: &[u8], count: usize) -> Result<Vec<(u64, Consistency, Vec<u8>)>> {
+/// start of `bytes`): run offset, consistency and the entry's bytes. With
+/// the number of `stripes` per run known, a run list must cover exactly
+/// that many and a bitmap have a bit for each (whole bytes).
+fn decode_entries(bytes: &[u8], count: usize, stripes: Option<u64>) -> Result<Vec<(u64, Consistency, Vec<u8>)>> {
     let mut out = Vec::with_capacity(count.min(4096));
     let mut pos = 0;
     for _ in 0..count {
@@ -527,6 +544,25 @@ fn decode_entries(bytes: &[u8], count: usize) -> Result<Vec<(u64, Consistency, V
                 Consistency::Runs(runs)
             }
         };
+        if let Some(n) = stripes {
+            match &consistency {
+                Consistency::Runs(runs) => {
+                    let covered: u64 = runs.iter().map(|r| r.1).sum();
+                    if covered != n {
+                        return Err(format_err!(
+                            "parity journal entry for the run at {offset:#x} covers {covered} stripes, its run has {n}"
+                        ));
+                    }
+                }
+                Consistency::Bitmap(bits) if bits.len() as u64 != n.div_ceil(8) => {
+                    return Err(format_err!(
+                        "parity journal entry for the run at {offset:#x}: a bitmap of {} bytes for {n} stripes",
+                        bits.len()
+                    ));
+                }
+                _ => {}
+            }
+        }
         out.push((offset, consistency, raw));
     }
     Ok(out)
@@ -679,5 +715,45 @@ mod tests {
         assert!(!journal.is_dirty(1 << 28, 2));
         assert!(journal.is_dirty(1 << 28, 3));
         assert!(!journal.is_dirty(2 << 28, 5));
+    }
+
+    /// `journal` with the header naming runs of `stripes` stripes.
+    fn journal_of(stripes: u64, entries: &[(u64, u16, Vec<u8>)]) -> Vec<u8> {
+        let mut j = journal(entries);
+        j[0x50..0x58].copy_from_slice(&(stripes * 0x8_0000).to_le_bytes());
+        j[0x58..0x5c].copy_from_slice(&0x8_0000u32.to_le_bytes());
+        j[0x5c..0x60].copy_from_slice(&4u32.to_le_bytes());
+        set_crc(&mut j[..0x60]);
+        j
+    }
+
+    fn try_load(j: &[u8]) -> crate::Result<Option<ParityJournal>> {
+        ParityJournal::load(Guid::from_mixed_endian(&OWNER), |off: u64, buf: &mut [u8]| {
+            buf.copy_from_slice(&j[off as usize..off as usize + buf.len()]);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn entries_cover_the_stripes_of_their_run_exactly() {
+        let words = |w: &[u16]| w.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>();
+        let good = journal_of(8, &[(0, 2, words(&[0x8003, 5])), (1 << 28, 1, vec![0b0000_0111])]);
+        assert_eq!(try_load(&good).unwrap().unwrap().dirty_runs(), 2);
+        let short = journal_of(8, &[(0, 2, words(&[0x8003, 4]))]);
+        let err = try_load(&short).unwrap_err().to_string();
+        assert!(err.contains("7 stripes") && err.contains("8"), "{err}");
+        let bitmap = journal_of(8, &[(0, 1, vec![0xff, 0])]);
+        let err = try_load(&bitmap).unwrap_err().to_string();
+        assert!(err.contains("bitmap of 2 bytes"), "{err}");
+        // A whole run consistent says nothing about its stripes.
+        assert!(try_load(&journal_of(8, &[(0, 3, vec![0; 4])])).is_ok());
+    }
+
+    #[test]
+    fn entries_beyond_the_space_are_refused() {
+        let j = load(&journal(&[(0, 3, vec![0; 4]), (1 << 30, 3, vec![0; 4])]));
+        assert!(j.check_inside(2 << 30).is_ok());
+        let err = j.check_inside(1 << 30).unwrap_err().to_string();
+        assert!(err.contains("0x40000000"), "{err}");
     }
 }
