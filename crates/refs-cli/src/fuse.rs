@@ -1379,18 +1379,6 @@ pub fn serve(
     if allow_other {
         config.acl = fuser::SessionACL::All;
     }
-    if blkdev {
-        // fusermount3 makes a fuseblk mount of "blkdev" (fuser mounts
-        // type fuse itself, as root, unless asked to unmount through
-        // fusermount3 when the process ends; that needs allow_other, which
-        // fuser narrows to root and the owner itself).
-        config
-            .mount_options
-            .extend([MountOption::CUSTOM("blkdev".into()), MountOption::AutoUnmount]);
-        if config.acl == fuser::SessionACL::Owner {
-            config.acl = fuser::SessionACL::RootAndOwner;
-        }
-    }
     // Changes are made one at a time; reads may run beside each other.
     config.n_threads = Some(if writable { 1 } else { 4 });
     let mountpoint = std::fs::canonicalize(mountpoint).unwrap_or_else(|_| mountpoint.to_path_buf());
@@ -1405,11 +1393,196 @@ pub fn serve(
         owner,
         state: Mutex::new(state),
     };
+    if blkdev {
+        return serve_blkdev(fs, config, source, &mountpoint, allow_other, writable, status);
+    }
     let session = fuser::spawn_mount(fs, &mountpoint, &config)
         .with_context(|| format!("cannot mount on {}", mountpoint.display()))?;
     status.mounted();
     session.join().context("FUSE session failed")?;
     Ok(())
+}
+
+/// Root mounting a block device: a mount of type fuseblk.refs on the
+/// device, as ntfs-3g's are (udisks2 counts it as the device's mount),
+/// made here with mount(2). As root nothing needs fusermount3, whose
+/// AppArmor profile (Ubuntu) refuses that type and udisks2's mount points.
+/// The mount ends with the process: unmounted on SIGTERM and SIGINT, and by
+/// a watcher process (`refs mount-watch`) if this one is killed.
+fn serve_blkdev(
+    fs: RefsFs,
+    config: Config,
+    source: &str,
+    mountpoint: &Path,
+    allow_other: bool,
+    writable: bool,
+    status: &MountStatus,
+) -> Result<()> {
+    use rustix::mount::{UnmountFlags, unmount};
+    let fuse = mount_blkdev(source, mountpoint, allow_other, writable)?;
+    let started = std::fs::read_to_string("/proc/self/mountinfo")
+        .ok()
+        .and_then(|m| top_mount(&m, mountpoint))
+        .filter(|(_, fstype)| fstype == "fuseblk.refs")
+        .context("the new mount is not in /proc/self/mountinfo")
+        .and_then(|(id, _)| {
+            let watcher = watch(id, mountpoint)?;
+            let acl = config.acl;
+            let session = fuser::Session::from_fd(fs, fuse, acl, config)?.spawn()?;
+            Ok((watcher, session))
+        });
+    let (mut watcher, session) = match started {
+        Ok(started) => started,
+        Err(e) => {
+            let _ = unmount(mountpoint, UnmountFlags::DETACH);
+            return Err(e.context(format!("cannot serve the mount on {}", mountpoint.display())));
+        }
+    };
+    status.mounted();
+    let mut signals = signal_hook::iterator::Signals::new([signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM])?;
+    let target = mountpoint.to_path_buf();
+    std::thread::spawn(move || {
+        if signals.forever().next().is_some() {
+            let _ = unmount(&target, UnmountFlags::DETACH);
+        }
+    });
+    let result = session.join();
+    // Its pipe closes: it finds the mount gone and ends.
+    drop(watcher.stdin.take());
+    let _ = watcher.wait();
+    result.context("FUSE session failed")
+}
+
+/// The mount(2) of a fuseblk.refs mount of `source`; the /dev/fuse
+/// connection it serves. Its block size is the device's logical sector
+/// size: the kernel sets the device's block size to it, and the default
+/// (512 bytes) fails (EINVAL) on a device with larger sectors, such as a
+/// space with 4 KiB sectors.
+fn mount_blkdev(source: &str, mountpoint: &Path, allow_other: bool, writable: bool) -> Result<std::os::fd::OwnedFd> {
+    use rustix::mount::MountFlags;
+    let dev = std::fs::File::open(source).with_context(|| format!("cannot open {source}"))?;
+    let sector =
+        rustix::fs::ioctl_blksszget(&dev).with_context(|| format!("cannot read the sector size of {source}"))?;
+    let fuse = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/fuse")
+        .context("cannot open /dev/fuse")?;
+    let data = blkdev_options(
+        std::os::fd::AsRawFd::as_raw_fd(&fuse),
+        std::fs::metadata(mountpoint)?.mode(),
+        rustix::process::getuid().as_raw(),
+        rustix::process::getgid().as_raw(),
+        sector,
+        allow_other,
+    );
+    let mut flags = MountFlags::NOSUID | MountFlags::NODEV;
+    if !writable {
+        flags |= MountFlags::RDONLY;
+    }
+    let data = std::ffi::CString::new(data)?;
+    rustix::mount::mount(source, mountpoint, "fuseblk.refs", flags, data.as_c_str())
+        .with_context(|| format!("cannot mount {source} on {}", mountpoint.display()))?;
+    Ok(fuse.into())
+}
+
+/// The data of the mount(2) of a fuseblk mount: the connection, the root's
+/// file type (as libfuse passes it), the owner, the block size, and who may
+/// enter.
+fn blkdev_options(fd: i32, rootmode: u32, uid: u32, gid: u32, blksize: u32, allow_other: bool) -> String {
+    let mut data = format!(
+        "fd={fd},rootmode={:o},user_id={uid},group_id={gid},blksize={blksize},default_permissions",
+        rootmode & 0o170000
+    );
+    if allow_other {
+        data.push_str(",allow_other");
+    }
+    data
+}
+
+/// Starts the watcher of mount `id` at `mountpoint`: `refs mount-watch`,
+/// whose stdin is a pipe from this process, so it learns when this
+/// process ends however it ends.
+fn watch(id: u64, mountpoint: &Path) -> Result<std::process::Child> {
+    std::process::Command::new(std::env::current_exe()?)
+        .args(["mount-watch", "--id", &id.to_string()])
+        .arg(mountpoint)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .context("cannot start the mount watcher")
+}
+
+/// `refs mount-watch`: waits until its stdin, the pipe from the process
+/// serving the mount, ends, or for SIGTERM, SIGINT or SIGHUP (the unit or
+/// terminal going away); then unmounts mount `id` if it is still the one
+/// on top at `mountpoint`, and nothing else.
+pub fn watch_main(id: u64, mountpoint: &Path) -> Result<()> {
+    let mut signals = signal_hook::iterator::Signals::new([
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGHUP,
+    ])?;
+    let target = mountpoint.to_path_buf();
+    std::thread::spawn(move || {
+        if signals.forever().next().is_some() {
+            unmount_if_still(id, &target);
+            std::process::exit(0);
+        }
+    });
+    let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+    unmount_if_still(id, mountpoint);
+    Ok(())
+}
+
+fn unmount_if_still(id: u64, mountpoint: &Path) {
+    if let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo")
+        && top_mount(&mountinfo, mountpoint).is_some_and(|(top, _)| top == id)
+    {
+        let _ = rustix::mount::unmount(mountpoint, rustix::mount::UnmountFlags::DETACH);
+    }
+}
+
+/// The mount on top at `mountpoint` in mountinfo text (proc_pid_mountinfo(5)):
+/// its id and type. Mount points there have space, tab, newline and
+/// backslash escaped as octal (\040).
+fn top_mount(mountinfo: &str, mountpoint: &Path) -> Option<(u64, String)> {
+    use std::os::unix::ffi::OsStrExt;
+    let want = mountpoint.as_os_str().as_bytes();
+    mountinfo
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(' ').collect();
+            if unescape_octal(fields.get(4)?) != want {
+                return None;
+            }
+            let separator = fields.iter().position(|f| *f == "-")?;
+            Some((fields[0].parse().ok()?, (*fields.get(separator + 1)?).to_owned()))
+        })
+        .next_back()
+}
+
+fn unescape_octal(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let digits = b
+            .get(i + 1..i + 4)
+            .filter(|d| d.iter().all(|c| (b'0'..=b'7').contains(c)));
+        match digits {
+            Some(d) if b[i] == b'\\' => {
+                let value = d.iter().fold(0u32, |v, c| v * 8 + u32::from(c - b'0'));
+                out.push(u8::try_from(value).unwrap_or(b'?'));
+                i += 4;
+            }
+            _ => {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1444,6 +1617,44 @@ mod tests {
         assert!(!dir.join("status.tmp").exists() && !dir.join("failed.tmp").exists());
         MountStatus::start(None).mounted();
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The data of the fuseblk mount: the root's file type only (as libfuse
+    /// passes it), the device's sector size as the block size.
+    #[test]
+    fn blkdev_mount_data() {
+        assert_eq!(
+            blkdev_options(5, 0o40755, 0, 0, 4096, true),
+            "fd=5,rootmode=40000,user_id=0,group_id=0,blksize=4096,default_permissions,allow_other"
+        );
+        assert_eq!(
+            blkdev_options(7, 0o40700, 1000, 100, 512, false),
+            "fd=7,rootmode=40000,user_id=1000,group_id=100,blksize=512,default_permissions"
+        );
+    }
+
+    /// The watcher finds the mount on top at its mount point: the last
+    /// line for it, with escaped characters in the path, and nothing for
+    /// other paths.
+    #[test]
+    fn finds_the_mount_on_top() {
+        let mountinfo = "\
+22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw
+61 22 0:52 / /run/media/root/My\\040disk rw,nosuid,nodev,relatime shared:33 - fuseblk.refs /dev/dm-8 ro,user_id=0,group_id=0,default_permissions,allow_other,blksize=4096
+62 22 0:53 / /mnt/x rw,relatime shared:34 - fuseblk.refs /dev/loop1 ro
+63 62 0:54 / /mnt/x rw,relatime shared:35 - tmpfs tmpfs rw
+";
+        assert_eq!(
+            top_mount(mountinfo, Path::new("/run/media/root/My disk")),
+            Some((61, "fuseblk.refs".to_owned()))
+        );
+        assert_eq!(
+            top_mount(mountinfo, Path::new("/mnt/x")),
+            Some((63, "tmpfs".to_owned()))
+        );
+        assert_eq!(top_mount(mountinfo, Path::new("/mnt")), None);
+        assert_eq!(unescape_octal("a\\134b\\011\\0"), b"a\\b\t\\0");
+        assert_eq!(unescape_octal("\\777"), b"?");
     }
 
     fn entry(name: &str) -> Entry {

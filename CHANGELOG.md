@@ -24,6 +24,18 @@
   and `mount.ReFS` waits for that instead of a fixed time: it returns once
   the mount is in place, or says why it is not, and shows on a terminal
   how much has been read. `MOUNT_REFS_TIMEOUT` sets a limit.
+* Mounting a ReFS volume on a device with 4 KiB logical sectors as root
+  (`mount -t ReFS`, udisks2, `refs mount` of a block device; every ReFS
+  volume in a space with 4 KiB sectors) failed with "Invalid argument":
+  the mount's block size was FUSE's default of 512 bytes, smaller than
+  the device's sectors. It is the device's sector size now.
+* On Ubuntu releases that confine `fusermount3` with AppArmor (25.10 and
+  later), root's mounts of ReFS volumes were refused ("Permission
+  denied"): the profile knows neither the mount type `fuseblk.refs` nor
+  udisks2's mount points under `/run/media`. As root, `refs` now makes the
+  mount itself (mount(2), with the /dev/fuse connection handed to the FUSE
+  session) and no longer runs `fusermount3`; the mount goes away when
+  `refs` ends, also when it is killed (a watcher process unmounts it).
 
 ## 1.1.0 (2026-10-05)
 

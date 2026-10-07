@@ -98,6 +98,15 @@ enum Command {
         #[arg(long, hide = true)]
         status_file: Option<PathBuf>,
     },
+    /// Unmount a mount of `refs mount` when the process serving it ends
+    /// (started by that process, its stdin a pipe from it).
+    #[cfg(all(target_os = "linux", feature = "fuse"))]
+    #[command(hide = true)]
+    MountWatch {
+        #[arg(long)]
+        id: u64,
+        mountpoint: PathBuf,
+    },
     /// Change a file's times or attributes (experimental: writes the
     /// volume, only with --yes). Times are UTC, "YYYY-MM-DD hh:mm:ss" or a
     /// FILETIME number.
@@ -1058,6 +1067,8 @@ fn main() -> Result<()> {
                 return Err(e);
             }
         }
+        #[cfg(all(target_os = "linux", feature = "fuse"))]
+        Command::MountWatch { id, mountpoint } => fuse::watch_main(id, &mountpoint)?,
         Command::Set {
             device,
             offset,

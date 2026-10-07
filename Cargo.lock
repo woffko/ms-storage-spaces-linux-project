@@ -901,7 +901,9 @@ dependencies = [
  "clap",
  "fuser",
  "refs",
+ "rustix 1.1.5",
  "serde_json",
+ "signal-hook",
  "storage-spaces",
 ]
 

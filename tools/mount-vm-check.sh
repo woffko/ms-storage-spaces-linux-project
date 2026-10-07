@@ -60,7 +60,7 @@ unit_pid() { # the refs process serving mount point $1 (its mount.ReFS unit or i
 }
 cleanup() {
   umount_all
-  sudo dmsetup remove mc-slow 2>/dev/null || true
+  sudo dmsetup remove --retry mc-slow 2>/dev/null || true
   for l in "${loops[@]}"; do sudo losetup -d "$l" 2>/dev/null || true; done
   sudo rm -f /tmp/mc-fake-refs /tmp/mc-zero.img
 }
@@ -164,7 +164,7 @@ FAKE
       result fail slow "exit after $((SECONDS - t0)) s; ${out//$'\n'/ | }"
     fi
     umount_all
-    sudo dmsetup remove mc-slow ;;
+    sudo dmsetup remove --retry mc-slow ;;
   early) # no ReFS on the device: a quick, clear failure
     sudo truncate -s 64M /tmp/mc-zero.img
     l=$(sudo losetup -r -f --show /tmp/mc-zero.img)

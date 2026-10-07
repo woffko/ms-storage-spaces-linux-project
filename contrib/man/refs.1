@@ -184,9 +184,17 @@ stream snapshots and a link's target.
 .TP
 .B mount
 Mount the volume read-only through FUSE, in the foreground (unmount with
-.BR "fusermount \-u" ;
-mounted by root, a block device is mounted as type fuseblk, as ntfs\-3g
-mounts are, which udisks2 counts as the device's mount).
+.BR "fusermount \-u" ,
+or
+.B umount
+as root).
+Mounted by root, a block device is mounted as type fuseblk.refs, as
+ntfs\-3g mounts are, which udisks2 counts as the device's mount:
+.B refs
+makes that mount itself, with the device's sector size as block size,
+without fusermount3, and the mount goes away when
+.B refs
+ends, also when it is killed.
 With
 .B \-\-rw
 (one image, disk or partition; not

@@ -447,8 +447,16 @@ refs check /dev/sdb2                      # consistency, read-only (exit 1 on a 
 refs mount --space Data /dev/sdd /dev/sde mnt    # options before the disks
 mkdir -p mnt && refs mount /dev/sdb2 mnt  # read-only FUSE mount, foreground
 refs mount --rw image.img mnt              # for writing (experimental)
-fusermount -u mnt
+fusermount -u mnt                         # (as root: umount mnt)
 ```
+
+Mounted by root, a block device (a disk, a partition, a space's
+`/dev/mapper/ss-...-pN`) becomes a mount of type `fuseblk.refs` on that
+device, as ntfs-3g's are, so that udisks2 and `findmnt` count it as the
+device's mount. `refs` makes that mount itself, with the device's sector
+size as block size (devices with 4 KiB sectors included), without
+`fusermount3`; the mount goes away when `refs` ends, also when it is
+killed (a small watcher process unmounts it).
 
 The mount shows named streams as extended attributes `user.<name>`
 (`getfattr -d`; Linux limits them to 64 KiB, larger streams are read with
@@ -596,7 +604,9 @@ security`, scores 9.5 UNSAFE before, 5.1 MEDIUM after):
   new privileges, namespaces or most capabilities. It keeps the host's
   mounts (`PrivateMounts=no`: since systemd 254 a private network would
   otherwise bring a private mount namespace, where the host never sees
-  the mount). Without systemd it falls back to a plain process.
+  the mount). Without systemd it falls back to a plain process. `refs`
+  mounts the block device itself (mount(2)) rather than through the
+  setuid helper `fusermount3`, which only users' mounts need.
 
 The limits need systemd 231 or later for the unit file and 247 for the
 servers' (older ones refuse the unknown property): then `spaces attach`
@@ -628,6 +638,10 @@ overflow checks, and its parsers are fuzzed (`docs/security.md`).
   a restart, when nothing is cached). `mount -t ReFS` waits for it and
   shows every 10 s how much has been read; udisks2 waits too. Set
   `MOUNT_REFS_TIMEOUT=SECONDS` for a limit.
+* AppArmor (Ubuntu) logs `apparmor="DENIED" operation="capable"
+  profile="fusermount3" capname="dac_override"` (or `setuid`): other
+  programs' FUSE mounts (gvfs, portals) cause these, and they are harmless.
+  `refs` does not use `fusermount3` when root mounts a block device.
 * `mount.refs: refs mounted the volume, but the mount is not visible here`:
   `refs` ran in another mount namespace (a sandbox around `mount`, an old
   `mount.ReFS` on systemd 254 or later); mount from the host.
