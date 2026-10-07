@@ -525,7 +525,7 @@ impl NewSpace {
                 }
                 Hidden::Cache => {
                     let header = crate::cache::CacheHeader::new(self.guid, h.size, stripe);
-                    let slot = crate::cache::CacheWriter::new(header.clone(), 0).init_slot();
+                    let slot = crate::cache::init_slot(&header);
                     out.push((i, 0, header.encode(crate::cache::SPCACHE_SIGNATURE)));
                     out.push((i, header.slot_offset, slot));
                 }

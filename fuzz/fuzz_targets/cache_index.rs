@@ -1,10 +1,11 @@
 //! The write-back cache header, slot log and checkpoints. The input is the
 //! cache space from its start; the harness sets signatures, the owner GUID
 //! and CRCs (when the first byte of a slot or checkpoint area is odd) so
-//! that inputs reach the slot and checkpoint parsers. The cache model then
-//! logs writes taken from the input into a small log that wraps (with
-//! checkpoints) and is destaged when full; loading it must give exactly the
-//! writer's own map.
+//! that inputs reach the slot and checkpoint parsers, as the cache of a
+//! space with 512-byte or 4 KiB sectors (bit 0 of the second byte). The
+//! cache model then logs writes taken from the input into a small log that
+//! wraps (with checkpoints) and is destaged when full; loading it must give
+//! exactly the writer's own map.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -79,7 +80,8 @@ fuzz_target!(|data: &[u8]| {
         }
         Ok(())
     };
-    if let Ok(index) = CacheIndex::load(header, read) {
+    let sector = if data[1] & 1 == 0 { 512 } else { 4096 };
+    if let Ok(index) = CacheIndex::load(header, sector, read) {
         for offset in [0, 4096, 1 << 20, u64::MAX / 2, u64::MAX] {
             let _ = index.lookup(offset);
         }
@@ -90,11 +92,12 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
-/// Up to 300 writes of up to 128 KiB within 16 MiB, from the input, logged
-/// by the model into a 64-slot cache of 512 KiB chunks with two checkpoint
-/// areas; everything is destaged when the log or the blocks run out. The
-/// log wraps behind checkpoints; loading it must map exactly what the
-/// writer maps.
+/// Up to 300 writes of up to 256 sectors within 16 MiB, from the input,
+/// logged by the model into a 64-slot cache of 512 KiB chunks with two
+/// checkpoint areas, on a space with 512-byte or 4 KiB sectors (bit 1 of
+/// the second byte); everything is destaged when the log or the blocks run
+/// out. The log wraps behind checkpoints; loading it must map exactly what
+/// the writer maps.
 fn model_round_trip(data: &[u8]) {
     const CHUNK: u64 = 512 << 10;
     const SLOTS: usize = 64;
@@ -112,7 +115,8 @@ fn model_round_trip(data: &[u8]) {
         chunk_size: CHUNK as u32,
         chunk_count: 2038,
     };
-    let mut writer = CacheWriter::new(header.clone(), 64);
+    let sector: u64 = if data[1] & 2 == 0 { 512 } else { 4096 };
+    let mut writer = CacheWriter::new(header.clone(), sector as u32, 64).unwrap();
     let mut area = vec![0u8; SLOTS * 4096 + 2 * CP_SIZE];
     area[..4096].copy_from_slice(&writer.init_slot());
     let apply = |records: Vec<LogWrite>, area: &mut Vec<u8>| {
@@ -127,8 +131,8 @@ fn model_round_trip(data: &[u8]) {
         }
     };
     for w in data.chunks_exact(4).take(300) {
-        let offset = u64::from(u16::from_le_bytes([w[0], w[1]]) % 32768) * 512;
-        let len = (u64::from(u16::from_le_bytes([w[2], w[3]]) % 256) + 1) * 512;
+        let offset = u64::from(u16::from_le_bytes([w[0], w[1]])) % ((16 << 20) / sector) * sector;
+        let len = (u64::from(u16::from_le_bytes([w[2], w[3]]) % 256) + 1) * sector;
         let len = len.min((16 << 20) - offset);
         if writer.is_full_for(offset, len) {
             let cached: Vec<u64> = writer.cached().iter().map(|c| c.0).collect();
@@ -141,17 +145,17 @@ fn model_round_trip(data: &[u8]) {
         let records = writer.write(offset, len);
         apply(records, &mut area);
     }
-    let index = CacheIndex::load(header, |off: u64, buf: &mut [u8]| {
+    let index = CacheIndex::load(header, sector as u32, |off: u64, buf: &mut [u8]| {
         buf.copy_from_slice(&area[off as usize..off as usize + buf.len()]);
         Ok(())
     })
     .unwrap();
-    for sector in (0..(16u64 << 20) / 512).step_by(7) {
-        let offset = sector * 512;
+    for n in (0..(16u64 << 20) / sector).step_by(7) {
+        let offset = n * sector;
         match (index.lookup(offset), writer.lookup(offset)) {
-            (Lookup::Hit { cache_offset, .. }, Some(expected)) => assert_eq!(cache_offset, expected, "sector {sector}"),
+            (Lookup::Hit { cache_offset, .. }, Some(expected)) => assert_eq!(cache_offset, expected, "sector {n}"),
             (Lookup::Miss { .. }, None) => {}
-            (loaded, model) => panic!("sector {sector}: loaded {loaded:?}, writer {model:?}"),
+            (loaded, model) => panic!("sector {n}: loaded {loaded:?}, writer {model:?}"),
         }
     }
 }

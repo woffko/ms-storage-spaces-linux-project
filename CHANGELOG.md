@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.1 (unreleased)
+
+### Fixes
+
+* Spaces with 4 KiB logical sectors and a write-back cache (Windows uses
+  one for spaces on SSDs) read stale data where the cache held only part
+  of a chunk: the cache counts its runs of valid sectors in the space's
+  logical sectors, and 1.1.0 took them as 512-byte sectors. It showed as
+  "Alternate GPT is invalid" when such a space was attached, and data
+  written last in Windows could read as older data. Every byte of such a
+  space now reads as Windows reads it (pool `wc4k`, checked against
+  Windows' own reads). Writing to such spaces made the same mistake; a
+  cache 1.1.0 wrote that way is now refused instead of misread.
+
 ## 1.1.0 (2026-10-05)
 
 ReFS: `refs` reads, mounts, checks and (3.14) writes ReFS volumes, checked

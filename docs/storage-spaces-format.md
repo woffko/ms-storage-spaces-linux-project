@@ -728,7 +728,7 @@ at 0x20 (0 = mapping, 1 = initialisation record, see below), `u64 sequence` at
 | 0x08 | 4 | cache chunk index, `0xffffffff` = chunk removed from the cache |
 | 0x0c | 2 | state: 0 = block assigned, nothing valid; 2 = partially valid; 3 = whole chunk valid |
 | 0x0e | 2 | length in bytes of the data that follows the entry; the next entry starts at the next multiple of 8 |
-| 0x10 | n | for state 2: runs from the chunk start, u16 LE each, bit 15 = valid, bits 0-14 = length in 512-byte sectors, 0 or the end of the data ends the list |
+| 0x10 | n | for state 2: runs from the chunk start, u16 LE each, bit 15 = valid, bits 0-14 = length in logical sectors of the space (512 bytes, 4096 on a space with 4 KiB sectors), 0 or the end of the data ends the list; the runs cover the chunk exactly |
 
 (**verified**: pool `parity4`, whose 1 MiB-split writes leave chunks of three
 256 KiB units valid for 256 KiB or 512 KiB; the log had wrapped around its
@@ -737,6 +737,17 @@ at 0x20 (0 = mapping, 1 = initialisation record, see below), `u64 sequence` at
 runs summing to the chunk; with only 4-byte run lists, as in `parity4`,
 bytes plus padding and 16-bit words cannot be told apart.) Entries are ordered by slot sequence and then by position within
 the slot.
+
+The unit of the runs is the space's logical sector (**verified**: pool
+`wc4k`, a thin simple space with 4 KiB sectors and a 1 GiB cache made by
+Windows 11 build 26340, 256 KiB chunks: its three partly valid entries sum to
+64 sectors each, the last one, 59 sectors not valid and 5 valid, holds the
+backup GPT, which is in the cache only; read in 4 KiB sectors every 128 KiB
+of the space equals what Windows reads, `New-TestPool.ps1 -Hashes` and
+`tools/space-hashes.py`; read in 512-byte sectors, as `spaces` 1.1.0 did,
+four chunks differ and the backup GPT reads as zeros, as on a user's
+pools). All 71 partly valid entries of the corpus cover their chunk exactly,
+and `spaces` refuses a cache whose runs do not rather than guess the unit.
 
 Provisional entries (bit 63 of the offset) are logged before their data is
 written to the cache and committed by a later entry for the chunk without

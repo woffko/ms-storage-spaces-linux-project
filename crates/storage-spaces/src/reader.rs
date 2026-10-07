@@ -445,7 +445,7 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
                 header.owner_guid
             ));
         }
-        let index = CacheIndex::load(header, Slots(&mapped))?;
+        let index = CacheIndex::load(header, pool.logical_sector_size, Slots(&mapped))?;
         Ok(Some((mapped, index)))
     }
 

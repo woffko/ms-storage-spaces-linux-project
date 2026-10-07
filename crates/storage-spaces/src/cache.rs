@@ -41,9 +41,11 @@ const STATE_PARTIAL: u16 = 2;
 const STATE_FULL: u16 = 3;
 
 /// Parses the run list of a partially valid chunk: 16-bit little-endian
-/// words, bit 15 = valid, low 15 bits = length in 512-byte sectors; a zero
-/// word ends the list.
-fn parse_runs(words: &[u8], chunk: u64) -> Result<Vec<(bool, u64)>> {
+/// words, bit 15 = valid, low 15 bits = length in logical sectors of the
+/// space (`sector` bytes: 4096 on a space with 4 KiB sectors); a zero word
+/// ends the list. The runs cover the chunk exactly: a list that does not
+/// is read in the wrong unit or damaged, and is refused rather than read.
+fn parse_runs(words: &[u8], chunk: u64, sector: u64) -> Result<Vec<(bool, u64)>> {
     let mut runs = Vec::new();
     let mut total = 0;
     for w in words.as_chunks::<2>().0.iter().map(|&w| u16::from_le_bytes(w)) {
@@ -51,13 +53,27 @@ fn parse_runs(words: &[u8], chunk: u64) -> Result<Vec<(bool, u64)>> {
             break;
         }
         let sectors = (w & 0x7fff) as u64;
-        total += sectors * 512;
+        total += sectors * sector;
         runs.push((w & 0x8000 != 0, sectors));
     }
-    if total > chunk {
-        return Err(format_err!("cache runs cover {total:#x} bytes of a {chunk:#x} chunk"));
+    if total != chunk {
+        return Err(format_err!(
+            "cache runs cover {total:#x} bytes of a {chunk:#x} chunk (in {sector}-byte sectors)"
+        ));
     }
     Ok(runs)
+}
+
+/// Checks the unit of a cache's run words, the logical sector size of its
+/// space, against the cache's chunk size.
+fn check_sector(header: &CacheHeader, sector: u32) -> Result<u64> {
+    if !matches!(sector, 512 | 4096) || !header.chunk_size.is_multiple_of(sector) {
+        return Err(format_err!(
+            "cache of {}-byte chunks on a space of {sector}-byte sectors",
+            header.chunk_size
+        ));
+    }
+    Ok(sector as u64)
 }
 /// Where the cache and journal loaders read from. A plain closure reads
 /// the space; a mirrored space can also merge the slot areas of its copies.
@@ -157,6 +173,9 @@ impl LogWrite {
 #[derive(Debug, Clone)]
 pub struct CacheWriter {
     header: CacheHeader,
+    /// The space's logical sector size: what the cache tracks and the unit
+    /// of the run words.
+    sector: u64,
     next_slot: usize,
     sequence: u64,
     next_block: u32,
@@ -174,12 +193,15 @@ pub struct CacheWriter {
 }
 
 impl CacheWriter {
-    /// A new cache described by `header`, whose first block is `first_block`.
-    pub fn new(header: CacheHeader, first_block: u32) -> Self {
+    /// A new cache described by `header` of a space with `sector`-byte
+    /// logical sectors, whose first block is `first_block`.
+    pub fn new(header: CacheHeader, sector: u32, first_block: u32) -> Result<Self> {
+        let sector = check_sector(&header, sector)?;
         // Slot 0 holds the type 1 record.
         let slot_seq = (0..header.slot_count).map(|i| u64::from(i == 0)).collect();
-        CacheWriter {
+        Ok(CacheWriter {
             header,
+            sector,
             next_slot: 1,
             sequence: 1,
             next_block: first_block,
@@ -189,11 +211,16 @@ impl CacheWriter {
             slot_seq,
             checkpoint: None,
             entry_bytes: 0,
-        }
+        })
     }
 
     pub fn header(&self) -> &CacheHeader {
         &self.header
+    }
+
+    /// The space's logical sector size, the unit the cache tracks.
+    pub fn sector(&self) -> u64 {
+        self.sector
     }
 
     /// Byte offset in the cache space of block `block`.
@@ -222,10 +249,10 @@ impl CacheWriter {
         let Some((block, valid)) = self.chunks.get(&(offset / chunk)) else {
             return (None, chunk - within);
         };
-        let sector = (within / 512) as usize;
+        let sector = (within / self.sector) as usize;
         let v = valid[sector];
         let same = valid[sector..].iter().take_while(|&&x| x == v).count() as u64;
-        let len = (sector as u64 + same) * 512 - within;
+        let len = (sector as u64 + same) * self.sector - within;
         (v.then(|| self.block_offset(*block) + within), len)
     }
 
@@ -236,7 +263,10 @@ impl CacheWriter {
         let (block, valid) = self.chunks.get(&(offset / chunk))?;
         Some((
             *block,
-            runs_of(valid).into_iter().map(|(v, n)| (v, n as u64 * 512)).collect(),
+            runs_of(valid)
+                .into_iter()
+                .map(|(v, n)| (v, n as u64 * self.sector))
+                .collect(),
         ))
     }
 
@@ -285,11 +315,9 @@ impl CacheWriter {
         slots
     }
 
-    /// Slot 0 of a new cache: type 1, sequence 1, the entry (8, 1).
+    /// Slot 0 of a new cache: see [`init_slot`].
     pub fn init_slot(&self) -> Vec<u8> {
-        let mut entry = 8u32.to_le_bytes().to_vec();
-        entry.extend_from_slice(&1u32.to_le_bytes());
-        self.slot(1, 1, 1, &entry)
+        init_slot(&self.header)
     }
 
     /// A write of `len` bytes at owner offset `offset`: the slots Windows
@@ -298,13 +326,14 @@ impl CacheWriter {
     /// ends a slot then is not modelled).
     pub fn write(&mut self, offset: u64, len: u64) -> Vec<LogWrite> {
         let chunk = self.header.chunk_size as u64;
-        let sectors = (chunk / 512) as usize;
+        let sector = self.sector;
+        let sectors = (chunk / sector) as usize;
         let mut changed = Vec::new();
         let mut at = offset;
         while at < offset + len {
             let key = at / chunk;
             let end = (offset + len).min((key + 1) * chunk);
-            let (first, last) = ((at % chunk / 512) as usize, ((end - 1) % chunk / 512) as usize);
+            let (first, last) = ((at % chunk / sector) as usize, ((end - 1) % chunk / sector) as usize);
             let next_block = &mut self.next_block;
             let mut added = false;
             let (_, valid) = self.chunks.entry(key).or_insert_with(|| {
@@ -453,6 +482,14 @@ impl CacheWriter {
             entries,
         )
     }
+}
+
+/// Slot 0 of the new cache `header` describes: type 1, sequence 1, the
+/// entry (8, 1).
+pub fn init_slot(header: &CacheHeader) -> Vec<u8> {
+    let mut entry = 8u32.to_le_bytes().to_vec();
+    entry.extend_from_slice(&1u32.to_le_bytes());
+    encode_slot(header.owner_guid, header.slot_size, 1, 1, 1, &entry)
 }
 
 /// A slot of a cache or parity journal as Windows writes it: "SPSLOT", the
@@ -792,7 +829,8 @@ pub enum Lookup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Validity {
     Full,
-    /// Runs of 512-byte sectors from the chunk start: (valid, sectors).
+    /// Runs of logical sectors of the space from the chunk start: (valid,
+    /// sectors).
     Runs(Vec<(bool, u64)>),
 }
 
@@ -803,6 +841,9 @@ type ChunkMap = HashMap<u64, (u64, Validity)>;
 #[derive(Debug, Clone)]
 pub struct CacheIndex {
     pub header: CacheHeader,
+    /// The space's logical sector size, the unit of the run words
+    /// (**verified**: 4096 on a space with 4 KiB sectors, pool `wc4k`).
+    sector: u64,
     chunks: ChunkMap,
     /// Chunks mapped differently by the copies of the slot area (after an
     /// unclean shutdown): which one Windows keeps is not known.
@@ -813,8 +854,10 @@ pub struct CacheIndex {
 
 impl CacheIndex {
     /// Builds the index from the cache header, the slot area and the
-    /// checkpoints. `read` reads from the cache space.
-    pub fn load(header: CacheHeader, mut read: impl SlotSource) -> Result<Self> {
+    /// checkpoints of the cache of a space with `sector`-byte logical
+    /// sectors. `read` reads from the cache space.
+    pub fn load(header: CacheHeader, sector: u32, mut read: impl SlotSource) -> Result<Self> {
+        let sector = check_sector(&header, sector)?;
         let slot_size = header.slot_size as usize;
         let copies = read.read_slot_copies(header.slot_offset, slot_size * header.slot_count as usize)?;
         let merged = merge_slot_copies(&copies, slot_size);
@@ -826,7 +869,7 @@ impl CacheIndex {
             header.checkpoint_count,
         )?;
         let checkpoint = checkpoints.iter().flatten().max_by_key(|c| c.sequence).cloned();
-        let chunks = Self::map(&header, &merged, checkpoint.as_ref())?;
+        let chunks = Self::map(&header, sector, &merged, checkpoint.as_ref())?;
         let mut conflicts = HashSet::new();
         for (i, copy) in copies.iter().enumerate() {
             // Each copy with its own checkpoint, where the copies line up.
@@ -838,7 +881,7 @@ impl CacheIndex {
             if *copy == merged && own == checkpoint.as_ref() {
                 continue;
             }
-            let other = Self::map(&header, copy, own)?;
+            let other = Self::map(&header, sector, copy, own)?;
             for key in chunks.keys().chain(other.keys()) {
                 if chunks.get(key) != other.get(key) {
                     conflicts.insert(*key);
@@ -848,6 +891,7 @@ impl CacheIndex {
         let slots = valid_slots(&merged, slot_size);
         Ok(CacheIndex {
             header,
+            sector,
             chunks,
             conflicts,
             slots,
@@ -859,7 +903,7 @@ impl CacheIndex {
     /// describes, read as Windows does (see [`Checkpoint`]): the
     /// checkpoint, then the slots from the one it names on while their
     /// sequences increase (from slot 0 without a checkpoint).
-    fn map(header: &CacheHeader, area: &[u8], checkpoint: Option<&Checkpoint>) -> Result<ChunkMap> {
+    fn map(header: &CacheHeader, sector: u64, area: &[u8], checkpoint: Option<&Checkpoint>) -> Result<ChunkMap> {
         let slot_size = header.slot_size as usize;
         let valid = |slot: &[u8]| {
             &slot[0..8] == SPSLOT_SIGNATURE
@@ -878,7 +922,7 @@ impl CacheIndex {
         let mut newest_for_chunk: HashMap<u64, (Version, Option<(u64, Validity)>)> = HashMap::new();
         let mut newest_for_block: HashMap<u64, Version> = HashMap::new();
         let mut apply = |sequence: u64, entries: &[u8], count: usize| -> Result<()> {
-            for (index, entry) in decode_entries(header, entries, count)?.into_iter().enumerate() {
+            for (index, entry) in decode_entries(header, sector, entries, count)?.into_iter().enumerate() {
                 let Some((offset, target)) = entry else {
                     continue; // provisional
                 };
@@ -952,7 +996,8 @@ impl CacheIndex {
     /// are handed out after the highest one mapped (from `first_block` if
     /// none is).
     pub fn writer(&self, first_block: u32) -> CacheWriter {
-        let mut w = CacheWriter::new(self.header.clone(), first_block);
+        let mut w = CacheWriter::new(self.header.clone(), self.sector as u32, first_block)
+            .expect("the sector size was checked when the index was loaded");
         w.next_slot = 0;
         w.sequence = 0;
         w.slot_seq.fill(0);
@@ -976,7 +1021,7 @@ impl CacheIndex {
             w.sequence = newest.sequence;
             w.next_slot = (newest.index + 1) % self.header.slot_count.max(1) as usize;
         }
-        let sectors = (self.header.chunk_size / 512) as usize;
+        let sectors = (self.header.chunk_size as u64 / self.sector) as usize;
         for (&key, (block, validity)) in &self.chunks {
             let valid = match validity {
                 Validity::Full => vec![true; sectors],
@@ -1020,7 +1065,7 @@ impl CacheIndex {
             Some((block, Validity::Runs(runs))) => {
                 let mut start = 0;
                 for &(valid, sectors) in runs {
-                    let end = start + sectors * 512;
+                    let end = start + sectors * self.sector;
                     if within < end {
                         return if valid {
                             hit(*block, end - within)
@@ -1041,7 +1086,7 @@ impl CacheIndex {
 /// or no block for a tombstone; `None` for a provisional entry.
 type Entry = Option<(u64, Option<(u64, Validity)>)>;
 
-fn decode_entries(header: &CacheHeader, bytes: &[u8], count: usize) -> Result<Vec<Entry>> {
+fn decode_entries(header: &CacheHeader, sector: u64, bytes: &[u8], count: usize) -> Result<Vec<Entry>> {
     let chunk = header.chunk_size as u64;
     let mut out = Vec::with_capacity(count.min(4096));
     let mut pos = 0;
@@ -1065,7 +1110,7 @@ fn decode_entries(header: &CacheHeader, bytes: &[u8], count: usize) -> Result<Ve
         }
         let validity = match state {
             STATE_EMPTY => Validity::Runs(Vec::new()),
-            STATE_PARTIAL => Validity::Runs(parse_runs(extra, chunk)?),
+            STATE_PARTIAL => Validity::Runs(parse_runs(extra, chunk, sector)?),
             STATE_FULL => Validity::Full,
             other => return Err(crate::Error::Unsupported(format!("cache entry state {other}"))),
         };
@@ -1183,7 +1228,7 @@ mod tests {
     fn index(slots: &[Vec<u8>]) -> CacheIndex {
         let mut area = slots.concat();
         area.resize(4 * 0x1000, 0);
-        CacheIndex::load(header(), |off: u64, buf: &mut [u8]| {
+        CacheIndex::load(header(), 512, |off: u64, buf: &mut [u8]| {
             buf.copy_from_slice(&area[off as usize..off as usize + buf.len()]);
             Ok(())
         })
@@ -1201,7 +1246,7 @@ mod tests {
     /// writes that add and split runs, fills and destages.
     #[test]
     fn checkpoint_size_is_tracked_as_the_map_changes() {
-        let mut w = CacheWriter::new(header(), 0);
+        let mut w = CacheWriter::new(header(), 512, 0).unwrap();
         let check = |w: &CacheWriter| assert_eq!(w.entry_bytes, w.checkpoint_entries().0.len());
         let mut seed = 7u64;
         for step in 0..400 {
@@ -1238,7 +1283,7 @@ mod tests {
             chunk_size: 64 << 10,
             chunk_count: 100,
         };
-        let mut w = CacheWriter::new(header.clone(), 0);
+        let mut w = CacheWriter::new(header.clone(), 512, 0).unwrap();
         let slot = header.slot_size as usize;
         let mut area = vec![0u8; 8 * slot];
         area[..slot].copy_from_slice(&w.init_slot());
@@ -1252,7 +1297,7 @@ mod tests {
         for (i, page) in slots {
             area[i * slot..(i + 1) * slot].copy_from_slice(&page);
         }
-        let index = CacheIndex::load(header, |off: u64, buf: &mut [u8]| {
+        let index = CacheIndex::load(header, 512, |off: u64, buf: &mut [u8]| {
             buf.copy_from_slice(&area[off as usize..off as usize + buf.len()]);
             Ok(())
         })
@@ -1393,7 +1438,8 @@ mod tests {
         assert_eq!(w.checkpoint, Some((1028, 1, 2)));
         let chunk = cache.header.chunk_size as u64;
         for &o in &offsets {
-            w.chunks.insert(o / chunk, (0, vec![true; (chunk / 512) as usize]));
+            w.chunks
+                .insert(o / chunk, (0, vec![true; (chunk / w.sector()) as usize]));
         }
         w.recount();
         let written = w.destage(&offsets);
@@ -1497,6 +1543,93 @@ mod tests {
         assert_eq!(i.lookup(0x8000), Lookup::Miss { len: CHUNK - 0x8000 });
         assert_eq!(hit(&i, CHUNK + 5), None);
         assert_eq!(hit(&i, 2 * CHUNK), None);
+    }
+
+    /// The cache of pool `wc4k` (Windows 11 build 26340; a thin simple
+    /// space with 4 KiB sectors and 256 KiB chunks, GPT and NTFS written
+    /// through the cache). Two of its partly valid chunks as Windows logged
+    /// them: the last chunk of the space holds the backup GPT in its last
+    /// five sectors (runs: 59 not valid, 5 valid), chunk 0x40740000 is
+    /// valid from its fourth sector on. The runs count 4 KiB sectors; read
+    /// as 512-byte sectors they cover an eighth of the chunk and are
+    /// refused (they were taken that way once, and the backup GPT read as
+    /// zeros).
+    #[test]
+    fn runs_count_the_logical_sectors_of_the_space() {
+        const CHUNK4K: u64 = 0x40000;
+        let header = CacheHeader {
+            chunk_size: CHUNK4K as u32,
+            chunk_count: 4079,
+            ..header()
+        };
+        let mut area = [
+            slot_with(1, &[(0xfffc_0000, 0, STATE_PARTIAL, vec![0x003b, 0x8005])]),
+            slot_with(2, &[(0x4074_0000, 3, STATE_PARTIAL, vec![0x0003, 0x803d])]),
+        ]
+        .concat();
+        area.resize(4 * 0x1000, 0);
+        let load = |sector| {
+            CacheIndex::load(header.clone(), sector, |off: u64, buf: &mut [u8]| {
+                buf.copy_from_slice(&area[off as usize..off as usize + buf.len()]);
+                Ok(())
+            })
+        };
+        let i = load(4096).unwrap();
+        assert_eq!(i.lookup(0xfffc_0000), Lookup::Miss { len: 59 * 4096 });
+        assert_eq!(
+            i.lookup(0xfffc_0000 + 59 * 4096),
+            Lookup::Hit {
+                cache_offset: 0x10_0000 + 59 * 4096,
+                len: 5 * 4096
+            }
+        );
+        assert_eq!(i.lookup(0x4074_0000 + 4095), Lookup::Miss { len: 2 * 4096 + 1 });
+        assert_eq!(
+            i.lookup(0x4074_0000 + 3 * 4096),
+            Lookup::Hit {
+                cache_offset: 0x10_0000 + 3 * CHUNK4K + 3 * 4096,
+                len: 61 * 4096
+            }
+        );
+        let err = load(512).unwrap_err().to_string();
+        assert!(
+            err.contains("cache runs cover 0x8000 bytes of a 0x40000 chunk"),
+            "{err}"
+        );
+    }
+
+    /// A write into the last five sectors of that space is logged as
+    /// Windows logged it: the entry of slot 0 of the cache of `wc4k`, byte
+    /// for byte (offset 0xfffc0000, block 0, state 2, 4 bytes of runs: 59
+    /// not valid, 5 valid).
+    #[test]
+    fn the_writer_counts_the_logical_sectors_of_the_space() {
+        let header = CacheHeader {
+            chunk_size: 0x40000,
+            chunk_count: 4079,
+            ..header()
+        };
+        let mut w = CacheWriter::new(header, 4096, 0).unwrap();
+        let written = w.write(0x1_0000_0000 - 5 * 4096, 5 * 4096);
+        let (_, page) = written[0].slot().unwrap();
+        let windows = [
+            0x00, 0x00, 0xfc, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x00, 0x04, 0x00, 0x3b, 0x00, 0x05, 0x80,
+        ];
+        assert_eq!(&page[0x38..0x38 + windows.len()], &windows);
+        assert_eq!(w.lookup_run(0xfffc_0000), (None, 59 * 4096));
+        assert_eq!(
+            w.lookup_run(0xfffc_0000 + 59 * 4096),
+            (Some(0x10_0000 + 59 * 4096), 5 * 4096)
+        );
+    }
+
+    #[test]
+    fn refuses_sector_sizes_other_than_512_and_4096() {
+        for sector in [0, 1024, 8192] {
+            assert!(CacheWriter::new(header(), sector, 0).is_err(), "{sector}");
+        }
+        assert!(CacheWriter::new(header(), 512, 0).is_ok());
+        assert!(CacheWriter::new(header(), 4096, 0).is_ok());
     }
 
     #[test]

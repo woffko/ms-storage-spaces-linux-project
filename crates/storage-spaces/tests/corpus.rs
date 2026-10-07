@@ -279,6 +279,65 @@ fn survives_two_failed_disks(name: &str) {
     }
 }
 
+/// Every space that carries a GPT (the NTFS pools, `wc4k`) reads with a
+/// valid backup header at its last LBA, describing the partitions of the
+/// primary: the end of a space reads as Windows wrote it, through the
+/// write-back cache too (`wc4k` keeps its backup GPT in the cache only, in
+/// a partly valid chunk whose runs count 4 KiB sectors).
+#[test]
+fn backup_gpt_matches_the_primary() {
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in data {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xedb8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+    let le32 = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+    let le64 = |b: &[u8], at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+    let mut checked = 0;
+    for dir in corpus() {
+        let m = manifest(&dir);
+        let pool = open(&dir, &m);
+        let sector = pool.logical_sector_size as u64;
+        for space in pool.user_spaces() {
+            let reader = pool.open_space(space.id()).unwrap();
+            let read = |offset: u64, len: u64| {
+                let mut b = vec![0u8; len as usize];
+                reader.read_exact_at(&mut b, offset).unwrap();
+                b
+            };
+            let primary = read(sector, sector);
+            if &primary[..8] != b"EFI PART" {
+                continue;
+            }
+            let what = format!("{} {}", dir.display(), space.name());
+            let last = reader.size() / sector - 1;
+            assert_eq!(le64(&primary, 32), last, "{what}: primary names the backup at");
+            let backup = read(last * sector, sector);
+            assert_eq!(&backup[..8], b"EFI PART", "{what}: backup signature");
+            let size = le32(&backup, 12) as usize;
+            let mut header = backup[..size].to_vec();
+            header[16..20].fill(0);
+            assert_eq!(crc32(&header), le32(&backup, 16), "{what}: backup header CRC");
+            assert_eq!(le64(&backup, 24), last, "{what}: backup my_lba");
+            let entries = |h: &[u8]| read(le64(h, 72) * sector, u64::from(le32(h, 80) * le32(h, 84)));
+            let theirs = entries(&backup);
+            assert_eq!(crc32(&theirs), le32(&backup, 88), "{what}: backup entries CRC");
+            assert_eq!(theirs, entries(&primary), "{what}: partitions");
+            checked += 1;
+        }
+    }
+    eprintln!("{checked} spaces with a GPT checked");
+}
+
 /// A disk taken out of a pool with Remove-PhysicalDisk (pool removed, image
 /// removed0.img) keeps its old SPACEDB header and database, but its
 /// partition entry is gone, so it is no longer found as a member; the pool

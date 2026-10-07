@@ -564,16 +564,20 @@ impl<'p, D: WriteAt> SpaceWriter<'p, D> {
     /// Puts a write into the write-back cache; its slots are written at the
     /// next flush.
     fn write_cached(&self, cache: &CacheState, log: &mut CacheLog, buf: &[u8], offset: u64) -> Result<()> {
-        // The cache tracks whole 512-byte sectors.
-        let (start, end) = (offset / 512 * 512, (offset + buf.len() as u64).div_ceil(512) * 512);
+        // The cache tracks whole logical sectors of the space.
+        let sector = log.writer.sector();
+        let (start, end) = (
+            offset / sector * sector,
+            (offset + buf.len() as u64).div_ceil(sector) * sector,
+        );
         let whole;
         let buf = if (start, end) == (offset, offset + buf.len() as u64) {
             buf
         } else {
             let mut b = vec![0u8; (end - start) as usize];
-            let last = b.len() - 512;
-            self.read_locked(cache, log, &mut b[..512], start)?;
-            self.read_locked(cache, log, &mut b[last..], end - 512)?;
+            let (head, last) = (sector as usize, b.len() - sector as usize);
+            self.read_locked(cache, log, &mut b[..head], start)?;
+            self.read_locked(cache, log, &mut b[last..], end - sector)?;
             b[(offset - start) as usize..][..buf.len()].copy_from_slice(buf);
             whole = b;
             &whole[..]

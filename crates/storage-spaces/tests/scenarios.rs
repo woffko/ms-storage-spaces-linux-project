@@ -448,7 +448,7 @@ fn cache_log_follows_the_writes() {
         let first = state(scenario, "s0");
         let space = first.user_spaces().next().unwrap();
         let header = first.open_space(space.id()).unwrap().cache().unwrap().header.clone();
-        let mut writer = CacheWriter::new(header, 64);
+        let mut writer = CacheWriter::new(header, first.logical_sector_size, 64).unwrap();
         let mut expected = vec![(0, content(&writer.init_slot()))];
         let mut checked = 0;
         for (step, _) in steps(scenario) {
@@ -490,7 +490,7 @@ fn parity_journal_logs_whole_stripe_writes() {
     let stripes = reader.size() / stripe;
     assert_eq!(stripes, 4096);
     let mut journal = JournalWriter::new(space.info.guid, 4096, 1024);
-    let mut cache = CacheWriter::new(reader.cache().unwrap().header.clone(), 64);
+    let mut cache = CacheWriter::new(reader.cache().unwrap().header.clone(), first.logical_sector_size, 64).unwrap();
     let mut journal_slots: Vec<(usize, Vec<u8>)> = Vec::new();
     let mut cached = vec![(0, content(&cache.init_slot()))];
     let mut checked = 0;
