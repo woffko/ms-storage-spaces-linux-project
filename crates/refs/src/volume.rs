@@ -913,13 +913,22 @@ pub(crate) fn log_state<D: ReadAt + ?Sized>(
     // Neither: the log is not understood.
     let signature = le32(&physical(SUPERBLOCK_LCN)?, 0x0c);
     let is_control = |c: &[u8]| &c[0..4] == b"MLog" && le32(c, 4) == signature && le64(c, 0x28) == 0;
+    // The first clusters 64 at a time: on a slow device the number of
+    // reads counts, not their size.
     let mut control = None;
-    for lcn in 0..0x400u64.min(volume_size / cluster) {
-        let c = physical(lcn)?;
-        if is_control(&c) {
-            control = Some(c);
-            break;
+    let first = 0x400u64.min(volume_size / cluster);
+    let mut lcn = 0;
+    'search: while lcn < first {
+        let n = (first - lcn).min(64);
+        let mut batch = vec![0u8; (n * cluster) as usize];
+        dev.read_exact_at(&mut batch, offset + lcn * cluster)?;
+        for c in batch.chunks_exact(cluster as usize) {
+            if is_control(c) {
+                control = Some(c.to_vec());
+                break 'search;
+            }
         }
+        lcn += n;
     }
     if control.is_none() {
         let mut c = vec![0u8; PAGE as usize];
@@ -932,12 +941,12 @@ pub(crate) fn log_state<D: ReadAt + ?Sized>(
     if start >= end || (end - start) > 1 << 22 {
         return Err(format_err!("log of pages {start:#x}..{end:#x}"));
     }
-    // Every record page of the current epoch, a MiB at a time.
+    // Every record page of the current epoch, 16 MiB at a time.
     let mut newest: Option<(Lsn, u64)> = None;
-    let mut buf = vec![0u8; 256 * PAGE as usize];
+    let mut buf = vec![0u8; 4096 * PAGE as usize];
     let mut page = start;
     while page < end {
-        let n = (end - page).min(256);
+        let n = (end - page).min(4096);
         let chunk = &mut buf[..(n * PAGE) as usize];
         dev.read_exact_at(chunk, offset + page * PAGE)?;
         for (i, head) in chunk.as_chunks::<{ PAGE as usize }>().0.iter().enumerate() {
