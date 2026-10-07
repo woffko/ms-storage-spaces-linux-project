@@ -152,6 +152,13 @@ and
 for a refused space also to standard error: whole on a terminal,
 otherwise a line for the space and one per failing check (the attach
 unit's lines in the journal). Spaces already attached are left alone.
+Every device attach makes gets udev properties (SS_SPACE, SS_POOL,
+SS_VERDICT, SS_FORCED, from
+.IR /run/storage\-spaces/udev ):
+the udev rule hides from udisks2 (UDISKS_IGNORE) the devices of a space
+attached past its verdict, so that no desktop mounts them unasked, and the
+ublk, nbd or loop device a space is served through with its kernel
+partitions, which duplicate the space's own devices.
 With
 .B \-\-rw
 the spaces are attached read-write, if they are healthy and their state

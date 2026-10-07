@@ -40,6 +40,9 @@ use storage_spaces::{Pool, Space, SpaceReader};
 pub const STATE_DIR: &str = "/run/storage-spaces";
 /// Where the reports of the checks go, one per space.
 pub const REPORT_DIR: &str = "/run/storage-spaces/reports";
+/// Where attach leaves udev the properties of the devices it creates
+/// (`<name>.props`, imported by contrib/udev/69-storage-spaces.rules).
+pub const UDEV_DIR: &str = "/run/storage-spaces/udev";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Backend {
@@ -251,6 +254,72 @@ fn refused_in(dir: &Path, attached: &[State]) -> Vec<(PathBuf, String)> {
         .collect();
     out.sort();
     out
+}
+
+/// What the udev rule imports for a device of attached space `state`:
+/// whose it is, its verdict and whether it was attached past it, and
+/// SS_BACKEND=1 for the device the space is served through (ublk, nbd or
+/// loop: it and its kernel partitions duplicate the space's devices).
+fn props_text(state: &State, backend: bool) -> String {
+    let mut s = format!(
+        "SS_SPACE={}\nSS_POOL={}\nSS_VERDICT={}\nSS_FORCED={}\n",
+        state.space_guid,
+        state.pool_guid,
+        state.verdict.as_deref().unwrap_or("healthy"),
+        u8::from(state.forced)
+    );
+    if backend {
+        s += "SS_BACKEND=1\n";
+    }
+    s
+}
+
+fn write_props(name: &str, state: &State, backend: bool) -> Result<()> {
+    write_props_in(Path::new(UDEV_DIR), name, state, backend).with_context(|| format!("cannot write into {UDEV_DIR}"))
+}
+
+fn write_props_in(dir: &Path, name: &str, state: &State, backend: bool) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    ensure_readable_dir(dir)?;
+    let path = dir.join(format!("{name}.props"));
+    let tmp = dir.join(format!("{name}.props.tmp"));
+    fs::write(&tmp, props_text(state, backend))?;
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644))?;
+    fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+fn remove_props(name: &str) {
+    let _ = fs::remove_file(Path::new(UDEV_DIR).join(format!("{name}.props")));
+}
+
+/// The kernel name of a device path (/dev/ublkb0: ublkb0).
+fn kernel_name(dev: &str) -> &str {
+    dev.rsplit('/').next().unwrap_or(dev)
+}
+
+/// Writes the properties of the device a space is served through and has
+/// udev take them in for it and its partitions (it announced them before
+/// they were written).
+fn mark_backend(dev: &str, state: &State) -> Result<()> {
+    let kernel = kernel_name(dev);
+    write_props(kernel, state, true)?;
+    let names = [
+        format!("--sysname-match={kernel}"),
+        format!("--sysname-match={kernel}p*"),
+    ];
+    let args = [
+        "trigger",
+        "--action=change",
+        "--subsystem-match=block",
+        &names[0],
+        &names[1],
+    ];
+    if run("udevadm", &[&args[..], &["--settle"]].concat(), None).is_err() {
+        run("udevadm", &args, None).ok();
+        run("udevadm", &["settle"], None).ok();
+    }
+    Ok(())
 }
 
 /// The device-mapper name a space of the pool `pool_guid` gets: `base`
@@ -650,13 +719,18 @@ pub fn attach_space(
     let rw_arg: &[&str] = &flags;
     let sectors = reader.size() / 512;
     let result = (|| -> Result<()> {
+        // udev learns whose each device is before it appears (the backend
+        // device right after: it appears when its server starts).
+        state.dm.push(name.clone());
+        write_props(&name, &state, false)?;
         match backend {
             Backend::Dm | Backend::Auto => dm_create(&name, &dm_table(&reader, paths)?, rw)?,
             Backend::Ublk => {
                 state.unit = Some(unit.clone());
                 let dev = start_server(&unit, "ublk", paths, &guid, rw_arg)?;
+                state.device = Some(dev.clone());
+                mark_backend(&dev, &state)?;
                 dm_create(&name, &format!("0 {sectors} linear {dev} 0\n"), rw)?;
-                state.device = Some(dev);
             }
             Backend::Nbd => {
                 state.unit = Some(unit.clone());
@@ -682,6 +756,7 @@ pub fn attach_space(
                 }
                 run("nbd-client", &args, None)?;
                 state.device = Some(dev.clone());
+                mark_backend(&dev, &state)?;
                 dm_create(&name, &format!("0 {sectors} linear {dev} 0\n"), rw)?;
             }
             Backend::Fuse => {
@@ -698,10 +773,10 @@ pub fn attach_space(
                     .trim()
                     .to_string();
                 state.device = Some(dev.clone());
+                mark_backend(&dev, &state)?;
                 dm_create(&name, &format!("0 {sectors} linear {dev} 0\n"), false)?;
             }
         }
-        state.dm.push(name.clone());
         // Partitions become devices only when they lie inside the space
         // and apart (an attach forced past the partition check gets the
         // whole space only).
@@ -712,8 +787,9 @@ pub fn attach_space(
             for p in parts {
                 let part = format!("{name}-p{}", p.number);
                 let table = format!("0 {} linear /dev/mapper/{name} {}\n", p.length / 512, p.offset / 512);
+                state.dm.push(part.clone());
+                write_props(&part, &state, false)?;
                 dm_create(&part, &table, rw)?;
-                state.dm.push(part);
             }
         }
         Ok(())
@@ -733,6 +809,7 @@ pub fn teardown(state: &State) -> Result<()> {
         if let Err(e) = dm_remove(name) {
             errors.push(e.to_string());
         }
+        remove_props(name);
     }
     match state.backend.as_str() {
         "nbd" => {
@@ -749,6 +826,9 @@ pub fn teardown(state: &State) -> Result<()> {
             }
         }
         _ => {}
+    }
+    if let Some(dev) = &state.device {
+        remove_props(kernel_name(dev));
     }
     if let Some(unit) = &state.unit {
         let _ = run("systemctl", &["stop", unit], None);
@@ -852,6 +932,29 @@ mod state_tests {
             (back.verdict.as_deref(), back.forced, back.report.as_deref()),
             (s.verdict.as_deref(), true, s.report.as_deref())
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What udev imports for a device of an attached space.
+    #[test]
+    fn udev_properties_say_whose_device_and_its_verdict() {
+        let state = State {
+            space_guid: "g".into(),
+            pool_guid: "p".into(),
+            verdict: Some("suspect".into()),
+            forced: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            props_text(&state, false),
+            "SS_SPACE=g\nSS_POOL=p\nSS_VERDICT=suspect\nSS_FORCED=1\n"
+        );
+        assert!(props_text(&state, true).ends_with("SS_BACKEND=1\n"));
+        let dir = scratch("udev");
+        write_props_in(&dir, "ss-p-a", &state, false).unwrap();
+        let path = dir.join("ss-p-a.props");
+        assert_eq!(fs::read_to_string(&path).unwrap(), props_text(&state, false));
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o644);
         fs::remove_dir_all(&dir).unwrap();
     }
 

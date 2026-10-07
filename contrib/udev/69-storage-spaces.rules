@@ -3,3 +3,20 @@
 # still missing disks; it runs again for every further member that shows up.
 ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_PART_ENTRY_TYPE}=="e75caf8f-f680-4cee-afa3-b001e56efc2d", \
   TAG+="systemd", ENV{SYSTEMD_WANTS}+="storage-spaces-attach.service"
+
+# The devices of attached spaces: spaces attach writes their properties to
+# /run/storage-spaces/udev/<name>.props (SS_SPACE, SS_POOL, SS_VERDICT,
+# SS_FORCED; SS_BACKEND=1 on the ublk, nbd or loop device a space is served
+# through, whose kernel partitions take its properties).
+SUBSYSTEM!="block", GOTO="storage_spaces_end"
+ACTION=="remove", GOTO="storage_spaces_end"
+KERNEL=="dm-*", ENV{DM_NAME}=="ss-*", IMPORT{file}="/run/storage-spaces/udev/$env{DM_NAME}.props"
+KERNEL=="ublkb*|nbd*|loop*", ENV{DEVTYPE}=="disk", IMPORT{file}="/run/storage-spaces/udev/$kernel.props"
+KERNEL=="ublkb*|nbd*|loop*", ENV{DEVTYPE}=="partition", IMPORT{file}="/run/storage-spaces/udev/$parent.props"
+# The device a space is served through and its partitions duplicate the
+# space's own devices: desktops show and mount those only.
+ENV{SS_BACKEND}=="1", ENV{UDISKS_IGNORE}="1"
+# A space attached past its verdict (spaces attach --degraded or --force):
+# nothing mounts it without being asked.
+ENV{SS_VERDICT}=="?*", ENV{SS_VERDICT}!="healthy", ENV{UDISKS_IGNORE}="1"
+LABEL="storage_spaces_end"

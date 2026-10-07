@@ -32,6 +32,13 @@
   `--degraded`; a pool with no more than half of its database copies
   (Windows takes it read-only) needs `--force` now, also with half of
   its disks.
+* udev knows the devices of attached spaces: attach writes their
+  properties (SS_SPACE, SS_POOL, SS_VERDICT, SS_FORCED) for the rule to
+  import, and the rule hides from udisks2 the devices of a space attached
+  past its verdict (no desktop mounts them unasked), and the ublk, nbd or
+  loop device a space is served through with its kernel partitions
+  (`ublkb0p2` and the like), which showed in file managers next to the
+  space's own `ss-*-pN` devices.
 * `refs mount` runs the quick checks of the volume first (`refs check
   --quick`: boot sector, superblock and its copies, checkpoints, log) and
   mounts a volume that is not healthy only with `--force`, read-only

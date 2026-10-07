@@ -101,7 +101,10 @@ it could not open. `spaces status` works for every user (the state in
 `attach` checks every space first, as `spaces check` does, and attaches
 only healthy spaces without being asked; a space that is not healthy is
 refused with its report (see "Checking a pool"), which `spaces status`
-lists too.
+lists too. udev learns which devices belong to attached spaces (`udevadm
+info` shows `SS_SPACE`, `SS_VERDICT`): desktops do not mount the devices of
+a space attached with `--degraded` or `--force` by themselves, nor list
+the ublk or nbd device a space is served through.
 
 Device names: `ss-<pool>-<space>` for the whole virtual disk and
 `ss-<pool>-<space>-p<N>` for partition `N` (characters other than letters,
