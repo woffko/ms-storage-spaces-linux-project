@@ -42,8 +42,9 @@
 * `refs mount` runs the quick checks of the volume first (`refs check
   --quick`: boot sector, superblock and its copies, checkpoints, log) and
   mounts a volume that is not healthy only with `--force`, read-only
-  (`mount -t ReFS -o force`, also through udisks2); a refused mount says
-  the first failing check and where its report is. A volume on a space
+  (`mount -t ReFS -o force`); a refused mount says the first failing
+  check and where its report is (udisks2 shows "Unknown error" for any
+  refusal of a mount helper and keeps that line in its journal). A volume on a space
   `spaces attach` attached gets the space's verdict too. `refs ls`,
   `cat`, `stat` and `info` read such a volume with a warning; the writing
   commands refuse it.

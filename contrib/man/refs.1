@@ -256,8 +256,10 @@ on as
 .BR \-\-force ;
 a refused mount says the first failing check and, as root, where the
 report is
-.RI ( /run/storage\-spaces/reports/refs\- serial .txt ),
-which udisks2 shows instead of an unknown error.
+.RI ( /run/storage\-spaces/reports/refs\- serial .txt );
+udisks2 answers "Unknown error when mounting" to whatever a mount helper
+refuses, and keeps that line in its journal
+.RB ( "journalctl \-u udisks2" ).
 .TP
 .B check
 Check the volume's consistency without writing: every page's checksum

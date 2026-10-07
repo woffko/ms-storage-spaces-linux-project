@@ -100,8 +100,8 @@ it could not open. `spaces status` works for every user (the state in
 
 `attach` checks every space first, as `spaces check` does, and attaches
 only healthy spaces without being asked; a space that is not healthy is
-refused with its report (see "Checking a pool"), which `spaces status`
-lists too. udev learns which devices belong to attached spaces (`udevadm
+refused with its report (see "Health checks and forced attach"), which
+`spaces status` lists too. udev learns which devices belong to attached spaces (`udevadm
 info` shows `SS_SPACE`, `SS_VERDICT`): desktops do not mount the devices of
 a space attached with `--degraded` or `--force` by themselves, nor list
 the ublk or nbd device a space is served through.
@@ -359,43 +359,164 @@ keeping the first mirror copy and recomputing parity from the data.
   whether Linux or Windows had created the pool. Replace or remove a failed
   disk on Linux before handing the pool to Windows.
 
-## Pools with missing disks
+## Health checks and forced attach
 
-With a disk of its pool missing a space is degraded, and `attach` refuses
-it. `spaces info <disks...>` shows which disk is missing and whether each
-space is degraded (still complete) or failed (data lost with the disks at
-hand). If the redundancy of every space still covers the loss (mirror: at
-least one copy of every slab; single parity: at most one missing disk;
-dual parity: at most two), attach it anyway, read-only:
+Before `spaces attach` reads a space (also when the udev rule and the
+attach unit run it at boot), and before `refs mount` mounts a ReFS volume
+(so also `mount -t ReFS` and udisks2), the space or volume is checked. The
+checks are quick: a few reads per space and partition, and at most 1 GiB
+of parity stripes. `spaces check` runs the same checks and prints the
+report; `refs check --quick` does it for a ReFS volume.
 
-```sh
-sudo spaces attach --degraded
+### Verdicts
+
+| Verdict | Means | Without a flag | With a flag |
+|---|---|---|---|
+| healthy | every check passes (warnings and notes allowed) | attached and mounted as asked; written with `--rw` | |
+| degraded | Windows' metadata shows redundancy reduced (a disk away, copies out of date); the data is complete | not attached | `--degraded`: read-only |
+| suspect | what was read disagrees with itself: the pool lacks its quorum, copies of the cache, the partition table or a ReFS superblock disagree, parity stripes do not match, a ReFS log holds changes its checkpoint lacks | not attached, not mounted | `--force` (`-o force` for a mount): read-only |
+| failed | data is lost, or metadata is not understood or breaks what the format implies | never | never: the report only |
+
+Writing (`spaces attach --rw`, `refs mount --rw`, the writing `refs`
+commands) needs a healthy verdict. Each layer asks on its own: a ReFS
+volume in a space attached with `--degraded` or `--force` mounts only with
+`-o force` too.
+
+### The checks
+
+* `pool.quorum`: more than half of the copies of the pool database are at
+  hand (Windows takes the pool read-only otherwise).
+* `pool.members`: every disk of the pool is there.
+* `pool.database`: the copies of the pool database agree; older, torn or
+  unusable copies that are not used are warnings, a newer copy that does
+  not decode is suspect.
+* `pool.clean`: the metadata agrees with itself and with the devices.
+* `space.state`: the state Windows would show (Healthy, Warning /
+  Degraded, Unhealthy).
+* `space.layout`: the slab map parses; no slab is mapped twice, no extent
+  lies outside its space or beyond its disk's partition.
+* `space.cache`: the write-back cache loads and its copies agree (cached
+  chunks are a note).
+* `space.journal`: the stripes the parity journal does not record as
+  consistent match their parity (Windows lists stripes never written and
+  those its cache holds too; up to 1 GiB is read, the rest is checked when
+  read).
+* `space.drl`: the extent runs the mirror's dirty region log lists (a
+  note: their copies are compared when read).
+* `space.partitions`: the protective MBR, both GPT headers with their
+  CRCs and positions, both copies of the partition entries the same, the
+  partitions inside the space and apart.
+* `fs.ntfs`: the NTFS boot sector and its copy in the partition's last
+  sector agree.
+* `fs.refs.boot`, `fs.refs.superblock`, `fs.refs.checkpoint`,
+  `fs.refs.log`: the ReFS boot sector, the superblock and its two copies,
+  both checkpoints, and that the log holds nothing newer than the
+  checkpoint (ReFS 1.x and 3.1 keep logs `refs` does not read).
+* With `spaces check --deep`: every listed parity stripe, `deep.scrub`
+  (every copy compared, as `spaces pool scrub` does) and `deep.refs`
+  (ReFS volumes checked whole, as `refs check` does).
+
+### The report
+
+```
+$ sudo spaces check /dev/sdb /dev/sdc /dev/sdd
+space "data" (6af700fc-207e-4c13-ab93-4123223e1d17) of pool "Storage pool" (78bb278c-1f67-4a13-bd4e-980e2bd17a49): SUSPECT
+  ok       pool.quorum       3 of 3 copies of the pool database at hand
+  ok       pool.members      3 of 3 disks (/dev/sdb, /dev/sdc, /dev/sdd)
+  ok       pool.database     3 copies of sequence 2, all the same
+  ok       pool.clean        the pool's metadata agrees with itself and with the devices
+  ok       space.state       Healthy / OK, as Windows would show it (survives 1 more disk failure)
+  ok       space.layout      Mirror, 1 column(s), 2 copies, interleave 256 KiB, 2 extent(s) on 2 disk(s)
+  skipped  space.cache       no write-back cache
+  skipped  space.journal     no parity journal (not a parity space)
+  info     space.drl         1 extent run(s) written since the space was last disconnected: their copies are compared when read
+  SUSPECT  space.partitions  the backup GPT header is not valid
+           what      the backup GPT header
+           where     LBA 2097151 (space byte 0x3ffffe00 (virtual slab 3), column 0 row 3: copy 0: disk 3 slab 4 -> /dev/sdd at 0x70fffe00, copy 1: disk 1 slab 5 -> /dev/sdb at 0x80fffe00)
+           expected  "EFI PART" (the primary at LBA 1 names LBA 2097151 as its backup)
+           found     00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ... (all zero)
+           truth     our cross-check of copies Windows keeps or of checksums
+  ok       fs.ntfs           p1: the NTFS boot sector and its copy in the last sector agree
+  what to do:
+    - space.partitions: Windows keeps two copies of the partition table, and
+      they disagree here (or one is not valid). If Windows shows this space as
+      healthy, spaces probably reads part of it wrongly: please report it with
+      the bundle of spaces check --bundle.
+  environment: spaces 1.2.0, kernel 6.8.0, pool version 28
 ```
 
-Reads that need a missing disk fail with an I/O error instead of returning
-wrong data. Copies that missed writes while their disk was away are never
-used. A failed space (data lost) is not attached at all.
+(`spaces attach` adds what it did, `not attached: a suspect space needs
+--force (and is then read-only)`, and the command that reads it anyway.)
+
+Every check has an id, a status (ok, info, warning, skipped, degraded,
+suspect, failed) and a summary; problems have their evidence: where (the
+device and offset, the LBA, and for a byte of a space the cache block or
+the slab, disk and offset that hold it), what was expected and what was
+found (bytes in hex), and where the truth comes from (Windows' metadata,
+a cross-check of copies or checksums, an invariant of the format). The
+report goes to:
+
+* standard error of the command that refused: whole on a terminal;
+  under the attach unit a line for the space and one per failing check,
+  so `journalctl -u storage-spaces-attach` shows them;
+* `/run/storage-spaces/reports/<space GUID>.txt` and `.json` (readable by
+  every user), and `refs-<serial>.txt` for a refused ReFS mount (as root);
+* `spaces status` (the spaces not attached, and the verdict of those
+  attached), `spaces info` (the verdict of each space);
+* `mount -t ReFS` prints the first failing check and the report's path.
+  udisks2 shows "Unknown error when mounting" for whatever a mount helper
+  refuses; the same line is in `journalctl -u udisks2`.
+
+`spaces check --json` prints the reports for programs, with stable check
+ids and statuses; `spaces check --bundle FILE.tar.gz` also packs the
+reports, `spaces dump` and `spaces extents` of each pool and both ends of
+each space (its partition table) for a bug report: no file data, but the
+names and GUIDs of pools, spaces and disks, so look it over before sharing
+it.
+
+### Reading anyway
+
+```sh
+sudo spaces attach --degraded            # degraded spaces, read-only
+sudo spaces attach --force               # degraded and suspect spaces, read-only
+sudo mount -t ReFS -o force /dev/mapper/ss-<pool>-<space>-p2 /mnt
+```
+
+A space attached so is read-only, and udev hides its devices from
+udisks2, so that no desktop mounts them by itself. `spaces export`,
+`serve-ublk`, `serve-nbd` and `serve-fuse` take the same flags.
+
+### Pools with missing disks
+
+With a disk of its pool missing a space is degraded. `spaces info
+<disks...>` shows which disk is missing and whether each space is degraded
+(still complete) or failed (data lost with the disks at hand). If the
+redundancy of every space still covers the loss (mirror: at least one copy
+of every slab; single parity: at most one missing disk; dual parity: at
+most two), `--degraded` attaches it, read-only. Reads that need a missing
+disk fail with an I/O error instead of returning wrong data. Copies that
+missed writes while their disk was away are never used.
 
 If no more than half of the copies of the pool database are at hand, the
 pool lacks its quorum, as Windows counts it (it takes such a pool
 read-only and detaches its spaces): the disks at hand may all be disks
 that dropped out earlier, and their metadata would describe an old state
-of the pool. Its spaces are suspect, and only `--force` attaches them,
-read-only; use it only when you know these disks were the last ones
-written.
+of the pool. Its spaces are suspect; use `--force` only when you know
+these disks were the last ones written.
 
-## After a crash or power loss
+### After a crash or power loss
 
 Windows records which mirror extent runs (dirty region tracking) and which
 parity stripes (parity journal) had writes in flight. For such stripes whose parity does not match the data, it is not
-known which side Windows would keep, so reads of them fail by default and
-`spaces info` reports:
+known which side Windows would keep, so reads of them fail by default,
+`spaces info` reports
 
 ```
 parity journal: 1 extent run(s) not cleanly shut down; mismatching stripes are refused
 ```
 
-Options:
+and the space is suspect when the check finds them (or when the copies of
+the write-back cache disagree, which a crash leaves too). Options:
 
 * Attach the pool to Windows 11 once; it repairs the stripes. Then read it on
   Linux again.
@@ -403,7 +524,7 @@ Options:
   written at the crash may differ from what Windows would show:
 
   ```sh
-  sudo spaces --unclean-parity data attach
+  sudo spaces --unclean-parity data attach --force
   ```
 
 Mirror spaces are handled differently: Windows lists the extent runs
@@ -419,26 +540,16 @@ disagree about is treated the same way. `--unclean-parity data` reads the
 highest mirror copy and the newest cache and journal slots. Simple spaces
 need nothing special after a crash.
 
-## Copying a space out
+### Volumes Windows did not dismount
 
-```sh
-spaces export /dev/sdb /dev/sdc --space Data --output data.img
-sudo losetup -r -P -b <sector size> -f --show data.img
-```
+A ReFS volume whose log holds changes its checkpoint lacks (the disk was
+pulled or the computer turned off while Windows had it; Windows' fast
+startup leaves volumes so) is suspect: what `refs` reads is the older
+state. Start Windows and shut it down fully (`shutdown /s /t 0`, or with
+fast startup turned off), and Windows writes a checkpoint that covers the
+log; or read the older state anyway with `-o force`.
 
-`spaces info` prints the sector size; 4 KiB spaces need `-b 4096`, or the
-partition table will not be found.
-
-## Checking a pool
-
-`spaces check` checks the spaces of every pool found (or of the pool whose
-devices are given: `spaces check DEVICES...`) the way `spaces attach` does
-before it reads them, and prints a report per space: every check with its
-status and evidence, and the verdict of the space (healthy, degraded,
-suspect or failed). `--json` gives the same for programs, `--deep` adds the
-checks that read whole spaces, and `--bundle FILE.tar.gz` packs the reports
-and the pool's metadata (no file data) for a bug report. It exits with 1
-unless every space is healthy.
+### Other diagnostics
 
 `spaces info <disks...>` prints the pool, its disks and every space with its
 state:
@@ -459,6 +570,16 @@ parity journal and write-back cache of each space. `spaces diff --old
 DEVICES... --new DEVICES...` lists what changed between two states of a
 pool (for example copies of the disks before and after Windows used it),
 which helps with bug reports.
+
+## Copying a space out
+
+```sh
+spaces export /dev/sdb /dev/sdc --space Data --output data.img
+sudo losetup -r -P -b <sector size> -f --show data.img
+```
+
+`spaces info` prints the sector size; 4 KiB spaces need `-b 4096`, or the
+partition table will not be found.
 
 ## Reading ReFS volumes
 
@@ -668,6 +789,17 @@ overflow checks, and its parsers are fuzzed (`docs/security.md`).
 
 ## Troubleshooting
 
+* A pool is not attached at boot, or `spaces attach` says `not attached`:
+  the space is not healthy. `spaces status` lists it with its verdict,
+  `journalctl -u storage-spaces-attach` has a line for each failing check,
+  and `spaces check` (or `/run/storage-spaces/reports/<space GUID>.txt`)
+  the whole report with what to do. `--degraded` or `--force` read it
+  anyway, read-only; see "Health checks and forced attach".
+* udisks2 says `Unknown error when mounting` a ReFS volume: `mount.ReFS`
+  refused it, and udisks2 does not pass the reason on;
+  `journalctl -u udisks2 -n 20` shows it (for example `SUSPECT:
+  fs.refs.log: ...` for a volume Windows did not dismount) and where the
+  report is. `mount -t ReFS -o force` mounts it read-only.
 * `no Storage Spaces pool members found`: the disks are not visible
   (`lsblk`), or they are not pool members (Windows 11 pools only).
 * `device-mapper device ... already exists`: an interrupted run left a device

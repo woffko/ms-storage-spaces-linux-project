@@ -66,9 +66,12 @@ sudo spaces detach
 ```
 
 Each space appears as `/dev/mapper/ss-<pool>-<space>`, with one
-`-p<N>` device per partition of the space. Pools with missing disks are
-attached only with `--degraded`; `spaces info <disks...>` shows the pool, its
-disks and whether each space is healthy, degraded or failed.
+`-p<N>` device per partition of the space. Every space is checked before
+it is attached, and only healthy ones are attached without being asked:
+`spaces check` prints the report, with the evidence of each check; spaces
+that are degraded (a disk missing) are attached with `--degraded`, suspect
+ones with `--force`, read-only either way. `spaces info <disks...>` shows
+the pool, its disks and the verdict of each space.
 
 Packages: `contrib/deb/build-deb.sh` builds a Debian/Ubuntu package,
 `contrib/arch/PKGBUILD` an Arch Linux one, and the
