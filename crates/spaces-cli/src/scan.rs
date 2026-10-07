@@ -26,13 +26,18 @@ fn skipped(name: &str) -> bool {
         .any(|p| name.starts_with(p))
 }
 
-/// Reads the disk header of a device, whole disk or partition.
-pub fn probe(path: &Path) -> Option<Candidate> {
-    let file = File::open(path).ok()?;
+/// Reads the disk header of a device, whole disk or partition; an error
+/// if the device cannot be opened.
+pub fn probe(path: &Path) -> std::io::Result<Option<Candidate>> {
+    let file = File::open(path)?;
+    Ok(read_header(path, &file))
+}
+
+fn read_header(path: &Path, file: &File) -> Option<Candidate> {
     if file.size().ok()? == 0 {
         return None;
     }
-    let location = find_spaces_partition(&file).ok()??;
+    let location = find_spaces_partition(file).ok()??;
     let mut buf = vec![0u8; DiskHeader::SIZE];
     file.read_exact_at(&mut buf, location.offset).ok()?;
     let header = DiskHeader::parse(&buf).ok()?;
@@ -44,18 +49,32 @@ pub fn probe(path: &Path) -> Option<Candidate> {
     })
 }
 
+/// What a scan found: the members by pool, and how many devices could not
+/// be opened for want of permission (all of them without root).
+pub struct Scan {
+    pub pools: BTreeMap<Guid, Vec<Candidate>>,
+    pub denied: usize,
+}
+
 /// Scans all block devices and groups the members by pool. When both a
 /// disk and its Storage Spaces partition are found, the partition is used.
-pub fn scan() -> BTreeMap<Guid, Vec<Candidate>> {
+pub fn scan() -> Scan {
     let mut found: Vec<Candidate> = Vec::new();
+    let mut denied = 0;
     let Ok(entries) = fs::read_dir("/sys/class/block") else {
-        return BTreeMap::new();
+        return Scan {
+            pools: BTreeMap::new(),
+            denied,
+        };
     };
     let mut names: Vec<String> = entries.filter_map(|e| e.ok()?.file_name().into_string().ok()).collect();
     names.sort();
     for name in names.into_iter().filter(|n| !skipped(n)) {
-        if let Some(c) = probe(&Path::new("/dev").join(&name)) {
-            found.push(c);
+        match probe(&Path::new("/dev").join(&name)) {
+            Ok(Some(c)) => found.push(c),
+            Ok(None) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => denied += 1,
+            Err(_) => {}
         }
     }
     let mut pools: BTreeMap<Guid, Vec<Candidate>> = BTreeMap::new();
@@ -67,5 +86,28 @@ pub fn scan() -> BTreeMap<Guid, Vec<Candidate>> {
             None => members.push(c),
         }
     }
-    pools
+    Scan { pools, denied }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A device this user may not open is an error (the scan counts them),
+    /// not "no pool member"; one without a disk header is no member.
+    #[test]
+    fn probe_tells_unreadable_from_no_member() {
+        let dir = std::env::temp_dir().join(format!("spaces-probe-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("disk.img");
+        fs::write(&path, vec![0u8; 1 << 20]).unwrap();
+        assert!(probe(&path).unwrap().is_none());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        match probe(&path) {
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied),
+            Ok(_) => eprintln!("permissions do not apply to this user (root): skipped"),
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

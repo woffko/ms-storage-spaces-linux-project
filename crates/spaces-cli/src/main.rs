@@ -1062,7 +1062,10 @@ fn serve_nbd(
 
 #[cfg(target_os = "linux")]
 fn cmd_scan() -> Result<()> {
-    let pools = scan::scan();
+    let scan::Scan { pools, denied } = scan::scan();
+    if denied > 0 {
+        eprintln!("{denied} block device(s) could not be opened (permission denied); run as root to see them all");
+    }
     if pools.is_empty() {
         println!("no Storage Spaces pool members found");
     }
@@ -1103,6 +1106,7 @@ fn cmd_attach(
     let _lock = attach::lock()?;
     let groups: Vec<Vec<PathBuf>> = if devices.is_empty() {
         scan::scan()
+            .pools
             .into_values()
             .map(|m| m.into_iter().map(|c| c.path).collect())
             .collect()
@@ -1165,7 +1169,7 @@ fn cmd_attach(
 fn cmd_detach(sel: Option<&str>) -> Result<()> {
     let _lock = attach::lock()?;
     let mut failures = 0;
-    for state in attach::State::load_all() {
+    for state in attach::State::load_all()? {
         let matches = sel.is_none_or(|s| {
             s.eq_ignore_ascii_case(&state.space_guid)
                 || state
@@ -1192,7 +1196,7 @@ fn cmd_detach(sel: Option<&str>) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn cmd_status() -> Result<()> {
-    let states = attach::State::load_all();
+    let states = attach::State::load_all()?;
     if states.is_empty() {
         println!("no spaces attached");
     }

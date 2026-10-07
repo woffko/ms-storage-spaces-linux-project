@@ -77,7 +77,7 @@ impl State {
     }
 
     fn save(&self) -> Result<()> {
-        fs::create_dir_all(STATE_DIR)?;
+        ensure_state_dir()?;
         let mut text = format!(
             "space={}\npool={}\nbackend={}\n",
             self.space_guid, self.pool_guid, self.backend
@@ -99,6 +99,7 @@ impl State {
         }
         let tmp = Self::path(&self.space_guid).with_extension("tmp");
         fs::write(&tmp, text)?;
+        fs::set_permissions(&tmp, std::os::unix::fs::PermissionsExt::from_mode(0o644))?;
         fs::rename(tmp, Self::path(&self.space_guid))?;
         Ok(())
     }
@@ -125,19 +126,53 @@ impl State {
         s
     }
 
-    pub fn load_all() -> Vec<State> {
-        let Ok(entries) = fs::read_dir(STATE_DIR) else {
-            return Vec::new();
-        };
-        let mut states: Vec<State> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|x| x == "state"))
-            .filter_map(|e| fs::read_to_string(e.path()).ok())
-            .map(|t| State::parse(&t))
-            .collect();
-        states.sort_by(|a, b| a.dm.first().cmp(&b.dm.first()));
-        states
+    /// The attached spaces. A state directory this user may not read is an
+    /// error, not "none attached".
+    pub fn load_all() -> Result<Vec<State>> {
+        load_states(Path::new(STATE_DIR))
     }
+}
+
+fn load_states(dir: &Path) -> Result<Vec<State>> {
+    let denied = |e: &std::io::Error| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            " (run as root)"
+        } else {
+            ""
+        }
+    };
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => bail!("cannot read {}: {e}{}", dir.display(), denied(&e)),
+    };
+    let mut states = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().is_some_and(|x| x == "state") {
+            match fs::read_to_string(&path) {
+                Ok(text) => states.push(State::parse(&text)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => bail!("cannot read {}: {e}{}", path.display(), denied(&e)),
+            }
+        }
+    }
+    states.sort_by(|a, b| a.dm.first().cmp(&b.dm.first()));
+    Ok(states)
+}
+
+/// Creates the state directory, readable by everyone (`spaces status`
+/// works without root) whatever the umask (the attach unit runs with 0077),
+/// and makes an existing one so. What it holds is not secret: which spaces
+/// are attached and how; the NBD sockets in it are 0600 themselves.
+fn ensure_state_dir() -> Result<()> {
+    ensure_readable_dir(Path::new(STATE_DIR)).with_context(|| format!("cannot make {STATE_DIR}"))
+}
+
+fn ensure_readable_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    fs::DirBuilder::new().recursive(true).mode(0o755).create(dir)?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o755))
 }
 
 /// Device-mapper name for a space: `ss-<pool>-<space>` with unsafe characters replaced.
@@ -384,7 +419,7 @@ const SERVER_PRIVATE_VIEW: &[&str] = &[
 ];
 
 fn start_server(unit: &str, kind: &str, paths: &[PathBuf], space: &str, extra: &[&str]) -> Result<String> {
-    fs::create_dir_all(STATE_DIR)?;
+    ensure_state_dir()?;
     let ready = Path::new(STATE_DIR).join(format!("{unit}.ready"));
     let _ = fs::remove_file(&ready);
     let exe = std::env::current_exe()?;
@@ -453,7 +488,7 @@ fn free_nbd() -> Result<String> {
 
 /// Serializes attach and detach runs (udev can start one while another runs).
 pub fn lock() -> Result<File> {
-    fs::create_dir_all(STATE_DIR)?;
+    ensure_state_dir()?;
     let file = File::create(Path::new(STATE_DIR).join("lock"))?;
     file.lock()?;
     Ok(file)
@@ -627,5 +662,63 @@ mod hardening_tests {
                 .iter()
                 .any(|p| p.starts_with("Protect") && p.contains("System"))
         );
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("spaces-state-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Whether this process reads what its permissions forbid (root).
+    fn overrides_permissions(dir: &Path) -> bool {
+        let probe = dir.join("probe");
+        fs::write(&probe, b"x").unwrap();
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o000)).unwrap();
+        let read = fs::read(&probe).is_ok();
+        fs::remove_file(&probe).unwrap();
+        read
+    }
+
+    /// The state directory ends up readable by everyone, also when it was
+    /// made 0700 before (the attach unit's umask in 1.1.0).
+    #[test]
+    fn the_state_directory_is_readable() {
+        let dir = scratch("mode");
+        ensure_readable_dir(&dir).unwrap();
+        assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o755);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        ensure_readable_dir(&dir).unwrap();
+        assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o755);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// No state directory: nothing attached. One this user may not read:
+    /// an error that says so, not "none attached".
+    #[test]
+    fn unreadable_state_is_an_error() {
+        let dir = scratch("denied");
+        assert!(load_states(&dir).unwrap().is_empty());
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.state"), "space=a\ndm=ss-p-a\n").unwrap();
+        assert_eq!(load_states(&dir).unwrap()[0].dm, ["ss-p-a"]);
+        if overrides_permissions(&dir) {
+            eprintln!("permissions do not apply to this user (root): skipped");
+        } else {
+            fs::set_permissions(dir.join("a.state"), fs::Permissions::from_mode(0o000)).unwrap();
+            let err = load_states(&dir).unwrap_err().to_string();
+            assert!(err.contains("a.state") && err.contains("run as root"), "{err}");
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o300)).unwrap();
+            let err = load_states(&dir).unwrap_err().to_string();
+            assert!(err.contains("cannot read") && err.contains("run as root"), "{err}");
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

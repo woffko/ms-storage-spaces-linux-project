@@ -43,6 +43,13 @@
 * Removing the package detached every attached space, also those another
   installation's `spaces` serves (`contrib/install.sh`'s); it detaches
   only those its own `spaces` serves now.
+* Without root, `spaces status` said "no spaces attached" when spaces were
+  attached (the attach unit's umask made `/run/storage-spaces` 0700), and
+  `spaces scan` said "no Storage Spaces pool members found" when it could
+  not open the disks. The state directory is readable by everyone now
+  (0755, its files 0644; the NBD sockets stay 0600), an unreadable one is
+  an error that says to run as root, and `scan` says how many devices it
+  could not open.
 
 ## 1.1.0 (2026-10-05)
 

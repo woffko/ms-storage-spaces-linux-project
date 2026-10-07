@@ -86,12 +86,16 @@ are detached and attached again.
 ```sh
 sudo spaces scan                     # pools and their members
 sudo spaces attach                   # every complete pool
-sudo spaces status
+spaces status                        # what is attached (no root needed)
 lsblk /dev/mapper/ss-*
 sudo mount -o ro /dev/mapper/ss-<pool>-<space>-p2 /mnt
 sudo umount /mnt
 sudo spaces detach                   # or: spaces detach <space>
 ```
+
+`spaces scan` needs root to open the disks; without it, it says how many
+it could not open. `spaces status` works for every user (the state in
+`/run/storage-spaces` is readable).
 
 Device names: `ss-<pool>-<space>` for the whole virtual disk and
 `ss-<pool>-<space>-p<N>` for partition `N` (characters other than letters,

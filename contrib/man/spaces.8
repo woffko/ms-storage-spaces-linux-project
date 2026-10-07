@@ -112,7 +112,8 @@ new spaces in pools of version 29, pools created by other Windows releases.
 .TP
 .B scan
 Lists the Storage Spaces pool members found among the block devices, grouped
-by pool, with the spaces of each pool.
+by pool, with the spaces of each pool (as root; without, it says how many
+devices it could not open).
 .TP
 .B attach
 Attaches the spaces of every complete pool (or of the selected pool/space).
@@ -146,7 +147,8 @@ Removes the devices of the given space (name, GUID or device-mapper name) or
 of all attached spaces, and stops their serving processes.
 .TP
 .B status
-Lists attached spaces, their backends and partition devices.
+Lists attached spaces, their backends and partition devices (also for users
+other than root).
 .TP
 .B info\fR, \fBextents\fR, \fBexport\fR, \fBdm\-table
 Inspect a pool given by its member devices or images: pool, disks (usage,
