@@ -1172,10 +1172,7 @@ fn cmd_detach(sel: Option<&str>) -> Result<()> {
     for state in attach::State::load_all()? {
         let matches = sel.is_none_or(|s| {
             s.eq_ignore_ascii_case(&state.space_guid)
-                || state
-                    .dm
-                    .first()
-                    .is_some_and(|d| d == s || d.ends_with(&format!("-{s}")))
+                || state.dm.first().is_some_and(|d| d == s || attach::names_space(d, s))
         });
         if !matches {
             continue;

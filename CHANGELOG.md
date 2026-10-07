@@ -50,6 +50,12 @@
   (0755, its files 0644; the NBD sockets stay 0600), an unreadable one is
   an error that says to run as root, and `scan` says how many devices it
   could not open.
+* Two pools of the same name (Windows calls every new pool "Storage
+  pool") with spaces of the same name could not be attached together:
+  the second failed with "device-mapper device ... already exists
+  (left over from an interrupted run?)". Its devices get the first eight
+  hex digits of the pool's GUID after the name now
+  (`ss-<pool>-<space>-<guid>`); `spaces detach <space>` finds them too.
 
 ## 1.1.0 (2026-10-05)
 

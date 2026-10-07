@@ -99,7 +99,11 @@ it could not open. `spaces status` works for every user (the state in
 
 Device names: `ss-<pool>-<space>` for the whole virtual disk and
 `ss-<pool>-<space>-p<N>` for partition `N` (characters other than letters,
-digits, `_ . +` become `_`). Partition devices are created from the space's
+digits, `_ . +` become `_`). Pools can share a name (Windows calls every new
+pool "Storage pool"): when a space of another pool has the name already,
+the first eight hex digits of the pool's GUID follow,
+`ss-<pool>-<space>-<guid>` (and `-p<N>` after that); `spaces detach
+<space>` finds both. Partition devices are created from the space's
 own GPT or MBR, so they exist even when Windows left out the protective MBR.
 
 For `/etc/fstab`, use the partition device and `nofail`:

@@ -120,7 +120,9 @@ Attaches the spaces of every complete pool (or of the selected pool/space).
 Each space appears as
 .BI /dev/mapper/ss\- pool \- space
 and every partition inside it as
-.BI /dev/mapper/ss\- pool \- space \-p N\fR.
+.BI /dev/mapper/ss\- pool \- space \-p N\fR;
+when a space of another pool of the same name has that name already, the
+first eight hex digits of the pool's GUID follow the space's name.
 Pools with missing disks are skipped unless
 .B \-\-degraded
 is given; pools with fewer than half of their disks are skipped unless

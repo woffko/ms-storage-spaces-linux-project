@@ -175,6 +175,34 @@ fn ensure_readable_dir(dir: &Path) -> std::io::Result<()> {
     fs::set_permissions(dir, fs::Permissions::from_mode(0o755))
 }
 
+/// The device-mapper name a space of the pool `pool_guid` gets: `base`
+/// (its `dm_name`), unless an attached space of another pool has it
+/// (pools of the same name, as Windows calls every pool "Storage pool" by
+/// default); then the first eight hex digits of this pool's GUID follow.
+/// A device of that name without an attached space's state stays an error
+/// (left over from an interrupted run).
+fn unique_dm_name(base: String, pool_guid: &str, attached: &[State]) -> String {
+    let taken = attached
+        .iter()
+        .any(|s| s.dm.first() == Some(&base) && !s.pool_guid.eq_ignore_ascii_case(pool_guid));
+    if !taken {
+        return base;
+    }
+    let short: String = pool_guid.chars().filter(char::is_ascii_hexdigit).take(8).collect();
+    format!("{base}-{short}")
+}
+
+/// Whether the device-mapper name `dm` is that of a space named `space`:
+/// `ss-<pool>-<space>`, or with a pool GUID's eight hex digits after it.
+pub fn names_space(dm: &str, space: &str) -> bool {
+    let suffix = format!("-{space}");
+    let unsuffixed = match dm.rsplit_once('-') {
+        Some((head, tail)) if tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_hexdigit()) => head,
+        _ => dm,
+    };
+    dm.ends_with(&suffix) || unsuffixed.ends_with(&suffix)
+}
+
 /// Device-mapper name for a space: `ss-<pool>-<space>` with unsafe characters replaced.
 pub fn dm_name(pool: &str, space: &str) -> String {
     let clean = |s: &str| -> String {
@@ -515,7 +543,11 @@ pub fn attach_space(
     let reader = crate::open_space(pool, space.id())?;
     let sector = pool.logical_sector_size;
     let backend = choose(requested, &reader, paths, sector, rw)?;
-    let name = dm_name(&pool.name, space.name());
+    let name = unique_dm_name(
+        dm_name(&pool.name, space.name()),
+        &pool.guid.to_string(),
+        &State::load_all()?,
+    );
     let unit = format!("storage-spaces-{guid}");
     let mut state = State {
         space_guid: guid.clone(),
@@ -720,5 +752,53 @@ mod state_tests {
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         }
         fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    fn attached(dm: &str, pool: &str) -> State {
+        State {
+            pool_guid: pool.into(),
+            dm: vec![dm.into(), format!("{dm}-p1")],
+            ..Default::default()
+        }
+    }
+
+    /// Two pools of the same name with a space of the same name: the second
+    /// gets the first eight hex digits of its pool's GUID after the name;
+    /// the same pool keeps its name, and other names are left alone.
+    #[test]
+    fn spaces_of_pools_of_the_same_name_get_apart() {
+        let base = dm_name("Storage pool", "data");
+        assert_eq!(base, "ss-Storage_pool-data");
+        let first = "249b3eb3-30f0-4b3c-8261-cd3732f7f7ae";
+        let other = "0735434C-B460-4A90-A3BA-B04FCE198982";
+        assert_eq!(
+            unique_dm_name(base.clone(), other, &[attached(&base, first)]),
+            "ss-Storage_pool-data-0735434C"
+        );
+        assert_eq!(
+            unique_dm_name(base.clone(), &first.to_uppercase(), &[attached(&base, first)]),
+            base
+        );
+        assert_eq!(unique_dm_name(base.clone(), other, &[]), base);
+        assert_eq!(
+            unique_dm_name("ss-Storage_pool-games".into(), other, &[attached(&base, first)]),
+            "ss-Storage_pool-games"
+        );
+    }
+
+    /// `spaces detach data` finds the spaces named data, with or without
+    /// the pool GUID's digits after the name.
+    #[test]
+    fn a_space_name_finds_its_devices() {
+        assert!(names_space("ss-Storage_pool-data", "data"));
+        assert!(names_space("ss-Storage_pool-data-0735434c", "data"));
+        assert!(!names_space("ss-Storage_pool-metadata", "data"));
+        assert!(!names_space("ss-Storage_pool-data2-0735434c", "data"));
+        assert!(names_space("ss-p-backup-2024abcd", "backup-2024abcd"));
     }
 }
