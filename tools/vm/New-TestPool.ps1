@@ -31,6 +31,10 @@ Layout variations:
       partition holding real files (System32 DLLs, -NtfsFilesMB in total) and
       random files of awkward sizes; the manifest lists every file with its
       SHA-256 ("files")
+  -Hashes       before it finishes, the main space's disk is taken offline (its
+      volumes dismount, nothing writes to it any more) and hashes.txt records
+      what Windows reads from the space: one MD5 per 128 KiB, as
+      Get-SpaceHashes.ps1 writes it (compare with tools/space-hashes.py)
 #>
 param(
     [Parameter(Mandatory)] [string] $Name,
@@ -48,8 +52,9 @@ param(
     [int] $WriteCacheMB = -1,
     # Steady write rate for the pattern (MB/s, 0 = unthrottled).
     [int] $ThrottleMBps = 15,
-    # Tiered spaces: the first SsdDisks disks get media type SSD, the rest HDD;
-    # Tiers lists "media,resiliency,sizeMB[,columns]" separated by ';'.
+    # The first SsdDisks disks get media type SSD, the rest HDD (always with
+    # tiers; Windows offers a write-back cache on one disk only on an SSD).
+    # Tiered spaces: Tiers lists "media,resiliency,sizeMB[,columns]" separated by ';'.
     [int] $SsdDisks = 0,
     [string] $Tiers = '',
     [switch] $NoPattern,
@@ -62,6 +67,7 @@ param(
     [int] $NtfsFilesMB = 512,
     [ValidateSet('Dismount', 'Disconnect', 'ReadOnly', 'Keep')] [string] $Finish = 'Dismount',
     [int] $IdleSeconds = 0,
+    [switch] $Hashes,
     [string] $Root = 'C:\sstest'
 )
 $ErrorActionPreference = 'Stop'
@@ -194,13 +200,15 @@ $vdParams = @{
     FriendlyName            = $Name
     ProvisioningType        = $Provisioning
 }
-if ($Tiers) {
+if ($Tiers -or $SsdDisks -gt 0) {
     $i = 0
     foreach ($pd in $physical) {
         $media = if ($i -lt $SsdDisks) { 'SSD' } else { 'HDD' }
         Get-PhysicalDisk -UniqueId $pd.UniqueId | Set-PhysicalDisk -MediaType $media
         $i++
     }
+}
+if ($Tiers) {
     $tierObjects = @(); $tierSizes = @()
     foreach ($spec in $Tiers.Split(';')) {
         $f = $spec.Split(',')
@@ -380,6 +388,33 @@ $manifest = [ordered]@{
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $dir 'manifest.json')
 
 if ($IdleSeconds -gt 0) { Start-Sleep -Seconds $IdleSeconds }
+if ($Hashes) {
+    $d = Get-VirtualDisk -FriendlyName $Name | Get-Disk
+    if (-not $d.IsOffline) { $d | Set-Disk -IsOffline $true }
+    Start-Sleep -Seconds 2
+    $size = [int64]$d.Size
+    $chunk = 128KB
+    $md5 = [System.Security.Cryptography.MD5]::Create()
+    $buf = New-Object byte[] (4MB)
+    $lines = New-Object System.Collections.Generic.List[string]
+    $fs = New-Object System.IO.FileStream("\\.\PhysicalDrive$($d.Number)", [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite, 4096)
+    try {
+        for ($pos = [int64]0; $pos -lt $size; $pos += $buf.Length) {
+            $n = [int][Math]::Min([int64]$buf.Length, $size - $pos)
+            $got = 0
+            while ($got -lt $n) {
+                $r = $fs.Read($buf, $got, $n - $got)
+                if ($r -le 0) { throw "short read at $($pos + $got)" }
+                $got += $r
+            }
+            for ($c = 0; $c -lt $n; $c += $chunk) {
+                $h = $md5.ComputeHash($buf, $c, [Math]::Min($chunk, $n - $c))
+                $lines.Add("$(($pos + $c) / $chunk) $(-join ($h | ForEach-Object { $_.ToString('x2') }))")
+            }
+        }
+    } finally { $fs.Dispose() }
+    [System.IO.File]::WriteAllLines((Join-Path $dir 'hashes.txt'), $lines)
+}
 switch ($Finish) {
     'Disconnect' {
         # Only spaces that are attached manually can be disconnected.

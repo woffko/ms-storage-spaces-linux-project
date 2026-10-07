@@ -35,6 +35,12 @@
   `~/Linux_Storage_Spaces`. Use it for ublk, NBD, dm and mount tests. The corpus lives on the
   dedicated 128 GB disk `/dev/sdb1` mounted at `/srv/spaces` (`~/Linux_Storage_Spaces/testdata` links there);
   the system disk has only ~17 GB free.
+- Ubuntu 26.10 (development) VM `claude@192.168.189.143` (kernel 7.3, systemd 261, AppArmor with Ubuntu's
+  `fusermount3` profile, udisks2 mounting under `/run/media/<user>`; NOPASSWD sudo for testing only), used by
+  this project alone: `LINUX_VM_HOST=claude@192.168.189.143 tools/linux-vm.sh ...`. It has what the 22.04 VM
+  lacks (systemd >= 254 makes `PrivateNetwork` imply `PrivateMounts`; the AppArmor profile confines
+  `fusermount3`), so test `mount.ReFS`, udisks2 and fuseblk mounts on both. Release 1.1.0 is installed;
+  `~/sstest` holds its package and the `r314small` ReFS sample; ZFS root with ~180 GB free.
 
 ## Long-running commands with Longrun MCP
 

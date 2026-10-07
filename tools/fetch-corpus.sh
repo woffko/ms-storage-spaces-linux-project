@@ -25,6 +25,10 @@ for name in "$@"; do
   out=testdata/$kind/.$name.partial
   mkdir -p "$out"
   tools/vm.sh -get "C:/sstest/$name/manifest.json" "$out/manifest.json"
+  # What Windows read from the space (New-TestPool.ps1 -Hashes), if recorded.
+  if tools/vm.sh "if (Test-Path C:\\sstest\\$name\\hashes.txt) { 'hashes' }" | grep -q hashes; then
+    tools/vm.sh -get "C:/sstest/$name/hashes.txt" "$out/hashes.txt"
+  fi
   n=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1],encoding="utf-8-sig"))["disks"]))' "$out/manifest.json")
   for ((i = 0; i < n; i++)); do
     tools/vm.sh -get "C:/sstest/$name/${src_sub}disk$i.vhdx" "$out/disk$i.vhdx"

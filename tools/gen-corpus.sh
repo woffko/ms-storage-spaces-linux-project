@@ -119,5 +119,9 @@ drtdisc    -DiskCount 2 -Resiliency Mirror -DataCopies 2 -Columns 1 -SizeMB 1024
 drtro      -DiskCount 2 -Resiliency Mirror -DataCopies 2 -Columns 1 -SizeMB 1024 -PatternMB 256 -Finish ReadOnly
 drtnowrite -DiskCount 2 -Resiliency Mirror -DataCopies 2 -Columns 1 -SizeMB 1024 -NoPattern
 drtkeep    -DiskCount 2 -Resiliency Mirror -DataCopies 2 -Columns 1 -SizeMB 1024 -PatternMB 256 -Finish Keep
+# Batch 10: a space with 4 KiB sectors whose write-back cache keeps partly
+# valid chunks (its run words count 4 KiB sectors); the backup GPT is in the
+# cache only. -Hashes records what Windows reads (tools/space-hashes.py).
+wc4k       -DiskCount 1 -SsdDisks 1 -Resiliency Simple -Columns 1 -Provisioning Thin -SizeMB 4096 -LogicalSectorSize 4096 -WriteCacheMB 1024 -Ntfs -NtfsFilesMB 256 -Hashes
 LIST
 exit $status
