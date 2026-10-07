@@ -1,6 +1,14 @@
 # Changelog
 
-## 1.1.1 (unreleased)
+## 1.1.1 (2026-10-07)
+
+Fixes from a user's report of 1.1.0 on Ubuntu 26.10 (systemd 261, AppArmor
+confining fusermount3, three pools of SSDs and hard disks whose spaces have
+4 KiB sectors): reading such spaces when Windows left data in their
+write-back cache, mounting ReFS volumes with `mount -t ReFS` and udisks2 on
+current distributions, and attaching right after installing. Each fix was
+checked on Ubuntu 26.10 and 22.04 (`tools/mount-vm-check.sh`,
+`tools/package-vm-check.sh`).
 
 ### Fixes
 

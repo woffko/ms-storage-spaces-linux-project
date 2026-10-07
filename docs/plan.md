@@ -586,6 +586,16 @@ rows of thin spaces not allocated yet (M7).
   static `spaces` and `refs` (musl), the `.deb` with `refs` and
   `mount.ReFS`, `SHA256SUMS`. The 24 h fuzz run of every target was not
   repeated (the ReFS targets ran 4 hours after each change).
+* Release `v1.1.1` (2026-10-07): fixes from a user's report of 1.1.0. The
+  write-back cache's runs count logical sectors (1.1.0 read stale data on
+  spaces with 4 KiB sectors and a cache; corpus pool `wc4k` with Windows'
+  hashes, a GPT corpus test); `mount.ReFS` keeps the host's mounts on
+  systemd 254 and later and waits for refs's status instead of 10 s; root
+  mounts block devices itself (blksize, no fusermount3, which AppArmor
+  confines on Ubuntu; an unmount watcher); attach right after installing;
+  `status` and `scan` without root; device names of pools of the same
+  name. Checked on a second Linux VM (Ubuntu 26.10, systemd 261, AppArmor)
+  next to the 22.04 one.
 
 ### Track B (from 2026-10-02)
 
