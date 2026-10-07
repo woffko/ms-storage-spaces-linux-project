@@ -45,8 +45,9 @@ disks are never written, unless a space is attached read-write
 * To use what is inside a space: a file system driver (`ntfs3`, `ntfs-3g`,
   ...); ReFS volumes need none, `refs` reads them.
 * To build: Rust 1.89 or later and `libclang` (the ublk bindings; on
-  Debian/Ubuntu `libclang-dev`). `--no-default-features` builds without
-  the ublk and FUSE backends and without `libclang`.
+  Debian/Ubuntu `libclang-dev`, or just the library, `libclang1-21` with
+  `LIBCLANG_PATH=/usr/lib/llvm-21/lib`). `--no-default-features` builds
+  without the ublk and FUSE backends and without `libclang`.
 
 ### Which way
 

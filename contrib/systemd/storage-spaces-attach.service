@@ -1,6 +1,6 @@
 [Unit]
 Description=Attach Microsoft Storage Spaces pools read-only
-Documentation=https://github.com/w0wkin/Linux_Storage_Spaces
+Documentation=man:spaces(8) https://github.com/woffko/ms-storage-spaces-linux-project
 DefaultDependencies=no
 After=systemd-udevd.service systemd-modules-load.service
 Before=local-fs-pre.target

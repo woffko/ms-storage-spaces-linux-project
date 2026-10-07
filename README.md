@@ -53,7 +53,7 @@ against pools created by Windows.
 ## Quick start
 
 ```sh
-cargo build --release              # Rust 1.89+, libclang-dev
+cargo build --release              # Rust 1.89+, libclang-dev (or LIBCLANG_PATH, see the user guide)
 sudo contrib/install.sh            # spaces, refs, mount.ReFS, man pages, udev rule, systemd unit
                                    # (contrib/uninstall.sh removes it again)
 

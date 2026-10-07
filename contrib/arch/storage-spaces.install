@@ -3,7 +3,11 @@ post_install() {
   systemctl enable storage-spaces-attach.service
   udevadm control --reload
   modprobe ublk_drv 2>/dev/null || true
-  echo "pools are attached at boot and when their disks appear"
+  modprobe nbd 2>/dev/null || true
+  # The udev rule acts on disks that appear later: attach the pools whose
+  # disks are here now.
+  systemctl start --no-block storage-spaces-attach.service || true
+  echo "pools whose disks are here are being attached, the others at boot and when their disks appear"
 }
 
 post_upgrade() {
@@ -12,6 +16,16 @@ post_upgrade() {
 }
 
 pre_remove() {
-  spaces detach || true
+  # Detach what this package's spaces serves (and spaces without a server,
+  # device-mapper only); the spaces another installation's spaces serves
+  # (contrib/install.sh's in /usr/local) stay attached.
+  for f in /run/storage-spaces/*.state; do
+    [ -e "$f" ] || continue
+    unit=$(sed -n 's/^unit=//p' "$f")
+    space=$(sed -n 's/^space=//p' "$f")
+    if [ -z "$unit" ] || systemctl show -p ExecStart --value "$unit" 2>/dev/null | grep -q 'path=/usr/bin/spaces '; then
+      /usr/bin/spaces detach "$space" || true
+    fi
+  done
   systemctl disable storage-spaces-attach.service
 }

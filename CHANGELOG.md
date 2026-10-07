@@ -56,6 +56,13 @@
   (left over from an interrupted run?)". Its devices get the first eight
   hex digits of the pool's GUID after the name now
   (`ss-<pool>-<space>-<guid>`); `spaces detach <space>` finds them too.
+* The Arch package attaches present pools after installing, loads `nbd`,
+  and on removal detaches only what its own `spaces` serves, as the
+  Debian package now does.
+* The attach unit's `Documentation=` pointed to an old address of the
+  project; it names `man:spaces(8)` and this repository now. The user
+  guide notes that building needs only the libclang library with
+  `LIBCLANG_PATH`, not `libclang-dev`.
 
 ## 1.1.0 (2026-10-05)
 
