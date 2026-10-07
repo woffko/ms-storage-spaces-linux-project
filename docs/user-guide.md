@@ -68,8 +68,12 @@ would do) removes it again; detach spaces first (`spaces detach`).
 
 The udev rule starts `storage-spaces-attach.service` whenever a pool member
 appears, so pools are attached at boot and when their disks are plugged in
-(read-only; see Hardening below). To attach by hand only, remove
-`/etc/udev/rules.d/69-storage-spaces.rules`.
+(read-only; see Hardening below); installing starts it once too, for the
+pools whose disks are there already. To attach by hand only, remove
+`/etc/udev/rules.d/69-storage-spaces.rules`. Removing the package
+detaches the spaces its `spaces` serves; the spaces another installation's
+`spaces` serves (such as `contrib/install.sh`'s in `/usr/local`) stay
+attached.
 
 Check the installation: `spaces --version`, `refs --version`,
 `systemctl status storage-spaces-attach.service`, and `spaces scan` with a

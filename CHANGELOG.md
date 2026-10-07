@@ -36,6 +36,13 @@
   mount itself (mount(2), with the /dev/fuse connection handed to the FUSE
   session) and no longer runs `fusermount3`; the mount goes away when
   `refs` ends, also when it is killed (a watcher process unmounts it).
+* Installing the package or running `contrib/install.sh` left the pools
+  whose disks were present unattached until a restart: the udev rule only
+  acts on disks that appear. Both start the attach once now, and the
+  package loads `nbd` as well.
+* Removing the package detached every attached space, also those another
+  installation's `spaces` serves (`contrib/install.sh`'s); it detaches
+  only those its own `spaces` serves now.
 
 ## 1.1.0 (2026-10-05)
 

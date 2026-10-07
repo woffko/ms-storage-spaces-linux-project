@@ -24,4 +24,8 @@ modprobe nbd 2>/dev/null || true
 systemctl daemon-reload
 systemctl enable storage-spaces-attach.service
 udevadm control --reload
-echo "installed; pools are attached at boot and when their disks appear"
+# The udev rule acts on disks that appear later: attach the pools whose
+# disks are here now.
+systemctl start --no-block storage-spaces-attach.service
+echo "installed; pools whose disks are here are being attached (journalctl -u storage-spaces-attach),"
+echo "the others at boot and when their disks appear"

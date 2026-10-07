@@ -59,13 +59,29 @@ if [ "$1" = configure ]; then
   systemctl enable storage-spaces-attach.service || true
   udevadm control --reload || true
   modprobe ublk_drv 2>/dev/null || true
+  modprobe nbd 2>/dev/null || true
+  # The udev rule acts on disks that appear later: attach the pools whose
+  # disks are here now.
+  if [ -d /run/systemd/system ]; then
+    systemctl start --no-block storage-spaces-attach.service || true
+  fi
 fi
 POSTINST
 cat > "$stage/DEBIAN/prerm" <<'PRERM'
 #!/bin/sh
 set -e
 if [ "$1" = remove ]; then
-  spaces detach || true
+  # Detach what this package's spaces serves (and spaces without a server,
+  # device-mapper only); the spaces another installation's spaces serves
+  # (contrib/install.sh's in /usr/local) stay attached.
+  for f in /run/storage-spaces/*.state; do
+    [ -e "$f" ] || continue
+    unit=$(sed -n 's/^unit=//p' "$f")
+    space=$(sed -n 's/^space=//p' "$f")
+    if [ -z "$unit" ] || systemctl show -p ExecStart --value "$unit" 2>/dev/null | grep -q 'path=/usr/sbin/spaces '; then
+      /usr/sbin/spaces detach "$space" || true
+    fi
+  done
   systemctl disable storage-spaces-attach.service || true
 fi
 PRERM
