@@ -15,6 +15,78 @@ use storage_spaces::{Pool, Space, SpaceReader};
 
 use crate::bundle;
 
+/// What may be done with a space of a verdict, given the flags (attach,
+/// the servers and export ask the same).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decision {
+    /// As asked (read-write with --rw): the space is healthy.
+    Attach { rw: bool },
+    /// Read-only: the flag given allows a space that is not healthy.
+    ReadOnly,
+    /// Nothing, for this reason.
+    Refuse(String),
+}
+
+/// The guard's rule: healthy spaces as asked; degraded ones read-only with
+/// `--degraded` (or `--force`), suspect ones read-only with `--force`;
+/// failed ones not at all; writing only healthy ones.
+pub fn gate(verdict: Verdict, rw: bool, degraded: bool, force: bool) -> Decision {
+    match verdict {
+        Verdict::Healthy => Decision::Attach { rw },
+        v if rw => Decision::Refuse(format!("writing needs a healthy space, and this one is {}", v.as_str())),
+        v if v.allowed(degraded, force) => Decision::ReadOnly,
+        Verdict::Failed => Decision::Refuse("a failed space is not read at all".into()),
+        v => Decision::Refuse(format!(
+            "a {} space needs {} (and is then read-only)",
+            v.as_str(),
+            v.flag().unwrap_or("--force")
+        )),
+    }
+}
+
+/// What to do about a space the gate refused: the command that reads it
+/// anyway, read-only, or where to turn.
+pub fn refusal_note(verdict: Verdict, rw: bool, command: &str) -> String {
+    match verdict.flag() {
+        _ if rw && verdict != Verdict::Failed => {
+            format!("Without --rw it is read as its verdict allows: {command}")
+        }
+        Some(flag) => format!("To read it anyway, read-only: {command} {flag}"),
+        None => "Nothing reads a failed space: spaces check --bundle FILE.tar.gz packs the reports \
+                 and the pool's metadata for a bug report."
+            .into(),
+    }
+}
+
+/// The report on space `space` of `pool` (quick checks, as attach makes).
+pub fn space_report<D: ReadAt>(pool: &Pool<D>, paths: &[PathBuf], space: &Space) -> Report {
+    reports(pool, paths, Some(&space.info.guid.to_string()), false)
+        .pop()
+        .expect("the space is a user space of the pool")
+}
+
+/// Refuses what the gate refuses for the servers and export: an error
+/// with the report's headline and the reason.
+pub fn require<D: ReadAt>(
+    pool: &Pool<D>,
+    paths: &[PathBuf],
+    space: &Space,
+    rw: bool,
+    degraded: bool,
+    force: bool,
+) -> Result<()> {
+    let report = space_report(pool, paths, space);
+    match gate(report.verdict(), rw, degraded, force) {
+        Decision::Refuse(why) => {
+            for c in report.problems() {
+                eprintln!("  {} {}: {}", c.status.as_str().to_uppercase(), c.id, c.summary);
+            }
+            anyhow::bail!("{}: {why} (spaces check tells more)", report.headline())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Device names for evidence: the paths the devices were opened by.
 pub fn names(paths: &[PathBuf]) -> Vec<String> {
     paths.iter().map(|p| p.display().to_string()).collect()
@@ -310,4 +382,31 @@ fn scanned() -> Vec<Vec<PathBuf>> {
 #[cfg(not(target_os = "linux"))]
 fn scanned() -> Vec<Vec<PathBuf>> {
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_gate_follows_the_verdict_and_the_flags() {
+        use Decision::*;
+        assert_eq!(gate(Verdict::Healthy, false, false, false), Attach { rw: false });
+        assert_eq!(gate(Verdict::Healthy, true, false, false), Attach { rw: true });
+        assert!(matches!(gate(Verdict::Degraded, false, false, false), Refuse(w) if w.contains("--degraded")));
+        assert_eq!(gate(Verdict::Degraded, false, true, false), ReadOnly);
+        assert_eq!(gate(Verdict::Degraded, false, false, true), ReadOnly);
+        assert!(matches!(gate(Verdict::Suspect, false, true, false), Refuse(w) if w.contains("--force")));
+        assert_eq!(gate(Verdict::Suspect, false, false, true), ReadOnly);
+        assert!(matches!(gate(Verdict::Failed, false, true, true), Refuse(w) if w.contains("failed")));
+        // Writing needs healthy, whatever the flags.
+        for v in [Verdict::Degraded, Verdict::Suspect, Verdict::Failed] {
+            assert!(
+                matches!(gate(v, true, true, true), Refuse(w) if w.contains("writing needs")),
+                "{v:?}"
+            );
+        }
+        assert!(refusal_note(Verdict::Suspect, false, "spaces attach").ends_with("spaces attach --force"));
+        assert!(refusal_note(Verdict::Failed, false, "spaces attach").contains("--bundle"));
+    }
 }

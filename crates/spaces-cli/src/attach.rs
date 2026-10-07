@@ -18,6 +18,11 @@
 //! or `serve-nbd --rw`, which flush when they are stopped. FUSE is
 //! read-only.
 //!
+//! Every space is checked first (`spaces check`): only healthy ones are
+//! attached as asked, others read-only with `--degraded` or `--force`, and
+//! failed ones not at all. The report goes to
+//! `/run/storage-spaces/reports/<space guid>.{txt,json}`.
+//!
 //! State lives in `/run/storage-spaces/<space guid>.state`.
 
 use std::fs::{self, File};
@@ -28,10 +33,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use storage_spaces::gpt::read_partitions;
+use storage_spaces::report::{Report, Verdict};
 use storage_spaces::segments::SegmentKind;
 use storage_spaces::{Pool, Space, SpaceReader};
 
 pub const STATE_DIR: &str = "/run/storage-spaces";
+/// Where the reports of the checks go, one per space.
+pub const REPORT_DIR: &str = "/run/storage-spaces/reports";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Backend {
@@ -69,6 +77,13 @@ pub struct State {
     pub dm: Vec<String>,
     /// Attached read-write.
     pub rw: bool,
+    /// The verdict of the checks when it was attached.
+    pub verdict: Option<String>,
+    /// Attached read-only past a verdict other than healthy (--degraded,
+    /// --force).
+    pub forced: bool,
+    /// The report of the checks.
+    pub report: Option<String>,
 }
 
 impl State {
@@ -86,6 +101,8 @@ impl State {
             ("unit", &self.unit),
             ("device", &self.device),
             ("fuse_mount", &self.fuse_mount),
+            ("verdict", &self.verdict),
+            ("report", &self.report),
         ] {
             if let Some(v) = value {
                 text += &format!("{key}={v}\n");
@@ -96,6 +113,9 @@ impl State {
         }
         if self.rw {
             text += "mode=rw\n";
+        }
+        if self.forced {
+            text += "forced=1\n";
         }
         let tmp = Self::path(&self.space_guid).with_extension("tmp");
         fs::write(&tmp, text)?;
@@ -120,6 +140,9 @@ impl State {
                 "fuse_mount" => s.fuse_mount = Some(value),
                 "dm" => s.dm.push(value),
                 "mode" => s.rw = value == "rw",
+                "verdict" => s.verdict = Some(value),
+                "forced" => s.forced = value == "1",
+                "report" => s.report = Some(value),
                 _ => {}
             }
         }
@@ -173,6 +196,61 @@ fn ensure_readable_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     fs::DirBuilder::new().recursive(true).mode(0o755).create(dir)?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o755))
+}
+
+/// Writes `report` (on one space) as `<space guid>.txt` and `.json` into
+/// the report directory, readable by everyone as the state directory is;
+/// returns the text's path.
+pub fn write_report(report: &Report) -> Result<PathBuf> {
+    write_report_in(Path::new(REPORT_DIR), report).with_context(|| format!("cannot write a report into {REPORT_DIR}"))
+}
+
+fn write_report_in(dir: &Path, report: &Report) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let guid = &report.space.as_ref().context("a report on no space")?.1;
+    ensure_readable_dir(dir)?;
+    for (ext, text) in [("txt", report.to_text()), ("json", report.to_json())] {
+        let path = dir.join(format!("{guid}.{ext}"));
+        let tmp = dir.join(format!("{guid}.{ext}.tmp"));
+        fs::write(&tmp, text)?;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644))?;
+        fs::rename(&tmp, &path)?;
+    }
+    Ok(dir.join(format!("{guid}.txt")))
+}
+
+/// Removes the report on space `guid`.
+pub fn remove_report(guid: &str) {
+    for ext in ["txt", "json"] {
+        let _ = fs::remove_file(Path::new(REPORT_DIR).join(format!("{guid}.{ext}")));
+    }
+}
+
+/// The spaces checked and not attached: each report's path and first line
+/// (the space, its verdict and why it was refused).
+pub fn refused(attached: &[State]) -> Vec<(PathBuf, String)> {
+    refused_in(Path::new(REPORT_DIR), attached)
+}
+
+fn refused_in(dir: &Path, attached: &[State]) -> Vec<(PathBuf, String)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(PathBuf, String)> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "txt"))
+        .filter(|p| {
+            let guid = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+            !attached.iter().any(|s| s.space_guid.eq_ignore_ascii_case(guid))
+        })
+        .filter_map(|p| {
+            let first = fs::read_to_string(&p).ok()?.lines().next()?.to_string();
+            Some((p, first))
+        })
+        .collect();
+    out.sort();
+    out
 }
 
 /// The device-mapper name a space of the pool `pool_guid` gets: `base`
@@ -527,7 +605,8 @@ pub fn is_attached(space: &Space) -> bool {
     State::path(&space.info.guid.to_string()).exists()
 }
 
-/// Attaches one space (read-write with `rw`). Returns the state describing
+/// Attaches one space (read-write with `rw`) that the checks gave
+/// `verdict` (their report at `report`). Returns the state describing
 /// what was created.
 pub fn attach_space(
     pool: &Pool<File>,
@@ -535,7 +614,12 @@ pub fn attach_space(
     paths: &[PathBuf],
     requested: Backend,
     rw: bool,
+    verdict: Verdict,
+    report: Option<&Path>,
 ) -> Result<State> {
+    if verdict != Verdict::Healthy && rw {
+        bail!("writing needs a healthy space, and this one is {}", verdict.as_str());
+    }
     let guid = space.info.guid.to_string();
     if rw && let Some(why) = pool.write_refusal(space.id())? {
         bail!("it cannot be written: {why}");
@@ -554,9 +638,16 @@ pub fn attach_space(
         pool_guid: pool.guid.to_string(),
         backend: backend.name().into(),
         rw,
+        verdict: Some(verdict.as_str().into()),
+        forced: verdict != Verdict::Healthy,
+        report: report.map(|p| p.display().to_string()),
         ..Default::default()
     };
-    let rw_arg: &[&str] = if rw { &["--rw"] } else { &[] };
+    // The server checks the space too, and needs the same flag to read
+    // one that is not healthy.
+    let mut flags: Vec<&str> = if rw { vec!["--rw"] } else { Vec::new() };
+    flags.extend(verdict.flag());
+    let rw_arg: &[&str] = &flags;
     let sectors = reader.size() / 512;
     let result = (|| -> Result<()> {
         match backend {
@@ -598,13 +689,10 @@ pub fn attach_space(
                 let mount = Path::new(STATE_DIR).join(format!("{unit}.fuse"));
                 fs::create_dir_all(&mount)?;
                 state.fuse_mount = Some(mount.display().to_string());
-                let file = start_server(
-                    &unit,
-                    "fuse",
-                    paths,
-                    &guid,
-                    &["--mountpoint", &mount.display().to_string()],
-                )?;
+                let mountpoint = mount.display().to_string();
+                let mut extra = vec!["--mountpoint", mountpoint.as_str()];
+                extra.extend(verdict.flag());
+                let file = start_server(&unit, "fuse", paths, &guid, &extra)?;
                 let bs = sector.to_string();
                 let dev = run("losetup", &["-r", "-b", &bs, "-f", "--show", &file], None)?
                     .trim()
@@ -673,6 +761,7 @@ pub fn teardown(state: &State) -> Result<()> {
     }
     if errors.is_empty() {
         let _ = fs::remove_file(State::path(&state.space_guid));
+        remove_report(&state.space_guid);
         Ok(())
     } else {
         bail!("{}", errors.join("; "))
@@ -736,6 +825,62 @@ mod state_tests {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         ensure_readable_dir(&dir).unwrap();
         assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o755);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What attach records of the checks reads back.
+    #[test]
+    fn the_verdict_and_report_are_kept_in_the_state() {
+        let s = State {
+            space_guid: "g".into(),
+            dm: vec!["ss-p-a".into()],
+            verdict: Some("suspect".into()),
+            forced: true,
+            report: Some("/run/storage-spaces/reports/g.txt".into()),
+            ..Default::default()
+        };
+        let dir = scratch("verdict");
+        fs::create_dir_all(&dir).unwrap();
+        // As save writes it.
+        let text = format!(
+            "space=g\npool=\nbackend=\nverdict=suspect\nreport={}\ndm=ss-p-a\nforced=1\n",
+            s.report.as_deref().unwrap()
+        );
+        fs::write(dir.join("g.state"), text).unwrap();
+        let back = &load_states(&dir).unwrap()[0];
+        assert_eq!(
+            (back.verdict.as_deref(), back.forced, back.report.as_deref()),
+            (s.verdict.as_deref(), true, s.report.as_deref())
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Reports are files everyone may read; those of spaces not attached
+    /// are what was refused.
+    #[test]
+    fn reports_are_written_and_refused_ones_listed() {
+        let dir = scratch("reports");
+        let mut r = Report::new("space \"data\" (g1) of pool \"p\" (pg)");
+        r.space = Some(("data".into(), "g1".into()));
+        r.action = Some("not attached: a suspect space needs --force (and is then read-only)".into());
+        let path = write_report_in(&dir, &r).unwrap();
+        assert_eq!(path, dir.join("g1.txt"));
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o644);
+        assert!(fs::read_to_string(dir.join("g1.json")).unwrap().contains("\"space\""));
+        r.space = Some(("other".into(), "g2".into()));
+        write_report_in(&dir, &r).unwrap();
+        let attached = State {
+            space_guid: "G2".into(),
+            ..Default::default()
+        };
+        let refused = refused_in(&dir, &[attached]);
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].0, dir.join("g1.txt"));
+        assert!(
+            refused[0]
+                .1
+                .ends_with("not attached: a suspect space needs --force (and is then read-only)")
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 

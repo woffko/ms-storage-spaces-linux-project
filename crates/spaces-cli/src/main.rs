@@ -147,6 +147,12 @@ enum Command {
         space: String,
         #[arg(short, long)]
         output: PathBuf,
+        /// Read a degraded space anyway (read-only; see spaces check).
+        #[arg(long)]
+        degraded: bool,
+        /// Read a degraded or suspect space anyway (read-only).
+        #[arg(long)]
+        force: bool,
     },
     /// Serve a space over NBD on a Unix socket, read-only unless --rw
     /// (foreground; SIGINT/SIGTERM flush and stop it).
@@ -162,11 +168,17 @@ enum Command {
         socket: PathBuf,
         /// Serve the space writable (only spaces whose state is fully
         /// understood; the member devices are written).
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["degraded", "force"])]
         rw: bool,
         /// Write the socket path here once listening.
         #[arg(long)]
         ready_file: Option<PathBuf>,
+        /// Read a degraded space anyway (read-only; see spaces check).
+        #[arg(long)]
+        degraded: bool,
+        /// Read a degraded or suspect space anyway (read-only).
+        #[arg(long)]
+        force: bool,
     },
     /// Expose a space as a ublk block device, read-only unless --rw
     /// (foreground; stop with SIGINT/SIGTERM). Needs root and the ublk_drv
@@ -179,11 +191,17 @@ enum Command {
         space: String,
         /// Serve the space writable (only spaces whose state is fully
         /// understood; the member devices are written).
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["degraded", "force"])]
         rw: bool,
         /// Write the block device path here once it exists.
         #[arg(long)]
         ready_file: Option<PathBuf>,
+        /// Read a degraded space anyway (read-only; see spaces check).
+        #[arg(long)]
+        degraded: bool,
+        /// Read a degraded or suspect space anyway (read-only).
+        #[arg(long)]
+        force: bool,
     },
     /// Expose a space as the read-only file MOUNTPOINT/space.img through FUSE
     /// (foreground; stop by unmounting). Attach it with `losetup -r -b SECTOR`.
@@ -198,6 +216,12 @@ enum Command {
         /// Write the image file path here once mounted.
         #[arg(long)]
         ready_file: Option<PathBuf>,
+        /// Read a degraded space anyway (read-only; see spaces check).
+        #[arg(long)]
+        degraded: bool,
+        /// Read a degraded or suspect space anyway (read-only).
+        #[arg(long)]
+        force: bool,
     },
     /// Print the pool metadata (database copies and records; cache, parity
     /// journal and dirty region logs of each space), one fact per line.
@@ -353,14 +377,22 @@ fn main() -> Result<()> {
     };
     let _ = OPEN_OPTIONS.set(storage_spaces::OpenOptions { unclean_parity });
     match cli.command {
-        Command::Info { devices, all } => info(&open_pool(&devices)?, all),
+        Command::Info { devices, all } => info(&open_pool(&devices)?, &devices, all),
         Command::Extents { devices, space } => {
             let pool = open_pool(&devices)?;
             extents(&pool, find_space(&pool, &space)?)
         }
-        Command::Export { devices, space, output } => {
+        Command::Export {
+            devices,
+            space,
+            output,
+            degraded,
+            force,
+        } => {
             let pool = open_pool(&devices)?;
-            export(&pool, find_space(&pool, &space)?, &output)
+            let space = find_space(&pool, &space)?;
+            check::require(&pool, &devices, space, false, degraded, force)?;
+            export(&pool, space, &output)
         }
         Command::ServeNbd {
             devices,
@@ -368,13 +400,17 @@ fn main() -> Result<()> {
             socket,
             rw,
             ready_file,
+            degraded,
+            force,
         } => {
             let pool = if rw {
                 open_pool_rw(&devices)?
             } else {
                 open_pool_exclusive(&devices)?
             };
-            serve_nbd(&pool, find_space(&pool, &space)?, &socket, ready_file.as_deref(), rw)
+            let space = find_space(&pool, &space)?;
+            check::require(&pool, &devices, space, rw, degraded, force)?;
+            serve_nbd(&pool, space, &socket, ready_file.as_deref(), rw)
         }
         #[cfg(all(target_os = "linux", feature = "ublk"))]
         Command::ServeUblk {
@@ -382,13 +418,17 @@ fn main() -> Result<()> {
             space,
             rw,
             ready_file,
+            degraded,
+            force,
         } => {
             let pool: &'static Pool<File> = Box::leak(Box::new(if rw {
                 open_pool_rw(&devices)?
             } else {
                 open_pool_exclusive(&devices)?
             }));
-            let id = find_space(pool, &space)?.id();
+            let found = find_space(pool, &space)?;
+            check::require(pool, &devices, found, rw, degraded, force)?;
+            let id = found.id();
             let writer: Option<&'static storage_spaces::SpaceWriter<'static, File>> = if rw {
                 Some(Box::leak(Box::new(pool.open_space_rw(id)?)))
             } else {
@@ -413,9 +453,13 @@ fn main() -> Result<()> {
             space,
             mountpoint,
             ready_file,
+            degraded,
+            force,
         } => {
             let pool: &'static Pool<File> = Box::leak(Box::new(open_pool_exclusive(&devices)?));
-            let reader = Box::leak(Box::new(open_space(pool, find_space(pool, &space)?.id())?));
+            let found = find_space(pool, &space)?;
+            check::require(pool, &devices, found, false, degraded, force)?;
+            let reader = Box::leak(Box::new(open_space(pool, found.id())?));
             fuse::serve(reader, pool.logical_sector_size, &mountpoint, ready_file.as_deref())
         }
         #[cfg(target_os = "linux")]
@@ -702,7 +746,7 @@ fn size(bytes: u64) -> String {
     }
 }
 
-fn info(pool: &Pool<File>, all: bool) -> Result<()> {
+fn info(pool: &Pool<File>, paths: &[PathBuf], all: bool) -> Result<()> {
     println!("Pool {:?} {}", pool.name, pool.guid);
     println!(
         "  version {}, sectors {} logical / {} physical",
@@ -755,6 +799,17 @@ fn info(pool: &Pool<File>, all: bool) -> Result<()> {
             println!("       parent {parent}");
         }
         if s.is_user() {
+            // The verdict of the checks attach makes (spaces check reports
+            // them whole).
+            let report = check::space_report(pool, paths, s);
+            println!(
+                "       verdict {}{}",
+                report.verdict().as_str(),
+                report
+                    .problems()
+                    .first()
+                    .map_or(String::new(), |c| format!(" ({}: {})", c.id, c.summary))
+            );
             match open_space(pool, s.id()) {
                 Ok(r) => {
                     println!(
@@ -1151,6 +1206,7 @@ fn cmd_attach(
     rw: bool,
     devices: &[PathBuf],
 ) -> Result<()> {
+    use std::io::IsTerminal;
     let _lock = attach::lock()?;
     let groups: Vec<Vec<PathBuf>> = if devices.is_empty() {
         scan::scan()
@@ -1161,27 +1217,27 @@ fn cmd_attach(
     } else {
         vec![devices.to_vec()]
     };
+    // On a terminal the whole report of a refused space; under the attach
+    // unit (the journal) a line for the space and one per failing check.
+    let interactive = std::io::stderr().is_terminal();
     let mut failures = 0;
     for paths in groups {
-        let pool = open_pool(&paths)?;
+        let pool = match open_pool_quiet(&paths) {
+            Ok(pool) => pool,
+            Err(e) => {
+                eprintln!(
+                    "the pool on {}: {e:#}",
+                    paths
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                failures += 1;
+                continue;
+            }
+        };
         if pool_sel.is_some_and(|p| p != pool.name && !p.eq_ignore_ascii_case(&pool.guid.to_string())) {
-            continue;
-        }
-        if !pool.has_quorum() && !force {
-            eprintln!(
-                "pool {:?}: fewer than half of its disks are present; their metadata may be out of date (use --force)",
-                pool.name
-            );
-            failures += 1;
-            continue;
-        }
-        let missing = pool.disks.values().filter(|d| d.member.is_none()).count();
-        if missing > 0 && !degraded {
-            eprintln!(
-                "pool {:?}: {missing} disk(s) missing, skipping (use --degraded)",
-                pool.name
-            );
-            failures += 1;
             continue;
         }
         for space in pool.user_spaces() {
@@ -1192,12 +1248,73 @@ fn cmd_attach(
                 println!("{:?} is already attached", space.name());
                 continue;
             }
-            match attach::attach_space(&pool, space, &paths, backend, rw) {
+            let mut report = check::space_report(&pool, &paths, space);
+            let verdict = report.verdict();
+            let decision = check::gate(verdict, rw, degraded, force);
+            let mut command = format!("spaces attach --space {}", space.info.guid);
+            for p in devices {
+                command += &format!(" {}", p.display());
+            }
+            report.action = Some(match &decision {
+                check::Decision::Refuse(why) => {
+                    report.notes.push(check::refusal_note(verdict, rw, &command));
+                    format!("not attached: {why}")
+                }
+                check::Decision::ReadOnly => format!(
+                    "attached read-only ({} past {})",
+                    verdict.as_str(),
+                    verdict.flag().unwrap_or_default()
+                ),
+                check::Decision::Attach { rw: true } => "attached read-write".into(),
+                check::Decision::Attach { rw: false } => "attached".into(),
+            });
+            let path = match attach::write_report(&report) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    eprintln!("{e:#}");
+                    None
+                }
+            };
+            if let check::Decision::Refuse(why) = &decision {
+                if interactive {
+                    eprint!("{}", report.to_text());
+                } else {
+                    eprintln!("{}; not attached: {why}", report.headline());
+                    for c in report.problems() {
+                        eprintln!("  {} {}: {}", c.status.as_str().to_uppercase(), c.id, c.summary);
+                    }
+                }
+                if let Some(p) = &path {
+                    eprintln!("  report: {}", p.display());
+                }
+                failures += 1;
+                continue;
+            }
+            let write = matches!(decision, check::Decision::Attach { rw: true });
+            match attach::attach_space(&pool, space, &paths, backend, write, verdict, path.as_deref()) {
                 Ok(state) => {
-                    let mode = if state.rw { ", read-write" } else { "" };
+                    let mode = if state.rw {
+                        ", read-write".to_string()
+                    } else if state.forced {
+                        format!(
+                            ", read-only: {} ({})",
+                            verdict.as_str(),
+                            report
+                                .problems()
+                                .first()
+                                .map_or(String::new(), |c| format!("{}: {}", c.id, c.summary))
+                        )
+                    } else {
+                        String::new()
+                    };
                     println!("attached {:?} with {}{mode}:", space.name(), state.backend);
                     for d in &state.dm {
                         println!("  /dev/mapper/{d}");
+                    }
+                    if state.forced
+                        && let Some(p) = &path
+                    {
+                        println!("  report: {}", p.display());
                     }
                 }
                 Err(e) => {
@@ -1211,6 +1328,15 @@ fn cmd_attach(
         bail!("{failures} space(s) or pool(s) not attached");
     }
     Ok(())
+}
+
+/// Opens a pool to check it: its warnings go into the reports.
+fn open_pool_quiet(paths: &[PathBuf]) -> Result<Pool<File>> {
+    let files = paths
+        .iter()
+        .map(|p| open_member(p, false, false))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Pool::open(files)?)
 }
 
 #[cfg(target_os = "linux")]
@@ -1242,16 +1368,24 @@ fn cmd_detach(sel: Option<&str>) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn cmd_status() -> Result<()> {
     let states = attach::State::load_all()?;
+    let refused = attach::refused(&states);
     if states.is_empty() {
         println!("no spaces attached");
     }
-    for s in states {
+    for s in &states {
         let main = s.dm.first().cloned().unwrap_or_default();
         let mode = if s.rw { "read-write" } else { "read-only" };
         println!(
             "/dev/mapper/{main}  space {}  backend {}  {mode}",
             s.space_guid, s.backend
         );
+        if let Some(v) = &s.verdict {
+            let forced = if s.forced { ", attached read-only past it" } else { "" };
+            println!("  verdict {v}{forced}");
+        }
+        if let Some(r) = s.report.as_ref().filter(|_| s.forced) {
+            println!("  report {r}");
+        }
         if let Some(d) = &s.device {
             println!("  backend device {d}");
         }
@@ -1261,6 +1395,10 @@ fn cmd_status() -> Result<()> {
         for p in s.dm.iter().skip(1) {
             println!("  partition /dev/mapper/{p}");
         }
+    }
+    for (path, first) in refused {
+        println!("not attached: {first}");
+        println!("  report {}", path.display());
     }
     Ok(())
 }

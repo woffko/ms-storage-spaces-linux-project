@@ -49,6 +49,8 @@ spaces \- read, write and manage Microsoft Storage Spaces pools on Linux
 .I name
 .B \-\-output
 .I file
+.RB [ \-\-degraded ]
+.RB [ \-\-force ]
 .br
 .B spaces dm\-table
 .I device ...
@@ -132,17 +134,29 @@ and every partition inside it as
 .BI /dev/mapper/ss\- pool \- space \-p N\fR;
 when a space of another pool of the same name has that name already, the
 first eight hex digits of the pool's GUID follow the space's name.
-Pools with missing disks are skipped unless
-.B \-\-degraded
-is given; pools with fewer than half of their disks are skipped unless
-.B \-\-force
-is given too (the disks at hand may hold an old state of the pool).
-Spaces already attached are left alone.
+Every space is checked first, as
+.B check
+does, and only healthy spaces are attached without being asked (so also
+by the udev rule and the attach unit). A degraded space (redundancy
+reduced: missing disks, out-of-date copies) is attached with
+.BR \-\-degraded ,
+a suspect one (the pool lacks its quorum, copies of the cache or of the
+partition table disagree, the log of a ReFS volume holds changes Windows
+would replay, ...) with
+.BR \-\-force ,
+both read-only; a failed one (data lost, metadata not understood) not at
+all. The report goes to
+.BI /run/storage-spaces/reports/ guid .txt
+and
+.BR .json ;
+for a refused space also to standard error: whole on a terminal,
+otherwise a line for the space and one per failing check (the attach
+unit's lines in the journal). Spaces already attached are left alone.
 With
 .B \-\-rw
-the spaces are attached read-write, if their state is fully understood
-(clean pool, healthy space, a supported resiliency); otherwise the reason is
-printed. Mirror spaces keep their dirty region log, single parity spaces are
+the spaces are attached read-write, if they are healthy and their state
+is fully understood (clean pool, a supported resiliency); otherwise the
+reason is printed. Mirror spaces keep their dirty region log, single parity spaces are
 written through their write-back cache and parity journal, as Windows does.
 Thin spaces allocate rows as writes first reach them; discards give rows of
 thin simple and mirror spaces back to the pool once they cover them whole.
@@ -158,8 +172,10 @@ Removes the devices of the given space (name, GUID or device-mapper name) or
 of all attached spaces, and stops their serving processes.
 .TP
 .B status
-Lists attached spaces, their backends and partition devices (also for users
-other than root).
+Lists attached spaces, their backends, partition devices and verdicts
+(with the report of those attached past it), and the spaces checked and
+not attached with the first line of their reports (also for users other
+than root).
 .TP
 .B check
 Checks the spaces of every pool found (or of the pool whose devices are
@@ -197,11 +213,18 @@ healthy.
 .TP
 .B info\fR, \fBextents\fR, \fBexport\fR, \fBdm\-table
 Inspect a pool given by its member devices or images: pool, disks (usage,
-media type, missing) and spaces (layout, provisioning, and whether they are
-healthy, degraded or failed with the disks at hand, plus the state of the
-parity journal, dirty region tracking and write-back cache); the slab
-allocation of a space; copy a space into a sparse image file; print a
-device-mapper table for a simple or mirror space.
+media type, missing) and spaces (layout, provisioning, the verdict of the
+checks, and whether they are healthy, degraded or failed with the disks at
+hand, plus the state of the parity journal, dirty region tracking and
+write-back cache); the slab allocation of a space; copy a space into a
+sparse image file (as
+.B attach
+reads spaces:
+.B \-\-degraded
+and
+.B \-\-force
+for spaces that are not healthy); print a device-mapper table for a simple
+or mirror space.
 .TP
 .B dump\fR, \fBdiff
 Print the pool metadata one fact per line (every copy of the pool

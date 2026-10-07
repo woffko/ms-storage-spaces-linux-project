@@ -98,6 +98,11 @@ sudo spaces detach                   # or: spaces detach <space>
 it could not open. `spaces status` works for every user (the state in
 `/run/storage-spaces` is readable).
 
+`attach` checks every space first, as `spaces check` does, and attaches
+only healthy spaces without being asked; a space that is not healthy is
+refused with its report (see "Checking a pool"), which `spaces status`
+lists too.
+
 Device names: `ss-<pool>-<space>` for the whole virtual disk and
 `ss-<pool>-<space>-p<N>` for partition `N` (characters other than letters,
 digits, `_ . +` become `_`). Pools can share a name (Windows calls every new
@@ -353,12 +358,12 @@ keeping the first mirror copy and recomputing parity from the data.
 
 ## Pools with missing disks
 
-`attach` skips pools with missing disks. `spaces info <disks...>` shows which
-disk is missing and whether each space is degraded (still complete) or
-failed (data lost with the disks at hand). If the redundancy of every space still covers the loss
-(mirror: at least one copy of every slab; single parity: at most one
-missing disk; dual parity: at most two),
-attach anyway:
+With a disk of its pool missing a space is degraded, and `attach` refuses
+it. `spaces info <disks...>` shows which disk is missing and whether each
+space is degraded (still complete) or failed (data lost with the disks at
+hand). If the redundancy of every space still covers the loss (mirror: at
+least one copy of every slab; single parity: at most one missing disk;
+dual parity: at most two), attach it anyway, read-only:
 
 ```sh
 sudo spaces attach --degraded
@@ -366,13 +371,15 @@ sudo spaces attach --degraded
 
 Reads that need a missing disk fail with an I/O error instead of returning
 wrong data. Copies that missed writes while their disk was away are never
-used.
+used. A failed space (data lost) is not attached at all.
 
-If fewer than half of the pool's disks are present, `attach` refuses even
-with `--degraded`: the disks at hand may all be disks that dropped out
-earlier, and their metadata would describe an old state of the pool
-(`spaces info` prints a warning). Use `--force` only when you know these
-disks were the last ones written.
+If no more than half of the copies of the pool database are at hand, the
+pool lacks its quorum, as Windows counts it (it takes such a pool
+read-only and detaches its spaces): the disks at hand may all be disks
+that dropped out earlier, and their metadata would describe an old state
+of the pool. Its spaces are suspect, and only `--force` attaches them,
+read-only; use it only when you know these disks were the last ones
+written.
 
 ## After a crash or power loss
 

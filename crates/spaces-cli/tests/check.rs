@@ -256,3 +256,34 @@ fn corpus_pools_get_their_verdicts() {
         }
     }
 }
+
+/// Export (as the servers) reads a space only as the guard allows: a
+/// suspect one with --force.
+#[test]
+fn export_reads_a_suspect_space_only_when_forced() {
+    let dir = Scratch(std::env::temp_dir().join(format!("spaces-gate-{}", std::process::id())));
+    let disks = pool(&dir.0);
+    {
+        let files: Vec<File> = disks
+            .iter()
+            .map(|p| OpenOptions::new().read(true).write(true).open(p).unwrap())
+            .collect();
+        let pool = Pool::open(files).unwrap();
+        let writer = pool.open_space_rw(pool.find_space("data").unwrap().id()).unwrap();
+        writer.write_all_at(&[0u8; 512], writer.size() - 512).unwrap();
+        writer.flush().unwrap();
+    }
+    let out = dir.0.join("data.img");
+    let mut args: Vec<&str> = disks.iter().map(String::as_str).collect();
+    args.splice(0..0, ["export"]);
+    args.extend(["--space", "data", "--output", out.to_str().unwrap()]);
+    let o = spaces(&args);
+    let err = text(&o);
+    assert!(!o.status.success(), "{err}");
+    assert!(err.contains("SUSPECT") && err.contains("--force"), "{err}");
+    assert!(!out.exists());
+    args.push("--force");
+    let o = spaces(&args);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(std::fs::metadata(&out).unwrap().len(), 1 << 30);
+}

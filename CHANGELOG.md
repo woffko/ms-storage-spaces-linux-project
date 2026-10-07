@@ -16,6 +16,22 @@
   cache, parity journal and dirty region log, both copies of its
   partition table, and the file systems in it: the NTFS boot sector and
   its copy, the ReFS boot sector, superblock copies, checkpoints and log.
+* `spaces attach` checks every space first: only healthy spaces are
+  attached without being asked (also by the udev rule and the attach
+  unit), degraded ones (redundancy reduced) with `--degraded` and suspect
+  ones (our checks disagree) with `--force`, both read-only; failed ones
+  (data lost, metadata not understood) not at all; `--rw` only healthy
+  ones. The report of each space goes to
+  `/run/storage-spaces/reports/<space guid>.txt` and `.json`, and for a
+  refused space to standard error (under the attach unit a line for the
+  space and one per failing check, into the journal). `spaces status`
+  shows the verdicts and the spaces not attached, `spaces info` the
+  verdict of each space. The servers (`serve-ublk`, `serve-nbd`,
+  `serve-fuse`) and `export` follow the same rule. Changed: a pool with
+  missing disks whose data is partly lost is no longer attached with
+  `--degraded`; a pool with no more than half of its database copies
+  (Windows takes it read-only) needs `--force` now, also with half of
+  its disks.
 * Opening a space refuses metadata that breaks what the format implies
   (a slab mapped twice, extents or log entries outside the space, journal
   entries that do not cover their run), naming the values.
