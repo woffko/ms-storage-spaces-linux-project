@@ -1047,6 +1047,18 @@ impl CacheIndex {
         self.conflicts.len()
     }
 
+    /// Owner offsets of the chunks the copies of the cache disagree about,
+    /// in offset order.
+    pub fn conflicting_offsets(&self) -> Vec<u64> {
+        let mut all: Vec<u64> = self
+            .conflicts
+            .iter()
+            .map(|k| k * self.header.chunk_size as u64)
+            .collect();
+        all.sort_unstable();
+        all
+    }
+
     /// Number of chunks currently held in the cache.
     pub fn cached_chunks(&self) -> usize {
         self.chunks.len()

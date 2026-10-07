@@ -17,6 +17,74 @@ use crate::writer::SpaceWriter;
 /// newest one.
 const STALE_COPY: &str = "stale pool database copy";
 
+/// A problem found while assembling a pool; each is also a line of
+/// [`Pool::warnings`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Issue {
+    /// A device whose disk header does not parse: it is not used.
+    IgnoredDevice { device: usize, error: String },
+    /// A member whose copy of the pool database names another pool.
+    ForeignDatabase { device: usize, owner: Guid },
+    /// A member whose copy of the pool database cannot be read.
+    UnreadableCopy { device: usize, error: String },
+    /// A version of the pool database that does not decode; `newer` when
+    /// it is newer than the version used (what Windows recorded last is
+    /// then not what is read).
+    UnusableCopy {
+        devices: Vec<usize>,
+        sequence: u64,
+        error: String,
+        newer: bool,
+    },
+    /// Copies of the sequence used that differ from it (a torn write).
+    TornCopy {
+        devices: Vec<usize>,
+        sequence: u64,
+        used: Vec<usize>,
+    },
+    /// A copy older than the one used, on a disk that is not retired.
+    StaleCopy { device: usize, sequence: u64, current: u64 },
+    /// An extent of a space the database does not list.
+    UnknownSpaceExtent { space: u64 },
+    /// A member the database does not list among the pool's disks.
+    UnlistedDevice { device: usize },
+    /// A disk of the pool that is not among the devices.
+    MissingDisk { disk: u64, guid: Guid },
+}
+
+impl std::fmt::Display for Issue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Issue::IgnoredDevice { device, error } => write!(f, "device {device} ignored: {error}"),
+            Issue::ForeignDatabase { device, owner } => write!(f, "device {device}: database belongs to {owner}"),
+            Issue::UnreadableCopy { device, error } => {
+                write!(f, "device {device}: cannot read pool database: {error}")
+            }
+            Issue::UnusableCopy {
+                devices,
+                sequence,
+                error,
+                ..
+            } => write!(
+                f,
+                "pool database copy of sequence {sequence} on device(s) {devices:?} is unusable: {error}"
+            ),
+            Issue::TornCopy {
+                devices,
+                sequence,
+                used,
+            } => write!(
+                f,
+                "device(s) {devices:?}: pool database copy of sequence {sequence} differs from the one on {used:?} (torn write)"
+            ),
+            Issue::StaleCopy { device, .. } => write!(f, "device {device}: {STALE_COPY}"),
+            Issue::UnknownSpaceExtent { space } => write!(f, "extent for unknown space {space}"),
+            Issue::UnlistedDevice { device } => write!(f, "device {device} is not listed in the pool database"),
+            Issue::MissingDisk { disk, guid } => write!(f, "disk {disk} ({guid}) is missing"),
+        }
+    }
+}
+
 /// A device that belongs to the pool.
 #[derive(Debug, Clone)]
 pub struct Member {
@@ -112,8 +180,11 @@ pub struct Pool<D> {
     pub database: DbHeader,
     pub disks: BTreeMap<u64, PhysicalDisk>,
     pub spaces: BTreeMap<u64, Space>,
-    /// Non-fatal problems found while assembling the pool.
+    /// Non-fatal problems found while assembling the pool, as text (one
+    /// line per [`Issue`]).
     pub warnings: Vec<String>,
+    /// The same problems, for programs.
+    pub issues: Vec<Issue>,
 }
 
 impl<D: ReadAt> Pool<D> {
@@ -122,7 +193,7 @@ impl<D: ReadAt> Pool<D> {
         if devices.is_empty() {
             return Err(Error::Pool("no devices given".into()));
         }
-        let mut warnings = Vec::new();
+        let mut issues = Vec::new();
         let mut members = Vec::new();
         for (index, dev) in devices.iter().enumerate() {
             let partition = find_spaces_partition(dev)?
@@ -130,7 +201,10 @@ impl<D: ReadAt> Pool<D> {
             let header = match DiskHeader::parse(&read_vec(dev, partition.offset, DiskHeader::SIZE)?) {
                 Ok(header) => header,
                 Err(Error::Format(e)) => {
-                    warnings.push(format!("device {index} ignored: {e}"));
+                    issues.push(Issue::IgnoredDevice {
+                        device: index,
+                        error: e,
+                    });
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -143,7 +217,8 @@ impl<D: ReadAt> Pool<D> {
             });
         }
         let Some(first) = members.first() else {
-            return Err(Error::Pool(format!("no usable pool member: {}", warnings.join("; "))));
+            let why: Vec<String> = issues.iter().map(Issue::to_string).collect();
+            return Err(Error::Pool(format!("no usable pool member: {}", why.join("; "))));
         };
         let guid = first.header.pool_guid;
         if let Some(m) = members.iter().find(|m| m.header.pool_guid != guid) {
@@ -165,10 +240,10 @@ impl<D: ReadAt> Pool<D> {
                 Ok(None) => {} // this member carries no copy
                 Ok(Some((header, records))) => {
                     if header.owner_guid != guid {
-                        warnings.push(format!(
-                            "device {}: database belongs to {}",
-                            member.device, header.owner_guid
-                        ));
+                        issues.push(Issue::ForeignDatabase {
+                            device: member.device,
+                            owner: header.owner_guid,
+                        });
                         continue;
                     }
                     member.db_sequence = Some(header.sequence);
@@ -180,7 +255,10 @@ impl<D: ReadAt> Pool<D> {
                         None => versions.push((header, records, vec![member.device])),
                     }
                 }
-                Err(e) => warnings.push(format!("device {}: cannot read pool database: {e}", member.device)),
+                Err(e) => issues.push(Issue::UnreadableCopy {
+                    device: member.device,
+                    error: e.to_string(),
+                }),
             }
         }
         versions.sort_by_key(|v| std::cmp::Reverse((v.0.sequence, v.2.len())));
@@ -192,25 +270,46 @@ impl<D: ReadAt> Pool<D> {
                     chosen = Some((header.clone(), decoded, devs.clone()));
                     break;
                 }
-                Err(e) => failures.push(format!(
-                    "pool database copy of sequence {} on device(s) {devs:?} is unusable: {e}",
-                    header.sequence
-                )),
+                Err(e) => failures.push((devs.clone(), header.sequence, e.to_string())),
             }
         }
         let Some((database, decoded, used)) = chosen else {
             return Err(match failures.first() {
-                Some(_) => Error::Pool(failures.join("; ")),
+                Some(_) => Error::Pool(
+                    failures
+                        .iter()
+                        .map(|(devices, sequence, error)| {
+                            Issue::UnusableCopy {
+                                devices: devices.clone(),
+                                sequence: *sequence,
+                                error: error.clone(),
+                                newer: false,
+                            }
+                            .to_string()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ),
                 None => Error::Pool("no readable copy of the pool database".into()),
             });
         };
-        warnings.extend(failures);
+        issues.extend(
+            failures
+                .into_iter()
+                .map(|(devices, sequence, error)| Issue::UnusableCopy {
+                    devices,
+                    sequence,
+                    error,
+                    newer: sequence > database.sequence,
+                }),
+        );
         for (header, _, devs) in &versions {
             if header.sequence == database.sequence && *devs != used {
-                warnings.push(format!(
-                    "device(s) {devs:?}: pool database copy of sequence {} differs from the one on {used:?} (torn write)",
-                    header.sequence
-                ));
+                issues.push(Issue::TornCopy {
+                    devices: devs.clone(),
+                    sequence: header.sequence,
+                    used: used.clone(),
+                });
             }
         }
         // Windows stops updating the copy on a retired disk.
@@ -221,8 +320,12 @@ impl<D: ReadAt> Pool<D> {
                 .any(|d| d.guid == m.header.disk_guid && d.usage == DiskUsage::Retired)
         };
         for m in &members {
-            if m.db_sequence.is_some_and(|s| s < database.sequence) && !retired(m) {
-                warnings.push(format!("device {}: {STALE_COPY}", m.device));
+            if let Some(sequence) = m.db_sequence.filter(|&s| s < database.sequence && !retired(m)) {
+                issues.push(Issue::StaleCopy {
+                    device: m.device,
+                    sequence,
+                    current: database.sequence,
+                });
             }
         }
 
@@ -261,16 +364,19 @@ impl<D: ReadAt> Pool<D> {
         for e in extents {
             match spaces.get_mut(&e.space_id) {
                 Some(space) => space.extents.push(e),
-                None => warnings.push(format!("extent for unknown space {}", e.space_id)),
+                None => issues.push(Issue::UnknownSpaceExtent { space: e.space_id }),
             }
         }
         for m in &members {
             if !disks.values().any(|d: &PhysicalDisk| d.guid == m.header.disk_guid) {
-                warnings.push(format!("device {} is not listed in the pool database", m.device));
+                issues.push(Issue::UnlistedDevice { device: m.device });
             }
         }
         for d in disks.values().filter(|d| d.member.is_none()) {
-            warnings.push(format!("disk {} ({}) is missing", d.id, d.guid));
+            issues.push(Issue::MissingDisk {
+                disk: d.id,
+                guid: d.guid,
+            });
         }
 
         Ok(Pool {
@@ -284,7 +390,8 @@ impl<D: ReadAt> Pool<D> {
             database,
             disks,
             spaces,
-            warnings,
+            warnings: issues.iter().map(Issue::to_string).collect(),
+            issues,
         })
     }
 

@@ -1035,8 +1035,16 @@ take the newer. Entries whose run list does not fit into a slot are written
 as bitmaps (state 1); where neither fits, the whole run is recorded as not
 consistent.
 
-The newest entry per run wins. After a clean shutdown the runs are state 3
-(or all-set bitmaps). In the crash experiment `crashparity` (disks pulled
+The newest entry per run wins. After a clean shutdown the runs whose
+stripes were all written are state 3 (or all-set bitmaps); stripes never
+written stay not consistent, and so do stripes whose data the write-back
+cache holds: a clean journal does not mean every stripe is recorded as
+consistent (**verified**: `dual7`, `lrc11` to `lrc16`, `ntfsparity`,
+`ntfsdual`, `ntfslrc` and `ntfsmapar`, detached cleanly, list 145 to 15189
+stripes of their runs, and every one the cache does not hold matches its
+parity; `parity4` lists exactly the 258 stripes its cache holds). The
+journal alone does not tell a stripe being written at a crash from one
+never written. In the crash experiment `crashparity` (disks pulled
 while writing) the entry was state 2 `consistent 1164, unknown 2932` over
 4096 stripes, and exactly stripe 1165 held new parity with a stale (zero) data
 unit; Windows recovered that unit from parity, while in stripe 1164 it kept

@@ -30,6 +30,40 @@ pub struct OpenOptions {
     pub unclean_parity: UncleanParity,
 }
 
+/// The part of a space that could not be opened ([`SpaceReader::open_parts`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    /// The space's own slab map.
+    Layout,
+    /// The slab map of a storage tier.
+    Tiers,
+    Cache,
+    Journal,
+    DirtyRegions,
+}
+
+/// What checking the stripes a parity journal does not record as
+/// consistent found ([`SpaceReader::check_unclean_parity`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParityCheck {
+    /// Stripes in allocated rows the journal does not record as consistent
+    /// (never written, or written when the space was last in use).
+    pub listed: u64,
+    /// Of those, stripes whose units were read and compared.
+    pub checked: u64,
+    /// Stripes the write-back cache holds whole (their data is read from
+    /// the cache).
+    pub cached: u64,
+    /// Stripes with a unit on a missing disk (nothing to compare).
+    pub unreadable: u64,
+    /// Bytes read.
+    pub bytes: u64,
+    /// Space offsets of the stripes whose parity does not match their data.
+    pub mismatches: Vec<u64>,
+    /// The budget ran out before every listed stripe was checked.
+    pub incomplete: bool,
+}
+
 /// A space layout bound to the pool it reads from.
 struct Mapped<'p, D> {
     pool: &'p Pool<D>,
@@ -175,6 +209,12 @@ impl<D: ReadAt> Mapped<'_, D> {
     /// sum up to the XOR of the data). Missing columns count as consistent
     /// (nothing to check).
     fn stripe_consistent(&self, loc: &Location, len: usize) -> Result<bool> {
+        Ok(self.stripe_check(loc, len)?.unwrap_or(true))
+    }
+
+    /// [`Mapped::stripe_consistent`], or `None` when a unit is not
+    /// allocated or cannot be read.
+    fn stripe_check(&self, loc: &Location, len: usize) -> Result<Option<bool>> {
         let l = &self.layout;
         let p = l.parity_column(l.stripe_of(loc));
         let last = (l.parity_units >= 2).then(|| (p + l.parity_units - 1) % l.columns);
@@ -182,15 +222,52 @@ impl<D: ReadAt> Mapped<'_, D> {
         let mut unit = vec![0u8; len];
         for column in (0..l.columns).filter(|&c| Some(c) != last) {
             let Some((disk, slab)) = l.physical(column, 0, loc.row) else {
-                return Ok(true);
+                return Ok(None);
             };
             match self.pool.read_slab(disk, slab, loc.offset_in_slab, &mut unit) {
                 Ok(true) => acc.iter_mut().zip(&unit).for_each(|(a, u)| *a ^= u),
-                Ok(false) | Err(Error::Io(_)) => return Ok(true),
+                Ok(false) | Err(Error::Io(_)) => return Ok(None),
                 Err(e) => return Err(e),
             }
         }
-        Ok(acc.iter().all(|&b| b == 0))
+        Ok(Some(acc.iter().all(|&b| b == 0)))
+    }
+
+    /// Where owner offset `offset` lies: the column and row, and for every
+    /// copy the physical slab with the device (named by `names`) and the
+    /// byte offset on it.
+    fn describe(&self, offset: u64, names: &[String]) -> String {
+        let l = &self.layout;
+        if offset < l.base {
+            return "outside this layout".into();
+        }
+        let loc = l.locate(offset);
+        let copies: Vec<String> = l
+            .copies_of(loc.column)
+            .into_iter()
+            .filter_map(|copy| l.physical(loc.column, copy, loc.row).map(|p| (copy, p)))
+            .map(|(copy, (disk, slab))| {
+                let at = match self.pool.slab_location(disk, slab) {
+                    Ok(Some((device, start))) => format!(
+                        "{} at {:#x}",
+                        names.get(device).cloned().unwrap_or_else(|| format!("device {device}")),
+                        start + loc.offset_in_slab
+                    ),
+                    Ok(None) => "a missing disk".into(),
+                    Err(e) => e.to_string(),
+                };
+                let copy = if l.copies > 1 {
+                    format!("copy {copy}: ")
+                } else {
+                    String::new()
+                };
+                format!("{copy}disk {disk} slab {slab} -> {at}")
+            })
+            .collect();
+        if copies.is_empty() {
+            return format!("column {} row {}: not allocated", loc.column, loc.row);
+        }
+        format!("column {} row {}: {}", loc.column, loc.row, copies.join(", "))
     }
 
     /// Reads `len` bytes of a column at `offset_in_slab` of `row`; `None`
@@ -386,23 +463,34 @@ pub struct SpaceReader<'p, D> {
 
 impl<'p, D: ReadAt> SpaceReader<'p, D> {
     pub(crate) fn new(pool: &'p Pool<D>, id: u64, options: OpenOptions) -> Result<Self> {
+        Self::open_parts(pool, id, options).map_err(|(_, e)| e)
+    }
+
+    /// Opens a space as [`Pool::open_space_with`] does; an error names the
+    /// part of the space that could not be opened.
+    pub fn open_parts(pool: &'p Pool<D>, id: u64, options: OpenOptions) -> std::result::Result<Self, (Part, Error)> {
         let space = pool
             .spaces
             .get(&id)
-            .ok_or_else(|| Error::Pool(format!("no space with id {id}")))?;
-        let mut base = Mapped::new(pool, space)?;
+            .ok_or_else(|| (Part::Layout, Error::Pool(format!("no space with id {id}"))))?;
+        let mut base = Mapped::new(pool, space).map_err(|e| (Part::Layout, e))?;
         let size = match space.info.size {
             Some(size) => size,
             None => base.layout.mapped_size(),
         };
-        let cache = Self::open_cache(pool, space)?;
+        let cache = Self::open_cache(pool, space).map_err(|e| (Part::Cache, e))?;
         let mut tiers = pool
             .children(space.id())
             .filter(|c| c.info.is_child && !c.extents.is_empty())
             .map(|c| Mapped::new(pool, c))
-            .collect::<Result<Vec<_>>>()?;
-        let journal = Self::open_journal(pool, space)?.map(Arc::new);
-        let drt = Self::open_drt(pool, space)?.map(Arc::new);
+            .collect::<Result<Vec<_>>>()
+            .map_err(|e| (Part::Tiers, e))?;
+        let journal = Self::open_journal(pool, space)
+            .map_err(|e| (Part::Journal, e))?
+            .map(Arc::new);
+        let drt = Self::open_drt(pool, space)
+            .map_err(|e| (Part::DirtyRegions, e))?
+            .map(Arc::new);
         for m in std::iter::once(&mut base).chain(tiers.iter_mut()) {
             m.journal = journal.clone();
             m.drt = drt.clone();
@@ -536,6 +624,92 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
     /// Parity journal of a parity space.
     pub fn journal(&self) -> Option<&ParityJournal> {
         self.base.journal.as_deref()
+    }
+
+    /// Checks the stripes the parity journal does not record as consistent
+    /// (Windows lists stripes never written as well as those written when
+    /// the space was last in use) against their parity, reading at most
+    /// `budget` bytes (`None`: no limit). Stripes the write-back cache
+    /// holds whole are not checked: their data is read from the cache.
+    /// `None` for a space without a parity journal.
+    pub fn check_unclean_parity(&self, budget: Option<u64>) -> Result<Option<ParityCheck>> {
+        let Some(journal) = self.base.journal.as_deref() else {
+            return Ok(None);
+        };
+        let mut out = ParityCheck::default();
+        let parity = std::iter::once(&self.base)
+            .chain(&self.tiers)
+            .filter(|m| m.layout.resiliency == Resiliency::Parity);
+        for m in parity {
+            let l = &m.layout;
+            let width = l.data_columns * l.interleave;
+            let per_row = SLAB_SIZE / l.interleave;
+            let cost = l.columns * l.interleave;
+            let Some(runs) = l.runs().get(&(0, 0)) else {
+                continue;
+            };
+            for run in runs {
+                let start = l.run_start_offset(run.first_row);
+                for stripe in 0..run.rows * per_row {
+                    if !journal.is_dirty(start, stripe) {
+                        continue;
+                    }
+                    out.listed += 1;
+                    let offset = start + stripe * width;
+                    if let Some((_, index)) = &self.cache
+                        && let Lookup::Hit { len, .. } = index.lookup(offset)
+                        && len >= width
+                    {
+                        out.cached += 1;
+                        continue;
+                    }
+                    if budget.is_some_and(|b| out.bytes + cost > b) {
+                        out.incomplete = true;
+                        continue;
+                    }
+                    out.bytes += cost;
+                    match m.stripe_check(&l.locate(offset), l.interleave as usize)? {
+                        Some(true) => out.checked += 1,
+                        Some(false) => {
+                            out.checked += 1;
+                            out.mismatches.push(offset);
+                        }
+                        None => out.unreadable += 1,
+                    }
+                }
+            }
+        }
+        Ok(Some(out))
+    }
+
+    /// Where byte `offset` of the space is kept, for evidence: the block of
+    /// the write-back cache that holds it, or the virtual slab, column and
+    /// row and for every copy the physical slab, with the device (named by
+    /// `names`, by its index otherwise) and the byte offset on it.
+    pub fn describe(&self, offset: u64, names: &[String]) -> String {
+        let head = format!("space byte {offset:#x}");
+        if let Some((mapped, index)) = &self.cache
+            && let Lookup::Hit { cache_offset, .. } = index.lookup(offset)
+        {
+            return format!(
+                "{head}, in the write-back cache at {cache_offset:#x}: {}",
+                mapped.describe(cache_offset, names)
+            );
+        }
+        let holder = std::iter::once(&self.base)
+            .chain(&self.tiers)
+            .find(|m| {
+                offset >= m.layout.base && {
+                    let loc = m.layout.locate(offset);
+                    (0..m.layout.copies).any(|c| m.layout.physical(loc.column, c, loc.row).is_some())
+                }
+            })
+            .unwrap_or(&self.base);
+        format!(
+            "{head} (virtual slab {}), {}",
+            offset / SLAB_SIZE,
+            holder.describe(offset, names)
+        )
     }
 
     /// Fills `buf` from `offset`.
