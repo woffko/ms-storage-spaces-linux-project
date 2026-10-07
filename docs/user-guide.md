@@ -593,8 +593,10 @@ security`, scores 9.5 UNSAFE before, 5.1 MEDIUM after):
   private view of the file system, whose mount the host could not see.
 * `mount.ReFS` (what `mount -t ReFS` and udisks2 call, as root) runs
   `refs mount` as a transient `refs-mount-<pid>.service` without network,
-  new privileges, namespaces or most capabilities; the mount is visible to
-  the host as before. Without systemd it falls back to a plain process.
+  new privileges, namespaces or most capabilities. It keeps the host's
+  mounts (`PrivateMounts=no`: since systemd 254 a private network would
+  otherwise bring a private mount namespace, where the host never sees
+  the mount). Without systemd it falls back to a plain process.
 
 The limits need systemd 231 or later for the unit file and 247 for the
 servers' (older ones refuse the unknown property): then `spaces attach`

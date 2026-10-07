@@ -13,6 +13,11 @@
   space now reads as Windows reads it (pool `wc4k`, checked against
   Windows' own reads). Writing to such spaces made the same mistake; a
   cache 1.1.0 wrote that way is now refused instead of misread.
+* `mount -t ReFS`, fstab and udisks2 mounts of ReFS volumes did not show
+  on systemd 254 and later (`mount.ReFS` gave up after 10 s, udisks2 said
+  "Unknown error"): there, the private network of the unit `refs` runs in
+  brought a private mount namespace along. The unit keeps the host's
+  mounts now (`PrivateMounts=no`).
 
 ## 1.1.0 (2026-10-05)
 

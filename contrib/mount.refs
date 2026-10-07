@@ -63,13 +63,15 @@ if [ $allow_other = 1 ]; then set -- "$@" --allow-other; fi
 # anyone's, so under systemd it runs as a transient service with the limits
 # that leave the mount visible to the host: no network, no new privileges,
 # no namespaces, only the capabilities mounting and reading disks need.
-# (ProtectSystem and the like would hide the mount in a private namespace.)
+# (ProtectSystem and the like would hide the mount in a private namespace,
+# and since systemd 254 PrivateNetwork implies one unless PrivateMounts=no:
+# the mount would be made where the host never sees it.)
 log=$(mktemp)
 unit=
 if [ "$(id -u)" = 0 ] && [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1; then
   unit=refs-mount-$$
   if ! systemd-run --quiet --collect --unit="$unit" \
-    -p NoNewPrivileges=yes -p PrivateNetwork=yes -p RestrictNamespaces=yes \
+    -p NoNewPrivileges=yes -p PrivateNetwork=yes -p PrivateMounts=no -p RestrictNamespaces=yes \
     -p RestrictRealtime=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes \
     -p MemoryDenyWriteExecute=yes -p SystemCallArchitectures=native -p UMask=0077 \
     -p "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER CAP_SETUID CAP_SETGID" \
