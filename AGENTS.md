@@ -41,9 +41,10 @@
   lacks (systemd >= 254 makes `PrivateNetwork` imply `PrivateMounts`; the AppArmor profile confines
   `fusermount3`), so test `mount.ReFS`, udisks2 and fuseblk mounts on both. ZFS root with ~180 GB free;
   `~/sstest` holds the `r314small` ReFS sample and test pools (`~/sstest/pools`; on the 22.04 VM they live
-  on `/srv/spaces/pools`, linked from there). `tools/mount-vm-check.sh` and `tools/package-vm-check.sh`
-  check a deb on either VM (`LINUX_VM_HOST=...`); on the 22.04 VM the package's scripts leave linuxreflect's
-  pool (served by `contrib/install.sh`'s `/usr/local/sbin/spaces`) alone, so it may be installed and removed there.
+  on `/srv/spaces/pools`, linked from there). `tools/mount-vm-check.sh`, `tools/package-vm-check.sh` and
+  `tools/guard-check.sh` (the health guard: refusals, reports, `--force`, udev hints, ReFS mounts) check a deb
+  on either VM (`LINUX_VM_HOST=...`); on the 22.04 VM the package's scripts leave linuxreflect's pool (served
+  by `contrib/install.sh`'s `/usr/local/sbin/spaces`) alone, so it may be installed and removed there.
 
 ## Long-running commands with Longrun MCP
 

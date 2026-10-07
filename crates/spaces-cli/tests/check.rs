@@ -4,6 +4,7 @@
 //! they are present.
 
 use std::fs::{File, OpenOptions};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -286,4 +287,171 @@ fn export_reads_a_suspect_space_only_when_forced() {
     let o = spaces(&args);
     assert!(o.status.success(), "{}", text(&o));
     assert_eq!(std::fs::metadata(&out).unwrap().len(), 1 << 30);
+}
+
+/// The copy of the NTFS boot sector changed: suspect by fs.ntfs, with
+/// where the copy is; read only with --force, never written.
+#[test]
+fn a_changed_ntfs_boot_copy_is_suspect_and_gated() {
+    let dir = Scratch(std::env::temp_dir().join(format!("spaces-ntfs-{}", std::process::id())));
+    let disks = pool(&dir.0);
+    {
+        let files: Vec<File> = disks
+            .iter()
+            .map(|p| OpenOptions::new().read(true).write(true).open(p).unwrap())
+            .collect();
+        let pool = Pool::open(files).unwrap();
+        let writer = pool.open_space_rw(pool.find_space("data").unwrap().id()).unwrap();
+        // The copy sits in the partition's last sector (see `partition`).
+        let last = writer.size() / 512 - 34;
+        writer.write_all_at(b"changed", last * 512 + 0x40).unwrap();
+        writer.flush().unwrap();
+    }
+    let all: Vec<&str> = disks.iter().map(String::as_str).collect();
+    let o = spaces(&[&["check"][..], &all].concat());
+    let out = text(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert!(
+        out.contains("SUSPECT  fs.ntfs           p1: the NTFS boot sector or its copy does not check out"),
+        "{out}"
+    );
+    assert!(
+        out.contains("what      the copy of the NTFS boot sector in the partition's last sector"),
+        "{out}"
+    );
+    assert!(
+        out.contains("expected  the same as the boot sector:") && out.contains("at byte 0x40"),
+        "{out}"
+    );
+    let socket = dir.0.join("nbd.sock");
+    let o = spaces(
+        &[
+            &[
+                "serve-nbd",
+                "--space",
+                "data",
+                "--rw",
+                "--socket",
+                socket.to_str().unwrap(),
+            ][..],
+            &all,
+        ]
+        .concat(),
+    );
+    let err = text(&o);
+    assert!(
+        !o.status.success() && err.contains("writing needs a healthy space"),
+        "{err}"
+    );
+    let out_img = dir.0.join("data.img");
+    let export = |extra: &[&str]| {
+        let mut args = vec!["export", "--space", "data", "--output", out_img.to_str().unwrap()];
+        args.extend(extra);
+        args.extend(all.iter().copied());
+        spaces(&args)
+    };
+    let o = export(&["--degraded"]);
+    assert!(
+        !o.status.success() && text(&o).contains("needs --force"),
+        "{}",
+        text(&o)
+    );
+    assert!(export(&["--force"]).status.success());
+}
+
+/// A run word of a partly valid cache entry changed so that the runs no
+/// longer cover their chunk (what 1.1.0 misread as 512-byte sectors): the
+/// cache is refused and the space failed, not read even with --force.
+#[test]
+fn a_changed_cache_run_word_fails_the_space() {
+    use storage_spaces::cache::Validity;
+    use storage_spaces::format::SpaceRole;
+    use storage_spaces::layout::Layout;
+    let original = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/pools/wc4k/disk0.img");
+    if !original.exists() {
+        eprintln!("{} missing, skipped", original.display());
+        return;
+    }
+    let dir = Scratch(std::env::temp_dir().join(format!("spaces-cache-{}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let copy = dir.0.join("disk0.img");
+    let cp = Command::new("cp")
+        .arg("--sparse=always")
+        .arg(&original)
+        .arg(&copy)
+        .status()
+        .unwrap();
+    assert!(cp.success());
+    // Where the slot with a partly valid entry is, and the entry in it.
+    let (at, mut slot) = {
+        let pool = Pool::open(vec![File::open(&copy).unwrap()]).unwrap();
+        let space = pool.find_space("wc4k").unwrap();
+        let reader = pool.open_space(space.id()).unwrap();
+        let cache = reader.cache().unwrap();
+        let (chunk, ..) = *cache
+            .mappings()
+            .iter()
+            .find(|m| matches!(m.2, Validity::Runs(_)))
+            .unwrap();
+        let container = pool
+            .children(space.id())
+            .find(|c| c.info.role == SpaceRole::Cache)
+            .unwrap();
+        let child = pool.children(container.id()).find(|c| !c.extents.is_empty()).unwrap();
+        let base = child.info.range.map_or(0, |(s, _)| s);
+        let layout = Layout::with_base(child.info.policy.as_ref().unwrap(), &child.extents, base).unwrap();
+        let h = &cache.header;
+        let slot = cache
+            .slots()
+            .iter()
+            .find(|s| s.content.windows(8).any(|w| w == chunk.to_le_bytes()))
+            .unwrap();
+        let offset = h.slot_offset + slot.index as u64 * u64::from(h.slot_size);
+        let loc = layout.locate(base + offset);
+        let (disk, physical) = layout.physical(loc.column, 0, loc.row).unwrap();
+        let (_, start) = pool.slab_location(disk, physical).unwrap().unwrap();
+        let at = start + loc.offset_in_slab;
+        let mut bytes = vec![0u8; h.slot_size as usize];
+        File::open(&copy).unwrap().read_exact_at(&mut bytes, at).unwrap();
+        // The entry: owner offset, block, state 2, then its run words.
+        let entry = (0x38..bytes.len() - 16)
+            .find(|&i| bytes[i..i + 8] == chunk.to_le_bytes() && bytes[i + 12..i + 14] == [2, 0])
+            .unwrap();
+        bytes[entry + 16] += 1;
+        bytes[0x24..0x28].fill(0);
+        let crc = crc32(&bytes);
+        bytes[0x24..0x28].copy_from_slice(&crc.to_le_bytes());
+        (at, bytes)
+    };
+    OpenOptions::new()
+        .write(true)
+        .open(&copy)
+        .unwrap()
+        .write_all_at(&slot, at)
+        .unwrap();
+    slot.clear();
+    let disk = copy.to_str().unwrap();
+    let o = spaces(&["check", disk]);
+    let out = text(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert!(out.lines().next().unwrap().ends_with(": FAILED"), "{out}");
+    assert!(
+        out.contains("FAILED   space.cache") && out.contains("cache runs cover"),
+        "{out}"
+    );
+    let img = dir.0.join("wc4k.img");
+    let o = spaces(&[
+        "export",
+        disk,
+        "--space",
+        "wc4k",
+        "--output",
+        img.to_str().unwrap(),
+        "--force",
+    ]);
+    assert!(
+        !o.status.success() && text(&o).contains("a failed space is not read at all"),
+        "{}",
+        text(&o)
+    );
 }
