@@ -623,3 +623,11 @@ overflow checks, and its parsers are fuzzed (`docs/security.md`).
   [Replacing a failed disk](#replacing-a-failed-disk) or attach it to
   Windows first.
 * Logs of serving processes: `journalctl -u 'storage-spaces-*'`.
+* A ReFS volume takes long to mount: the first mount of a large volume on
+  hard disks reads its tables (minutes on very large volumes; again after
+  a restart, when nothing is cached). `mount -t ReFS` waits for it and
+  shows every 10 s how much has been read; udisks2 waits too. Set
+  `MOUNT_REFS_TIMEOUT=SECONDS` for a limit.
+* `mount.refs: refs mounted the volume, but the mount is not visible here`:
+  `refs` ran in another mount namespace (a sandbox around `mount`, an old
+  `mount.ReFS` on systemd 254 or later); mount from the host.

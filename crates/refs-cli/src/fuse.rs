@@ -1282,12 +1282,82 @@ impl Filesystem for RefsFs {
     }
 }
 
+/// What `refs mount --status-file PATH` tells whoever started it
+/// (`mount.refs`): `state=opening` with `read=` the bytes read from the
+/// device so far, renewed every second while the volume is opened; then
+/// `state=mounted` once the mount is in place, or `state=failed` with
+/// `error=`. Each state is written whole into PATH.tmp and renamed over
+/// PATH, so a reader never sees half of one. So the one waiting needs no
+/// timeout: a slow device shows as a growing count.
+pub struct MountStatus {
+    path: Option<PathBuf>,
+    read: Arc<std::sync::atomic::AtomicU64>,
+    /// Set once mounted or failed; the lock orders the writes.
+    done: Arc<Mutex<bool>>,
+}
+
+impl MountStatus {
+    /// Starts reporting into `path` (nothing without one).
+    pub fn start(path: Option<PathBuf>) -> Self {
+        let status = MountStatus {
+            path,
+            read: Default::default(),
+            done: Default::default(),
+        };
+        if let Some(path) = status.path.clone() {
+            let (read, done) = (status.read.clone(), status.done.clone());
+            std::thread::spawn(move || {
+                loop {
+                    {
+                        let done = done.lock().unwrap_or_else(|e| e.into_inner());
+                        if *done {
+                            break;
+                        }
+                        let n = read.load(std::sync::atomic::Ordering::Relaxed);
+                        let _ = Self::write(&path, &format!("state=opening\nread={n}\n"));
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            });
+        }
+        status
+    }
+
+    /// The counter of bytes read that the progress shows.
+    pub fn counter(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        self.read.clone()
+    }
+
+    pub fn mounted(&self) {
+        self.finish("state=mounted\n");
+    }
+
+    pub fn failed(&self, error: &str) {
+        self.finish(&format!("state=failed\nerror={}\n", error.replace('\n', " | ")));
+    }
+
+    fn finish(&self, text: &str) {
+        let mut done = self.done.lock().unwrap_or_else(|e| e.into_inner());
+        if let (false, Some(path)) = (*done, &self.path) {
+            let _ = Self::write(path, text);
+        }
+        *done = true;
+    }
+
+    fn write(path: &Path, text: &str) -> std::io::Result<()> {
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, path)
+    }
+}
+
 /// Mounts the volume at `mountpoint` and serves it until unmounted; with
 /// `writable` changes go to the volume. `source` names the mount (the
 /// device, as mount(8) and udisks2 expect to find it in the mount table);
 /// with `blkdev` (root, a block device) the mount is of type fuseblk on
 /// that device, as ntfs-3g's are, so that udisks2 counts it as the
-/// device's mount.
+/// device's mount. `status` learns when the mount is in place.
 pub fn serve(
     vol: Volume<Rw>,
     source: &str,
@@ -1295,6 +1365,7 @@ pub fn serve(
     allow_other: bool,
     writable: bool,
     blkdev: bool,
+    status: &MountStatus,
 ) -> Result<()> {
     let mut config = Config::default();
     config.mount_options.extend([
@@ -1336,6 +1407,7 @@ pub fn serve(
     };
     let session = fuser::spawn_mount(fs, &mountpoint, &config)
         .with_context(|| format!("cannot mount on {}", mountpoint.display()))?;
+    status.mounted();
     session.join().context("FUSE session failed")?;
     Ok(())
 }
@@ -1344,6 +1416,35 @@ pub fn serve(
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// The status file of `refs mount --status-file`: opening with the
+    /// bytes read while the volume opens, then mounted or failed, each
+    /// state whole; nothing changes it after that.
+    #[test]
+    fn mount_status_reports_progress_then_the_outcome() {
+        let dir = std::env::temp_dir().join(format!("refs-status-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let read = |p: &Path| std::fs::read_to_string(p).unwrap_or_default();
+        let path = dir.join("status");
+        let status = MountStatus::start(Some(path.clone()));
+        status.counter().fetch_add(4096, std::sync::atomic::Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while read(&path) != "state=opening\nread=4096\n" {
+            assert!(std::time::Instant::now() < deadline, "{:?}", read(&path));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        status.mounted();
+        assert_eq!(read(&path), "state=mounted\n");
+        std::thread::sleep(Duration::from_millis(1200));
+        status.failed("too late");
+        assert_eq!(read(&path), "state=mounted\n");
+        let failed = dir.join("failed");
+        MountStatus::start(Some(failed.clone())).failed("no ReFS volume\non the device");
+        assert_eq!(read(&failed), "state=failed\nerror=no ReFS volume | on the device\n");
+        assert!(!dir.join("status.tmp").exists() && !dir.join("failed.tmp").exists());
+        MountStatus::start(None).mounted();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn entry(name: &str) -> Entry {
         Entry {

@@ -208,6 +208,12 @@ fstab and udisks2 this way, read-only unless the options hold both
 .B rw
 and
 .BR refs.rw .
+It returns once the mount is in place, or with the reason it is not;
+opening a large volume on hard disks the first time can take minutes,
+which it waits for (on a terminal it shows every 10 s how much has been
+read; the environment variable
+.B MOUNT_REFS_TIMEOUT
+sets a limit in seconds).
 Named streams appear as extended attributes
 .BR user. \fIname\fR
 (up to 64 KiB, the Linux limit; larger ones are read with

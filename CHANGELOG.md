@@ -18,6 +18,12 @@
   "Unknown error"): there, the private network of the unit `refs` runs in
   brought a private mount namespace along. The unit keeps the host's
   mounts now (`PrivateMounts=no`).
+* `mount.ReFS` gave up after 10 s, without a word, on volumes that take
+  longer to open (a 10.5 TiB volume on two hard disks after a restart).
+  `refs mount` now reports its progress and the outcome in a status file,
+  and `mount.ReFS` waits for that instead of a fixed time: it returns once
+  the mount is in place, or says why it is not, and shows on a terminal
+  how much has been read. `MOUNT_REFS_TIMEOUT` sets a limit.
 
 ## 1.1.0 (2026-10-05)
 

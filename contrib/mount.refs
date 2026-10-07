@@ -57,7 +57,12 @@ if [ $rw = 1 ] && [ $refs_rw = 1 ]; then set -- "$@" --rw; fi
 if [ $allow_other = 1 ]; then set -- "$@" --allow-other; fi
 
 # refs serves the mount in the foreground: run it in its own session and
-# return once the mount is there (or report why it is not).
+# return once the mount is there (or report why it is not). refs reports
+# how far it is in a status file (refs mount --status-file): opening, with
+# the bytes read so far, then mounted or failed. So nothing here guesses
+# with a timeout: a large volume on a slow disk can take minutes the first
+# time, and the count shows it is under way (every 10 s on a terminal).
+# MOUNT_REFS_TIMEOUT=SECONDS sets a limit all the same.
 #
 # As root (as mount(8) and udisks2 run this) it parses a disk that may be
 # anyone's, so under systemd it runs as a transient service with the limits
@@ -66,7 +71,9 @@ if [ $allow_other = 1 ]; then set -- "$@" --allow-other; fi
 # (ProtectSystem and the like would hide the mount in a private namespace,
 # and since systemd 254 PrivateNetwork implies one unless PrivateMounts=no:
 # the mount would be made where the host never sees it.)
-log=$(mktemp)
+work=$(mktemp -d)
+log=$work/log
+status=$work/status
 unit=
 if [ "$(id -u)" = 0 ] && [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1; then
   unit=refs-mount-$$
@@ -76,33 +83,59 @@ if [ "$(id -u)" = 0 ] && [ -d /run/systemd/system ] && command -v systemd-run >/
     -p MemoryDenyWriteExecute=yes -p SystemCallArchitectures=native -p UMask=0077 \
     -p "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER CAP_SETUID CAP_SETGID" \
     -p "StandardOutput=file:$log" -p "StandardError=file:$log" \
-    -- "$refs" mount "$@" "$source" "$dir"; then
+    -- "$refs" mount --status-file "$status" "$@" "$source" "$dir"; then
     unit=
   fi
 fi
 if [ -z "$unit" ]; then
-  setsid "$refs" mount "$@" "$source" "$dir" >"$log" 2>&1 </dev/null &
+  setsid "$refs" mount --status-file "$status" "$@" "$source" "$dir" >"$log" 2>&1 </dev/null &
   pid=$!
 fi
-i=0
-while [ $i -lt 100 ]; do
-  if mountpoint -q "$dir"; then
-    rm -f "$log"
-    exit 0
-  fi
+alive() {
   if [ -n "$unit" ]; then
-    systemctl -q is-active "$unit" 2>/dev/null || break
-  elif ! kill -0 $pid 2>/dev/null; then
+    systemctl -q is-active "$unit" 2>/dev/null
+  else
+    kill -0 "$pid" 2>/dev/null
+  fi
+}
+field() { sed -n "s/^$1=//p" "$status" 2>/dev/null || true; }
+start=$(date +%s)
+limit=${MOUNT_REFS_TIMEOUT:-0}
+shown=0
+reason=
+while :; do
+  case $(field state) in
+    mounted)
+      if mountpoint -q "$dir"; then
+        rm -rf "$work"
+        exit 0
+      fi
+      reason="refs mounted the volume, but the mount is not visible here (a private mount namespace?)"
+      break ;;
+    failed)
+      [ -s "$log" ] || reason=$(field error)
+      break ;;
+  esac
+  # Ended without a word: its log says why.
+  alive || break
+  elapsed=$(($(date +%s) - start))
+  if [ "$limit" -gt 0 ] && [ "$elapsed" -ge "$limit" ]; then
+    reason="refs did not mount the volume within $limit s (MOUNT_REFS_TIMEOUT)"
     break
   fi
-  sleep 0.1
-  i=$((i + 1))
+  if [ -t 2 ] && [ "$elapsed" -ge $((shown + 10)) ]; then
+    shown=$elapsed
+    bytes=$(field read)
+    echo "mount.refs: opening the volume, $((${bytes:-0} / 1048576)) MiB read in $elapsed s" >&2
+  fi
+  sleep 0.2
 done
+[ -z "$reason" ] || echo "mount.refs: $reason" >&2
 cat "$log" >&2
-rm -f "$log"
 if [ -n "$unit" ]; then
   systemctl stop "$unit" 2>/dev/null || true
 else
-  kill $pid 2>/dev/null || true
+  kill "$pid" 2>/dev/null || true
 fi
+rm -rf "$work"
 exit 32

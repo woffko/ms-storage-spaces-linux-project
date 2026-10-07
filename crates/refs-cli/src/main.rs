@@ -93,6 +93,10 @@ enum Command {
         /// --space).
         #[arg(long)]
         rw: bool,
+        /// Report the progress of opening the volume and then whether the
+        /// mount is in place into this file (for mount.refs).
+        #[arg(long, hide = true)]
+        status_file: Option<PathBuf>,
     },
     /// Change a file's times or attributes (experimental: writes the
     /// volume, only with --yes). Times are UTC, "YYYY-MM-DD hh:mm:ss" or a
@@ -405,6 +409,81 @@ impl storage_spaces::io::WriteAt for ReadOnly {
     }
     fn flush(&self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+/// `refs mount`: opens the volume (counting what it reads into `status`)
+/// and serves it until it is unmounted.
+#[cfg(all(target_os = "linux", feature = "fuse"))]
+fn mount(
+    source: &Source,
+    mountpoint: &std::path::Path,
+    allow_other: bool,
+    rw: bool,
+    status: &fuse::MountStatus,
+) -> Result<()> {
+    let vol: Volume<fuse::Rw> = if rw {
+        if source.space.is_some() || source.devices.len() != 1 {
+            bail!("--rw mounts one image, disk or partition (not --space)");
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&source.devices[0])
+            .with_context(|| format!("cannot open {}", source.devices[0].display()))?;
+        let offset = match source.offset {
+            Some(o) => o,
+            None => *find_volumes(&file)?.first().context("no ReFS volume on the device")?,
+        };
+        let vol = Volume::open(Box::new(file) as fuse::Rw, offset)?;
+        vol.writable_version()?;
+        if vol.log_state()?.needs_replay() {
+            bail!(
+                "the volume's log has changes its checkpoint lacks: attach it to Windows once and \
+                     detach it before mounting it for writing"
+            );
+        }
+        vol
+    } else {
+        let dev: Device = Box::new(Counted(open_device(source)?, status.counter()));
+        let offset = match source.offset {
+            Some(o) => o,
+            None => *find_volumes(dev.as_ref())?
+                .first()
+                .context("no ReFS volume on the device (or its partitions)")?,
+        };
+        Volume::open(Box::new(ReadOnly(dev)) as fuse::Rw, offset)?
+    };
+    let name = match &source.space {
+        Some(space) => format!("space:{space}"),
+        None => std::fs::canonicalize(&source.devices[0])
+            .unwrap_or_else(|_| source.devices[0].clone())
+            .display()
+            .to_string(),
+    };
+    // Root mounting a block device: a fuseblk mount of it.
+    let blkdev = source.space.is_none()
+        && source.devices.len() == 1
+        && std::fs::metadata(&source.devices[0])
+            .is_ok_and(|m| std::os::unix::fs::FileTypeExt::is_block_device(&m.file_type()))
+        && effective_uid() == Some(0);
+    fuse::serve(vol, &name, mountpoint, allow_other, rw, blkdev, status)
+}
+
+/// A device that counts the bytes read from it (the progress `refs mount
+/// --status-file` shows).
+#[cfg(feature = "fuse")]
+struct Counted(Device, std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+#[cfg(feature = "fuse")]
+impl ReadAt for Counted {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        self.0.read_exact_at(buf, offset)?;
+        self.1.fetch_add(buf.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+    fn size(&self) -> std::io::Result<u64> {
+        self.0.size()
     }
 }
 
@@ -971,53 +1050,13 @@ fn main() -> Result<()> {
             mountpoint,
             allow_other,
             rw,
+            status_file,
         } => {
-            let vol: Volume<fuse::Rw> = if rw {
-                if source.space.is_some() || source.devices.len() != 1 {
-                    bail!("--rw mounts one image, disk or partition (not --space)");
-                }
-                let file = std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&source.devices[0])
-                    .with_context(|| format!("cannot open {}", source.devices[0].display()))?;
-                let offset = match source.offset {
-                    Some(o) => o,
-                    None => *find_volumes(&file)?.first().context("no ReFS volume on the device")?,
-                };
-                let vol = Volume::open(Box::new(file) as fuse::Rw, offset)?;
-                vol.writable_version()?;
-                if vol.log_state()?.needs_replay() {
-                    bail!(
-                        "the volume's log has changes its checkpoint lacks: attach it to Windows once and \
-                         detach it before mounting it for writing"
-                    );
-                }
-                vol
-            } else {
-                let dev = open_device(&source)?;
-                let offset = match source.offset {
-                    Some(o) => o,
-                    None => *find_volumes(dev.as_ref())?
-                        .first()
-                        .context("no ReFS volume on the device (or its partitions)")?,
-                };
-                Volume::open(Box::new(ReadOnly(dev)) as fuse::Rw, offset)?
-            };
-            let name = match &source.space {
-                Some(space) => format!("space:{space}"),
-                None => std::fs::canonicalize(&source.devices[0])
-                    .unwrap_or_else(|_| source.devices[0].clone())
-                    .display()
-                    .to_string(),
-            };
-            // Root mounting a block device: a fuseblk mount of it.
-            let blkdev = source.space.is_none()
-                && source.devices.len() == 1
-                && std::fs::metadata(&source.devices[0])
-                    .is_ok_and(|m| std::os::unix::fs::FileTypeExt::is_block_device(&m.file_type()))
-                && effective_uid() == Some(0);
-            fuse::serve(vol, &name, &mountpoint, allow_other, rw, blkdev)?;
+            let status = fuse::MountStatus::start(status_file);
+            if let Err(e) = mount(&source, &mountpoint, allow_other, rw, &status) {
+                status.failed(&format!("{e:#}"));
+                return Err(e);
+            }
         }
         Command::Set {
             device,
