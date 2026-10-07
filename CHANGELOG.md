@@ -1,6 +1,18 @@
 # Changelog
 
-## 1.2.0 (unreleased)
+## 1.2.0 (2026-10-07)
+
+A health guard: before a space is attached (also at boot) or a ReFS
+volume is mounted (also by `mount -t ReFS` and udisks2), it is checked,
+and only what is healthy is attached and mounted without being asked. A
+degraded space is read only with `--degraded`, a suspect one only with
+`--force` (a ReFS volume with `-o force`), read-only either way, a failed
+one not at all, and writing needs a healthy verdict. Every problem comes
+with a report: each check with its evidence (where, what was expected and
+what was found), where the truth comes from and what to do. Checked
+against the whole corpus (no space Windows left healthy gets another
+verdict), with damaged copies of each kind, and on Ubuntu 26.10 and 22.04
+(`tools/guard-check.sh`).
 
 ### Health guard
 
@@ -44,13 +56,22 @@
   mounts a volume that is not healthy only with `--force`, read-only
   (`mount -t ReFS -o force`); a refused mount says the first failing
   check and where its report is (udisks2 shows "Unknown error" for any
-  refusal of a mount helper and keeps that line in its journal). A volume on a space
-  `spaces attach` attached gets the space's verdict too. `refs ls`,
-  `cat`, `stat` and `info` read such a volume with a warning; the writing
-  commands refuse it.
+  refusal of a mount helper and keeps that line in its journal). A
+  volume on a space `spaces attach` attached gets the space's verdict
+  too. `refs ls`, `cat`, `stat` and `info` read such a volume with a
+  warning; the writing commands refuse it.
 * Opening a space refuses metadata that breaks what the format implies
   (a slab mapped twice, extents or log entries outside the space, journal
   entries that do not cover their run), naming the values.
+
+### Fixes
+
+* Metadata whose spaces' parent links form a circle made `spaces pool
+  health` (and the checks) walk on until memory ran out; each hidden
+  space is visited once now (found by fuzzing the checks).
+* Reading the log of a ReFS volume (`refs info`, the writing commands,
+  the checks) takes about 40 reads instead of over 600: on a slow device
+  the number of reads counts.
 
 ## 1.1.1 (2026-10-07)
 

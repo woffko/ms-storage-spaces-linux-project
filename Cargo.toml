@@ -3,15 +3,15 @@ resolver = "3"
 members = ["crates/storage-spaces", "crates/spaces-cli", "crates/refs", "crates/refs-cli"]
 
 [workspace.package]
-version = "1.1.1"
+version = "1.2.0"
 edition = "2024"
 license = "GPL-2.0-or-later"
 rust-version = "1.89"
 repository = "https://github.com/woffko/ms-storage-spaces-linux-project"
 
 [workspace.dependencies]
-storage-spaces = { path = "crates/storage-spaces", version = "1.1.1" }
-refs = { path = "crates/refs", version = "1.1.1" }
+storage-spaces = { path = "crates/storage-spaces", version = "1.2.0" }
+refs = { path = "crates/refs", version = "1.2.0" }
 thiserror = "2"
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }

@@ -596,6 +596,20 @@ rows of thin spaces not allocated yet (M7).
   `status` and `scan` without root; device names of pools of the same
   name. Checked on a second Linux VM (Ubuntu 26.10, systemd 261, AppArmor)
   next to the 22.04 one.
+* Release `v1.2.0` (2026-10-07): the health guard. `storage_spaces::report`
+  and `guard` (pool, space, partition table, NTFS checks), `refs::health`
+  (ReFS quick checks), format invariants in the readers, `spaces check`
+  (JSON, deep checks, a bundle), the gate in attach, the servers, export
+  and `refs mount` (`--degraded`, `--force`, read-only; failed never;
+  writing only healthy), reports in `/run/storage-spaces/reports`, the
+  journal and `status`, udev properties with udisks2 hints (also hiding
+  the ublk partitions that duplicated the space's). No false alarm over
+  the corpus (512 spaces; `crates/refs/tests/verdicts.rs`); damaged cases
+  per check; `tools/guard-check.sh` on Ubuntu 26.10 and 22.04. The parity
+  journal lists stripes never written as not consistent after a clean
+  shutdown too, so checking them stops at a budget without making the
+  space suspect; udisks2 does not pass a mount helper's reason on (it is
+  in its journal).
 
 ### Track B (from 2026-10-02)
 
