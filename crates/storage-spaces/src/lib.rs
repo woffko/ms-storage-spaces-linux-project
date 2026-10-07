@@ -35,6 +35,7 @@ pub mod plan;
 mod pool;
 mod reader;
 pub mod records;
+pub mod report;
 pub mod segments;
 #[doc(hidden)]
 pub mod testpattern;
