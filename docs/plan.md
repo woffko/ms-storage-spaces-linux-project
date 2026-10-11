@@ -610,6 +610,16 @@ rows of thin spaces not allocated yet (M7).
   shutdown too, so checking them stops at a budget without making the
   space suspect; udisks2 does not pass a mount helper's reason on (it is
   in its journal).
+* Release `v1.2.1` (2026-10-11): fixes from a user's report of 1.2.0. The
+  attach unit's ordering cycle at boot (`PrivateTmp=` implies ordering
+  after `systemd-tmpfiles-setup.service`; `TemporaryFileSystem=` instead,
+  for the servers too; after the coldplug, without `udevadm trigger
+  --settle`, which hung at boot; `tools/boot-vm-check.sh` restarts the
+  26.10 VM and fails on 1.2.0); the ReFS log of volumes of several TiB (1 GiB from page
+  0x8000, found from container 7 and checked by the region its control page
+  names) read near the checkpoint, as a record's page follows from its
+  LSN; `spaces detach` refusing spaces in use; upgrades attaching spaces
+  anew (`detach --outdated`); no start limit for the attach unit.
 
 ### Track B (from 2026-10-02)
 

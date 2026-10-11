@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.2.1 (2026-10-11)
+
+Fixes from a user's report of 1.2.0 on Ubuntu 26.10: the attach unit
+disturbed every boot, the log of ReFS volumes of several TiB in spaces was
+not found, detaching a space in use broke its mounts, and upgrades left
+spaces on the old program. Checked on Ubuntu 26.10 and 22.04
+(`tools/package-vm-check.sh`), and across a restart on 26.10
+(`tools/boot-vm-check.sh`, which fails on 1.2.0).
+
+A copy of the attach unit made as a workaround in
+`/etc/systemd/system/storage-spaces-attach.service` overrides the
+package's: remove it, then run `systemctl daemon-reload`.
+
+### Fixes
+
+* Boot: the attach unit of 1.1.0 and 1.2.0 made an ordering cycle at
+  every boot, which systemd broke by dropping jobs at random: mounts of
+  snaps or `/boot/efi`, the setup of `/tmp` (after which logging in to
+  GNOME failed), or the attach itself. `PrivateTmp=yes` orders a unit
+  after `systemd-tmpfiles-setup.service`, which comes after
+  `local-fs.target`, while the unit runs before `local-fs-pre.target`.
+  The unit and the servers it starts get a `/tmp` of their own through
+  `TemporaryFileSystem=` now (systemd 238); the servers needed it too, or
+  at boot they would have waited for the attach that waits for them.
+  Running that early, attach could hang in `udevadm trigger --settle`
+  while udev worked through the coldplug, until the unit timed out: it
+  runs after the coldplug now and waits for udev no longer than 30 s.
+* ReFS: on volumes of several TiB the log is 1 GiB from page 0x8000, its
+  control page right after it, where `refs` did not look: the checks said
+  `fs.refs.log: the log cannot be read`, changes past the checkpoint would
+  have gone unnoticed there, and writing failed with "no log control
+  page". The log is now found after regions of 512 MiB to 2 GiB from
+  container 7 (or from where the volumes seen so far start it), of its
+  control page's two copies the newer is read, and writing that cannot
+  read the log says so. Such volumes that Windows left with changes in
+  the log (fast startup, hibernation) are suspect now, as others are.
+* ReFS: checking the log reads the record before the checkpoint and the
+  pages after it, not the whole log (512 MiB or 1 GiB): a record's page
+  follows from its sequence number. A few pages instead of up to 64 reads
+  of 16 MiB for `refs check --quick`, `spaces check`, each mount and
+  attach, and `refs info`.
+* `spaces detach` of a space whose volume was mounted stopped its server
+  anyway (so did removing the package): the mount then gave read errors.
+  It refuses now, naming the mount, and changes nothing.
+* Upgrading left the spaces attached before on servers running the old
+  program until they were detached and attached again (from 1.1.0 that
+  kept its cache bug). After an upgrade the packages and
+  `contrib/install.sh` detach those nothing uses (`spaces detach
+  --outdated`) and attach them with the new program; the others keep the
+  old server, as the upgrade says. The Arch package attached nothing
+  after an upgrade.
+* The attach unit hit systemd's start limit at boot, as udev starts it
+  for every member disk that appears: a disk that came a little later
+  would not have been attached. It has no start limit now, and the udev
+  rule no longer starts attach for the devices of attached spaces.
+
 ## 1.2.0 (2026-10-07)
 
 A health guard: before a space is attached (also at boot) or a ReFS
