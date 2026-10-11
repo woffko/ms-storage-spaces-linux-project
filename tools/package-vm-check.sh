@@ -3,6 +3,13 @@
 #   install  installing it attaches pools whose disks are present, and loads nbd
 #   gpt      the attached spaces' partition tables read clean (kernel, sfdisk)
 #   user     a user without root sees the attached spaces and why scan sees no disks
+#   cycle    its attach unit, enabled, leaves the boot transaction without
+#            ordering cycles (systemd-analyze verify, three runs, on a copy of
+#            the unit first in the unit path: here as on a VM where another
+#            installation's unit shadows it)
+#   servers  the servers attach started are not ordered after
+#            systemd-tmpfiles-setup.service (at boot they would wait for the
+#            attach that waits for them) and have a /tmp of their own
 #   remove   removing it detaches the spaces its own spaces serves, and only those
 # Usage: [LINUX_VM_HOST=user@address] tools/package-vm-check.sh DEB [CASE...]
 # Test pools: testdata/pools/{wc4k,ntfstier,sect4k}, copied to ~/sstest/pools
@@ -15,7 +22,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 deb=${1:?usage: tools/package-vm-check.sh DEB [CASE...]}
 shift
-cases=${*:-install gpt user remove}
+cases=${*:-install gpt user cycle servers remove}
 host=${LINUX_VM_HOST:-192.168.189.142}
 [[ $host == *@* ]] || host=codex@$host
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -i "$HOME/.ssh/rustadmin_vm_ed25519")
@@ -124,6 +131,33 @@ for c in $CASES; do
     if [[ $out == *ss-ss_wc4k-wc4k* ]]; then result ok "user status"; else result fail "user status" "${out//$'\n'/ | }"; fi
     out=$(/usr/sbin/spaces scan 2>&1)
     if [[ $out == *"permission denied"* ]]; then result ok "user scan" "${out//$'\n'/ | }"; else result fail "user scan" "${out//$'\n'/ | }"; fi ;;
+  cycle)
+    t=$(mktemp -d)
+    mkdir -p "$t/local-fs-pre.target.wants"
+    cp /usr/lib/systemd/system/storage-spaces-attach.service "$t/"
+    ln -s ../storage-spaces-attach.service "$t/local-fs-pre.target.wants/"
+    counts=
+    for _ in 1 2 3; do
+      counts+="$(SYSTEMD_UNIT_PATH="$t:" systemd-analyze verify default.target 2>&1 | grep -c 'ordering cycle') "
+    done
+    example=$(SYSTEMD_UNIT_PATH="$t:" systemd-analyze verify default.target 2>&1 | grep -m1 'ordering cycle')
+    rm -rf "$t"
+    if [[ $counts == "0 0 0 " ]]; then result ok cycle "0 cycles in 3 runs"; else result fail cycle "cycles: $counts: $example"; fi ;;
+  servers)
+    n=0 bad=
+    for d in $(ours); do
+      f=$(sudo sh -c 'grep -lx "dm=$0" /run/storage-spaces/*.state' "$d" 2>/dev/null | head -1)
+      u=$(sudo sed -n 's/^unit=//p' "$f" 2>/dev/null)
+      [[ -n $u ]] || continue
+      n=$((n + 1))
+      after=$(systemctl show -p After --value "$u")
+      tmp=$(systemctl show -p TemporaryFileSystem --value "$u")
+      [[ $after == *systemd-tmpfiles-setup* ]] && bad+=" $u: After=$after"
+      [[ $tmp == */tmp* ]] || bad+=" $u: TemporaryFileSystem=$tmp"
+    done
+    if ((n == 0)); then result fail servers "no server of the test pools"
+    elif [[ -z $bad ]]; then result ok servers "$n servers"
+    else result fail servers "$bad"; fi ;;
   remove)
     if ((!explicit)); then
       # Another installation's spaces: sect4k, served by a copy elsewhere.

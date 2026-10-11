@@ -45,6 +45,8 @@
   `tools/guard-check.sh` (the health guard: refusals, reports, `--force`, udev hints, ReFS mounts) check a deb
   on either VM (`LINUX_VM_HOST=...`); on the 22.04 VM the package's scripts leave linuxreflect's pool (served
   by `contrib/install.sh`'s `/usr/local/sbin/spaces`) alone, so it may be installed and removed there.
+  `tools/boot-vm-check.sh` checks a deb across a restart (ordering cycles, attach before `local-fs-pre.target`,
+  an fstab mount of a space's volume at boot): it restarts the VM, so only on the 26.10 VM.
 
 ## Long-running commands with Longrun MCP
 
