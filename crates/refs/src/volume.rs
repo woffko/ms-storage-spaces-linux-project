@@ -529,7 +529,8 @@ impl<D: ReadAt> Volume<D> {
         let start: Vec<u64> = self
             .containers
             .get(&7)
-            .map(|&c| c * self.cluster / 4096)
+            .and_then(|&c| c.checked_mul(self.cluster))
+            .map(|b| b / 4096)
             .into_iter()
             .collect();
         log_state(
@@ -977,9 +978,9 @@ fn read_log<D: ReadAt + ?Sized>(
         }
         tried.push(start);
         for size in LOG_SIZES {
-            let end = start + size;
+            let end = start.saturating_add(size);
             let len = 2 * cluster.max(PAGE);
-            if (end * PAGE).saturating_add(len) > volume_size {
+            if end.saturating_mul(PAGE).saturating_add(len) > volume_size {
                 continue;
             }
             let pages = read(end * PAGE, len)?;
