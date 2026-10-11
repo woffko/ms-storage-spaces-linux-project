@@ -1,9 +1,3 @@
-# Attach Microsoft Storage Spaces pools read-only when their member disks
-# appear. The service attaches every complete pool and skips pools that are
-# still missing disks; it runs again for every further member that shows up.
-ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_PART_ENTRY_TYPE}=="e75caf8f-f680-4cee-afa3-b001e56efc2d", \
-  TAG+="systemd", ENV{SYSTEMD_WANTS}+="storage-spaces-attach.service"
-
 # The devices of attached spaces: spaces attach writes their properties to
 # /run/storage-spaces/udev/<name>.props (SS_SPACE, SS_POOL, SS_VERDICT,
 # SS_FORCED; SS_BACKEND=1 on the ublk, nbd or loop device a space is served
@@ -19,4 +13,12 @@ ENV{SS_BACKEND}=="1", ENV{UDISKS_IGNORE}="1"
 # A space attached past its verdict (spaces attach --degraded or --force):
 # nothing mounts it without being asked.
 ENV{SS_VERDICT}=="?*", ENV{SS_VERDICT}!="healthy", ENV{UDISKS_IGNORE}="1"
+
+# Attach Microsoft Storage Spaces pools read-only when their member disks
+# appear. The service attaches every complete pool and skips pools that are
+# still missing disks; it runs again for every further member that shows up.
+# Not for the devices of attached spaces (whose properties came above): what
+# a space holds never starts another attach.
+ACTION=="add|change", ENV{SS_SPACE}!="?*", ENV{ID_PART_ENTRY_TYPE}=="e75caf8f-f680-4cee-afa3-b001e56efc2d", \
+  TAG+="systemd", ENV{SYSTEMD_WANTS}+="storage-spaces-attach.service"
 LABEL="storage_spaces_end"

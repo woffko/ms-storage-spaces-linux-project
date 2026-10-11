@@ -5,6 +5,11 @@ DefaultDependencies=no
 After=systemd-udevd.service systemd-modules-load.service
 Before=local-fs-pre.target
 Wants=local-fs-pre.target
+# udev starts it for every member disk that appears or changes, several
+# times within seconds at boot: with the default start limit a disk that
+# came a little later would not be attached at all. Runs are cheap for
+# spaces already attached.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot

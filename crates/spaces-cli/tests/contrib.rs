@@ -40,6 +40,17 @@ fn the_attach_unit_has_no_ordering_cycle_at_boot() {
     assert!(settings.contains(&"TemporaryFileSystem=/tmp /var/tmp"), "{unit}");
 }
 
+/// udev starts the attach unit for every member disk that appears or
+/// changes, several times within seconds at boot: under the default start
+/// limit (5 in 10 s) a member that came later was not attached.
+#[test]
+fn the_attach_unit_has_no_start_limit() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contrib/systemd/storage-spaces-attach.service");
+    let unit = std::fs::read_to_string(path).unwrap();
+    let section = unit.split("[Service]").next().unwrap();
+    assert!(section.lines().any(|l| l == "StartLimitIntervalSec=0"), "{unit}");
+}
+
 /// The udev rule imports what attach writes for the devices of attached
 /// spaces, and hides from udisks2 the devices a space is served through
 /// (with their kernel partitions, which duplicate the space's partition
@@ -80,9 +91,17 @@ fn the_udev_rule_hides_what_nothing_should_mount_unasked() {
         has(&["ENV{SS_VERDICT}!=\"healthy\"", "ENV{UDISKS_IGNORE}=\"1\""]),
         "{rule}"
     );
-    // The attach on member disks stays.
+    // The attach on member disks stays, but not for the devices of attached
+    // spaces: the line comes after their properties are imported.
     assert!(
-        has(&["e75caf8f-f680-4cee-afa3-b001e56efc2d", "SYSTEMD_WANTS"]),
+        has(&[
+            "e75caf8f-f680-4cee-afa3-b001e56efc2d",
+            "ENV{SS_SPACE}!=\"?*\"",
+            "SYSTEMD_WANTS"
+        ]),
         "{rule}"
     );
+    let at = |part: &str| lines.iter().position(|l| l.contains(part)).unwrap();
+    assert!(at("SYSTEMD_WANTS") > at("$parent.props"), "{rule}");
+    assert!(at("SYSTEMD_WANTS") < at("LABEL=\"storage_spaces_end\""), "{rule}");
 }
