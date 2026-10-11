@@ -229,7 +229,7 @@ pub fn quick_checks<D: ReadAt + ?Sized>(
     checks.push(if v1 {
         Check::skipped("fs.refs.log", format!("{label}: the log of ReFS 1.x is not read"))
     } else {
-        match log_state(dev, offset, unit, boot.volume_size(), current.n) {
+        match log_state(dev, offset, unit, boot.volume_size(), current.n, &[]) {
             Ok(log) if log.needs_replay() => {
                 let newest = log.newest.unwrap();
                 Check::new(

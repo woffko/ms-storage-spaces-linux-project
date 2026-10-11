@@ -860,18 +860,36 @@ past the checkpoint (every volume `New-RefsVolume.ps1` made before it
 took the disk offline first had some); taking the disk offline makes
 ReFS write a checkpoint that covers the log (**verified**).
 
-* The control page ("MLog", the volume signature at 4, zero at 0x28)
-  sits among the volume's first clusters on plain volumes (cluster 0x30
-  on 4 KiB, 0x27 on 64 KiB clusters) and right after the log region on a
-  volume inside a space (4 KiB page 0x44000); nothing found so far points
-  at it. It gives the log's epoch (0x20) and its region, from 0xb8 to
-  0xc0 in 4 KiB pages (0x24000..0x44000 on every corpus volume).
+* The log's region starts at the first cluster of container 7 (the
+  row's physical cluster): 4 KiB page 0x24000 on every corpus volume,
+  0x8000 on volumes a user's Windows made (a plain one of some hundred
+  GiB, two of several TiB in a space). It is 512 MiB, or 1 GiB on the
+  volumes of several TiB; where the size changes is not known.
+* The control page ("MLog", the volume signature at 4, zero at 0x28) is
+  kept twice, in two clusters one after the other: among the volume's
+  first clusters (cluster 0x30 on 4 KiB, 0x27 on 64 KiB clusters: 3.7 and
+  3.14 plain corpus volumes, and the user's plain one) or right after the
+  log's region (3.4 plain corpus volumes, every volume inside a space so
+  far: page 0x44000, or 0x48000 after a log of 1 GiB). Nothing found so
+  far points at it; the region it names confirms a candidate after a
+  region. It gives the log's epoch (0x20) and its region, from 0xb8 to
+  0xc0 in 4 KiB pages. The copies are written in turn: the newer counts
+  higher at 0xb0 (and 0xf4); 0x80 differs too, and on a volume with
+  records past the checkpoint so does 0xc8, the checkpoint's LSN as of
+  that copy. Epoch and region agree between them on every volume seen.
 * Record pages (4 KiB): "MLog", the volume signature, the epoch at 0x20,
-  the record's LSN at 0x28 and the previous one at 0x30.
+  the record's LSN at 0x28 and the previous one at 0x30. A record's page
+  is the region's start plus the LSN's low half; the high half grows by
+  one when the log wraps and with every epoch (**verified**: every record
+  of the 26 ReFS 3.x corpus volumes and of the user's three).
 
 The checkpoint misses changes when a record of the current epoch is not
-older than its LSN (**verified** against Windows' restart ranges). `refs
-info` reports it; `refs` reads only the checkpoint, and refuses to write
+older than its LSN (**verified** against Windows' restart ranges). As
+records sit at the page their LSN names, `refs` reads the page of the
+record before the checkpoint's LSN (to confirm that) and the pages from
+the checkpoint's LSN on while they hold records of the current epoch
+past it, instead of the whole region (which it reads where the record
+before is not where it should be). `refs info` reports it; `refs` reads only the checkpoint, and refuses to write
 such a volume: Windows would replay the logged changes over its own (a
 directory created on such a volume collided with objects the replay
 created, which lost the directory's contents).

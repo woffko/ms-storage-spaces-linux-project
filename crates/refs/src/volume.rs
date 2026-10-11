@@ -525,12 +525,20 @@ impl<D: ReadAt> Volume<D> {
         if self.v1 {
             return Err(Error::Unsupported("the log of ReFS 1.x".into()));
         }
+        // The log starts with container 7.
+        let start: Vec<u64> = self
+            .containers
+            .get(&7)
+            .map(|&c| c * self.cluster / 4096)
+            .into_iter()
+            .collect();
         log_state(
             &self.dev,
             self.offset,
             self.cluster,
             self.boot.volume_size(),
             self.checkpoint.lcn,
+            &start,
         )
     }
 
@@ -885,85 +893,183 @@ impl<D: ReadAt> Volume<D> {
     }
 }
 
+/// Where the log's region began on the volumes seen so far, in 4 KiB
+/// pages: the first cluster of container 7, where the log starts (a volume
+/// passes its own, [`Volume::log_state`]).
+pub(crate) const LOG_STARTS: [u64; 2] = [0x24000, 0x8000];
+/// The sizes of the log's region seen so far, in 4 KiB pages (512 MiB; 1 GiB
+/// on volumes of several TiB), and the next larger.
+const LOG_SIZES: [u64; 3] = [0x20000, 0x40000, 0x80000];
+/// Pages read at a time from the checkpoint's position in the log on.
+const LOG_WINDOW: u64 = 16;
+
 /// The log's state of the ReFS 3.x volume at byte `offset` of `dev`
 /// (clusters of `cluster` bytes, `volume_size` bytes) whose current
-/// checkpoint is at physical cluster `checkpoint_lcn`: see
-/// [`Volume::log_state`].
+/// checkpoint is at physical cluster `checkpoint_lcn`, its log's region
+/// starting at one of the 4 KiB pages `starts` or as on the volumes seen
+/// so far: see [`Volume::log_state`].
 pub(crate) fn log_state<D: ReadAt + ?Sized>(
     dev: &D,
     offset: u64,
     cluster: u64,
     volume_size: u64,
     checkpoint_lcn: u64,
+    starts: &[u64],
+) -> Result<LogState> {
+    read_log(dev, offset, cluster, volume_size, checkpoint_lcn, starts, false)
+}
+
+/// [`log_state`], reading the whole region with `full` (the tests compare).
+fn read_log<D: ReadAt + ?Sized>(
+    dev: &D,
+    offset: u64,
+    cluster: u64,
+    volume_size: u64,
+    checkpoint_lcn: u64,
+    starts: &[u64],
+    full: bool,
 ) -> Result<LogState> {
     const PAGE: u64 = 4096;
-    let physical = |lcn: u64| -> Result<Vec<u8>> {
-        let mut buf = vec![0u8; cluster as usize];
-        let at = lcn
-            .checked_mul(cluster)
-            .and_then(|b| b.checked_add(offset))
-            .ok_or_else(|| format_err!("cluster {lcn:#x} beyond any device"))?;
+    let read = |at: u64, len: u64| -> Result<Vec<u8>> {
+        let mut buf = vec![0u8; len as usize];
+        let at = at
+            .checked_add(offset)
+            .ok_or_else(|| format_err!("byte {at:#x} beyond any device"))?;
         dev.read_exact_at(&mut buf, at)?;
         Ok(buf)
     };
+    let physical = |lcn: u64| -> Result<Vec<u8>> {
+        let at = lcn
+            .checked_mul(cluster)
+            .ok_or_else(|| format_err!("cluster {lcn:#x} beyond any device"))?;
+        read(at, cluster)
+    };
     let checkpoint = Lsn::from(le64(&physical(checkpoint_lcn)?, 0x70));
-    // The control page, where Windows put it so far: among the volume's
-    // first clusters (plain volumes), or right after the log region at its
-    // usual place, 4 KiB pages 0x24000..0x44000 (a volume inside a space).
-    // Neither: the log is not understood.
     let signature = le32(&physical(SUPERBLOCK_LCN)?, 0x0c);
     let is_control = |c: &[u8]| &c[0..4] == b"MLog" && le32(c, 4) == signature && le64(c, 0x28) == 0;
+    // The control page, which Windows keeps twice (in clusters one after
+    // the other, written in turn): among the volume's first clusters, or
+    // right after the log's region (which it names, 0xb8..0xc0).
+    let mut copies: Vec<(u64, Vec<u8>)> = Vec::new();
     // The first clusters 64 at a time: on a slow device the number of
     // reads counts, not their size.
-    let mut control = None;
     let first = 0x400u64.min(volume_size / cluster);
     let mut lcn = 0;
-    'search: while lcn < first {
+    while lcn < first && copies.is_empty() {
         let n = (first - lcn).min(64);
-        let mut batch = vec![0u8; (n * cluster) as usize];
-        dev.read_exact_at(&mut batch, offset + lcn * cluster)?;
-        for c in batch.chunks_exact(cluster as usize) {
-            if is_control(c) {
-                control = Some(c.to_vec());
-                break 'search;
+        // One cluster more, for the copy after one in the batch's last.
+        let batch = read(lcn * cluster, (n + 1).min(volume_size / cluster - lcn) * cluster)?;
+        for (i, c) in (0..).zip(batch.chunks_exact(cluster as usize)) {
+            // The extra cluster counts only as the copy of one found here.
+            if i == n && copies.is_empty() {
+                break;
+            }
+            if is_control(c) && le64(c, 0xb8) < le64(c, 0xc0) {
+                copies.push(((lcn + i) * cluster / PAGE, c[..PAGE as usize].to_vec()));
             }
         }
         lcn += n;
     }
-    if control.is_none() {
-        let mut c = vec![0u8; PAGE as usize];
-        if dev.read_exact_at(&mut c, offset + 0x44000 * PAGE).is_ok() && is_control(&c) {
-            control = Some(c);
+    let mut tried = Vec::new();
+    for &start in starts.iter().chain(&LOG_STARTS) {
+        if !copies.is_empty() || tried.contains(&start) {
+            continue;
+        }
+        tried.push(start);
+        for size in LOG_SIZES {
+            let end = start + size;
+            let len = 2 * cluster.max(PAGE);
+            if (end * PAGE).saturating_add(len) > volume_size {
+                continue;
+            }
+            let pages = read(end * PAGE, len)?;
+            for (i, c) in (0..).zip(pages.as_chunks::<{ PAGE as usize }>().0) {
+                if is_control(c) && le64(c, 0xb8) == start && le64(c, 0xc0) == end {
+                    copies.push((end + i, c.to_vec()));
+                }
+            }
+            if !copies.is_empty() {
+                break;
+            }
         }
     }
-    let control = control.ok_or_else(|| format_err!("no log control page"))?;
+    // The newer copy counts higher at 0xb0.
+    let Some((control_page, control)) = copies.into_iter().max_by_key(|(_, c)| le64(c, 0xb0)) else {
+        let tried: Vec<String> = tried.iter().map(|p| format!("{p:#x}")).collect();
+        return Err(format_err!(
+            "no log control page among the first {first:#x} clusters nor after a log of 512 MiB to 2 GiB \
+             from page {}",
+            tried.join(" or ")
+        ));
+    };
     let (epoch, start, end) = (le64(&control, 0x20), le64(&control, 0xb8), le64(&control, 0xc0));
-    if start >= end || (end - start) > 1 << 22 {
+    if start >= end || (end - start) > 1 << 22 || end.saturating_mul(PAGE) > volume_size {
         return Err(format_err!("log of pages {start:#x}..{end:#x}"));
+    }
+    let found = |newest: Option<(Lsn, u64)>| LogState {
+        checkpoint,
+        newest: newest.map(|n| n.0),
+        newest_page: newest.map(|n| n.1),
+        region: (start, end),
+        control_page,
+    };
+    let record =
+        |p: &[u8]| (&p[0..4] == b"MLog" && le32(p, 4) == signature).then(|| (le64(p, 0x20), Lsn::from(le64(p, 0x28))));
+    // A record's page is the region's start plus the low half of its log
+    // sequence number (the high half counts wraps and epochs): the record
+    // before the checkpoint's number and any after it are at known pages.
+    // Where the one before is not there, the whole region is read.
+    let len = end - start;
+    let at = checkpoint.low as u64;
+    if at < len && !full {
+        let before_page = start + (at + len - 1) % len;
+        let before = record(&read(before_page * PAGE, PAGE)?)
+            .filter(|&(_, lsn)| lsn < checkpoint && lsn.low as u64 == before_page - start);
+        if let Some((before_epoch, before_lsn)) = before {
+            let mut newest = (before_epoch == epoch).then_some((before_lsn, before_page));
+            // From the checkpoint's position on, a window at a time, while
+            // records of this epoch at or past its number go on.
+            let mut k = 0;
+            while k < len {
+                let page = start + (at + k) % len;
+                let n = LOG_WINDOW.min(end - page).min(len - k);
+                let mut later = false;
+                for (i, p) in (0..).zip(read(page * PAGE, n * PAGE)?.as_chunks::<{ PAGE as usize }>().0) {
+                    if let Some((e, lsn)) = record(p)
+                        && e == epoch
+                        && lsn >= checkpoint
+                    {
+                        later = true;
+                        if newest.is_none_or(|(n, _)| lsn > n) {
+                            newest = Some((lsn, page + i));
+                        }
+                    }
+                }
+                if !later {
+                    break;
+                }
+                k += n;
+            }
+            return Ok(found(newest));
+        }
     }
     // Every record page of the current epoch, 16 MiB at a time.
     let mut newest: Option<(Lsn, u64)> = None;
-    let mut buf = vec![0u8; 4096 * PAGE as usize];
     let mut page = start;
     while page < end {
         let n = (end - page).min(4096);
-        let chunk = &mut buf[..(n * PAGE) as usize];
-        dev.read_exact_at(chunk, offset + page * PAGE)?;
+        let chunk = read(page * PAGE, n * PAGE)?;
         for (i, head) in chunk.as_chunks::<{ PAGE as usize }>().0.iter().enumerate() {
-            if &head[0..4] == b"MLog" && le32(head, 4) == signature && le64(head, 0x20) == epoch {
-                let lsn = Lsn::from(le64(head, 0x28));
-                if newest.is_none_or(|(n, _)| lsn > n) {
-                    newest = Some((lsn, page + i as u64));
-                }
+            if let Some((e, lsn)) = record(head)
+                && e == epoch
+                && newest.is_none_or(|(n, _)| lsn > n)
+            {
+                newest = Some((lsn, page + i as u64));
             }
         }
         page += n;
     }
-    Ok(LogState {
-        checkpoint,
-        newest: newest.map(|n| n.0),
-        newest_page: newest.map(|n| n.1),
-    })
+    Ok(found(newest))
 }
 
 /// A log sequence number: (wrap, sequence) as ReFS stores it (u32 low
@@ -991,11 +1097,315 @@ pub struct LogState {
     pub newest: Option<Lsn>,
     /// Its 4 KiB page, from the start of the volume.
     pub newest_page: Option<u64>,
+    /// The log's region, 4 KiB pages from the start of the volume.
+    pub region: (u64, u64),
+    /// The (newer) control page.
+    pub control_page: u64,
 }
 
 impl LogState {
     /// Records Windows would replay over the checkpoint.
     pub fn needs_replay(&self) -> bool {
         self.newest.is_some_and(|n| n >= self.checkpoint)
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const SIG: u32 = 0x5eed_1234;
+    /// The log's region of a volume of several TiB: 1 GiB from page 0x8000.
+    const S: u64 = 0x8000;
+    const E: u64 = 0x48000;
+    const SIZE: u64 = 8 << 40;
+    const CHECKPOINT_LCN: u64 = 0x100;
+
+    /// A volume of 4 KiB clusters, zero but where set; counts what is read.
+    struct Pages {
+        pages: BTreeMap<u64, Vec<u8>>,
+        read: AtomicU64,
+    }
+
+    impl ReadAt for Pages {
+        fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+            self.read.fetch_add(buf.len() as u64, Ordering::Relaxed);
+            buf.fill(0);
+            let end = offset + buf.len() as u64;
+            for (&n, page) in self.pages.range(offset / 4096..end.div_ceil(4096)) {
+                let (from, to) = ((n * 4096).max(offset), (n * 4096 + 4096).min(end));
+                buf[(from - offset) as usize..(to - offset) as usize]
+                    .copy_from_slice(&page[(from - n * 4096) as usize..(to - n * 4096) as usize]);
+            }
+            Ok(())
+        }
+
+        fn size(&self) -> std::io::Result<u64> {
+            Ok(SIZE)
+        }
+    }
+
+    fn lsn(high: u32, low: u32) -> Lsn {
+        Lsn { high, low }
+    }
+
+    fn raw(l: Lsn) -> u64 {
+        ((l.high as u64) << 32) | l.low as u64
+    }
+
+    fn page(fields: &[(usize, u64)]) -> Vec<u8> {
+        let mut p = vec![0u8; 4096];
+        p[..4].copy_from_slice(b"MLog");
+        p[4..8].copy_from_slice(&SIG.to_le_bytes());
+        for &(at, v) in fields {
+            p[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        p
+    }
+
+    /// Superblock and checkpoint; the log comes from the tests.
+    fn volume(checkpoint: Lsn) -> Pages {
+        let mut sb = vec![0u8; 4096];
+        sb[0x0c..0x10].copy_from_slice(&SIG.to_le_bytes());
+        let mut cp = vec![0u8; 4096];
+        cp[0x70..0x78].copy_from_slice(&raw(checkpoint).to_le_bytes());
+        Pages {
+            pages: BTreeMap::from([(SUPERBLOCK_LCN, sb), (CHECKPOINT_LCN, cp)]),
+            read: AtomicU64::new(0),
+        }
+    }
+
+    fn control(v: &mut Pages, at: u64, epoch: u64, counter: u64, region: (u64, u64)) {
+        let p = page(&[
+            (0x20, epoch),
+            (0x28, 0),
+            (0xb0, counter),
+            (0xb8, region.0),
+            (0xc0, region.1),
+        ]);
+        v.pages.insert(at, p);
+    }
+
+    fn record(v: &mut Pages, epoch: u64, l: Lsn) {
+        v.pages.insert(S + l.low as u64, page(&[(0x20, epoch), (0x28, raw(l))]));
+    }
+
+    /// The quick reading and the whole region's agree; returns the quick
+    /// one and what it read.
+    fn both(v: &Pages) -> (LogState, u64) {
+        let full = read_log(v, 0, 4096, SIZE, CHECKPOINT_LCN, &[], true).unwrap();
+        v.read.store(0, Ordering::Relaxed);
+        let quick = read_log(v, 0, 4096, SIZE, CHECKPOINT_LCN, &[], false).unwrap();
+        let read = v.read.load(Ordering::Relaxed);
+        assert_eq!(
+            (quick.newest, quick.newest_page, quick.region, quick.control_page),
+            (full.newest, full.newest_page, full.region, full.control_page)
+        );
+        (quick, read)
+    }
+
+    /// A volume of several TiB in a space: its log is 1 GiB from page
+    /// 0x8000, the control page and its copy right after it (1.2.0 looked
+    /// only at page 0x44000). Clean: the newest record is the one before
+    /// the checkpoint's number, found without reading the log.
+    #[test]
+    fn the_log_after_a_gigabyte_is_found_and_read_near_the_checkpoint() {
+        let mut v = volume(lsn(5, 0x111));
+        control(&mut v, E, 7, 3, (S, E));
+        control(&mut v, E + 1, 7, 4, (S, E));
+        for low in 0x100..=0x110 {
+            record(&mut v, 7, lsn(5, low));
+        }
+        let (log, read) = both(&v);
+        assert_eq!((log.region, log.control_page), ((S, E), E + 1));
+        assert!(!log.needs_replay());
+        assert_eq!((log.newest, log.newest_page), (Some(lsn(5, 0x110)), Some(S + 0x110)));
+        // The first clusters (4 MiB), the candidates, a few log pages.
+        assert!(read < 8 << 20, "{read}");
+    }
+
+    /// Records past the checkpoint's number, also more than a window.
+    #[test]
+    fn records_past_the_checkpoint_are_found_to_the_last() {
+        for past in [1, 4, 16, 40] {
+            let mut v = volume(lsn(5, 0x111));
+            control(&mut v, E, 7, 3, (S, E));
+            for low in 0x100..0x111 + past {
+                record(&mut v, 7, lsn(5, low));
+            }
+            let (log, _) = both(&v);
+            assert!(log.needs_replay());
+            assert_eq!(log.newest, Some(lsn(5, 0x110 + past)), "{past}");
+        }
+    }
+
+    /// The checkpoint's number at the region's start: the record before it
+    /// is the region's last, of the lap before.
+    #[test]
+    fn the_log_wraps() {
+        let len = (E - S) as u32;
+        for dirty in [false, true] {
+            let mut v = volume(lsn(9, 0));
+            control(&mut v, E, 7, 3, (S, E));
+            record(&mut v, 7, lsn(8, len - 1));
+            record(&mut v, 7, lsn(8, len - 2));
+            if dirty {
+                record(&mut v, 7, lsn(9, 0));
+                record(&mut v, 7, lsn(9, 1));
+            }
+            let (log, _) = both(&v);
+            assert_eq!(log.needs_replay(), dirty);
+            let newest = if dirty {
+                (lsn(9, 1), S + 1)
+            } else {
+                (lsn(8, len - 1), E - 1)
+            };
+            assert_eq!((log.newest, log.newest_page), (Some(newest.0), Some(newest.1)));
+        }
+    }
+
+    /// The record before the checkpoint is of an older epoch (a new one
+    /// began with it): the mapping holds, the current epoch has no record.
+    #[test]
+    fn a_new_epoch_has_no_record_yet() {
+        let mut v = volume(lsn(6, 0x111));
+        control(&mut v, E, 8, 3, (S, E));
+        record(&mut v, 7, lsn(5, 0x110));
+        let (log, read) = both(&v);
+        assert!(!log.needs_replay());
+        assert_eq!(log.newest, None);
+        assert!(read < 8 << 20, "{read}");
+    }
+
+    /// Where the record before the checkpoint's number is not where the
+    /// mapping puts it, the whole region is read (and finds what the quick
+    /// reading could not).
+    #[test]
+    fn without_the_record_before_the_whole_log_is_read() {
+        let mut v = volume(lsn(5, 0x200));
+        control(&mut v, E, 7, 3, (S, E));
+        record(&mut v, 7, lsn(5, 0x50));
+        record(&mut v, 7, lsn(5, 0x300));
+        let (log, read) = both(&v);
+        assert!(log.needs_replay());
+        assert_eq!(log.newest, Some(lsn(5, 0x300)));
+        assert!(read >= 1 << 30, "{read}");
+    }
+
+    /// The control page among the first clusters (plain volumes), its copy
+    /// in the next cluster even across a batch of reads; the newer counts
+    /// higher at 0xb0.
+    #[test]
+    fn the_newer_copy_among_the_first_clusters() {
+        let mut v = volume(lsn(5, 0x111));
+        control(&mut v, 0x3f, 7, 9, (S, E));
+        control(&mut v, 0x40, 7, 8, (S, E));
+        record(&mut v, 7, lsn(5, 0x110));
+        let (log, _) = both(&v);
+        assert_eq!(log.control_page, 0x3f);
+        let mut v = volume(lsn(5, 0x111));
+        control(&mut v, 0x3f, 7, 8, (S, E));
+        control(&mut v, 0x40, 7, 9, (S, E));
+        record(&mut v, 7, lsn(5, 0x110));
+        assert_eq!(both(&v).0.control_page, 0x40);
+    }
+
+    /// No control page where the volumes seen so far keep it: the error says
+    /// where it was looked for. A control page naming another region than
+    /// the one it ends is no candidate.
+    #[test]
+    fn where_the_control_page_was_looked_for() {
+        let mut v = volume(lsn(5, 0x111));
+        control(&mut v, E, 7, 3, (S, E + 1));
+        let e = read_log(&v, 0, 4096, SIZE, CHECKPOINT_LCN, &[0x10000], false)
+            .unwrap_err()
+            .to_string();
+        for part in ["first 0x400 clusters", "0x10000 or 0x24000 or 0x8000"] {
+            assert!(e.contains(part), "{e}");
+        }
+    }
+
+    /// A device that counts what is read of it.
+    struct Counted<'a, D>(&'a D, &'a AtomicU64);
+
+    impl<D: ReadAt> ReadAt for Counted<'_, D> {
+        fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+            self.1.fetch_add(buf.len() as u64, Ordering::Relaxed);
+            self.0.read_exact_at(buf, offset)
+        }
+
+        fn size(&self) -> std::io::Result<u64> {
+            self.0.size()
+        }
+    }
+
+    /// The corpus: on every ReFS 3.x volume the quick reading agrees with
+    /// the whole region's, without reading it (testdata/refs; skipped when
+    /// missing).
+    #[test]
+    fn the_corpus_reads_the_same_near_the_checkpoint() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/refs");
+        let mut compared = Vec::new();
+        for dir in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+            let Ok(file) = std::fs::File::open(dir.path().join("disk.img")) else {
+                continue;
+            };
+            let mut head = vec![0u8; 64 << 20];
+            if file.read_exact_at(&mut head, 0).is_err() {
+                continue;
+            }
+            let Some(offset) = (0..head.len() - 8)
+                .step_by(512)
+                .find(|&o| &head[o + 3..o + 7] == b"ReFS")
+            else {
+                continue;
+            };
+            let Ok(vol) = Volume::open(&file, offset as u64) else {
+                continue;
+            };
+            if vol.v1 {
+                continue;
+            }
+            let start: Vec<u64> = vol
+                .containers
+                .get(&7)
+                .map(|&c| c * vol.cluster / 4096)
+                .into_iter()
+                .collect();
+            let args = (offset as u64, vol.cluster, vol.boot.volume_size(), vol.checkpoint.lcn);
+            let full = read_log(&file, args.0, args.1, args.2, args.3, &start, true);
+            let counted = Pages {
+                pages: BTreeMap::new(),
+                read: AtomicU64::new(0),
+            };
+            let quick = read_log(
+                &Counted(&file, &counted.read),
+                args.0,
+                args.1,
+                args.2,
+                args.3,
+                &start,
+                false,
+            );
+            // The first clusters (64 MiB of 64 KiB ones) and a few pages,
+            // not the region (512 MiB).
+            let read = counted.read.load(Ordering::Relaxed);
+            let name = dir.file_name().to_string_lossy().into_owned();
+            match (full, quick) {
+                (Ok(f), Ok(q)) => {
+                    assert!(read < 80 << 20, "{name}: {read} bytes read");
+                    assert_eq!(
+                        (q.newest, q.newest_page, q.region, q.control_page),
+                        (f.newest, f.newest_page, f.region, f.control_page),
+                        "{name}"
+                    );
+                    compared.push(name);
+                }
+                (Err(f), Err(q)) => assert_eq!(f.to_string(), q.to_string(), "{name}"),
+                (f, q) => panic!("{name}: {f:?} / {q:?}"),
+            }
+        }
+        eprintln!("{} volumes compared: {compared:?}", compared.len());
     }
 }

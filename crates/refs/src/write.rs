@@ -110,7 +110,13 @@ impl<'v, D: WriteAt> Transaction<'v, D> {
     /// Windows would replay over the checkpoint.
     pub fn begin(vol: &'v Volume<D>) -> Result<Self> {
         vol.writable_version()?;
-        if vol.log_state()?.needs_replay() {
+        let log = vol.log_state().map_err(|e| {
+            Error::Unsupported(format!(
+                "writing, as the volume's log cannot be read ({e}): whether Windows would replay \
+                 changes over the checkpoint is not known"
+            ))
+        })?;
+        if log.needs_replay() {
             return Err(Error::Unsupported(
                 "the volume's log has changes its checkpoint lacks (Windows replays them when it next \
                  attaches the volume): attach it to Windows once and detach it before writing"

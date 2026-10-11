@@ -61,9 +61,9 @@ fn raw(name: &str, dir: &Path, change: impl Fn(&mut SparseImage, u64)) -> (PathB
     (path, offset)
 }
 
-/// Gives the first record page of the log a log sequence number newer
-/// than the current checkpoint's, as a volume Windows let go of without
-/// dismounting it holds.
+/// Gives the log a record newer than the current checkpoint's log sequence
+/// number, at the page its number names (the region's start plus its low
+/// half), as a volume Windows let go of without dismounting it holds.
 fn newer_log(image: &mut SparseImage, offset: u64) {
     let vol = refs::Volume::open(&*image, offset).unwrap();
     let lsn = le64(&read(image, offset + vol.checkpoint.lcn * 4096, 4096), 0x70);
@@ -72,13 +72,14 @@ fn newer_log(image: &mut SparseImage, offset: u64) {
         .map(|lcn| read(image, offset + lcn * 4096, 4096))
         .find(|c| &c[0..4] == b"MLog" && le64(c, 0x28) == 0)
         .unwrap();
-    let start = le64(&control, 0xb8);
-    let mut record = read(image, offset + start * 4096, 4096);
+    let (start, end) = (le64(&control, 0xb8), le64(&control, 0xc0));
+    let page = start + ((lsn + 1) & 0xffff_ffff) % (end - start);
+    let mut record = read(image, offset + page * 4096, 4096);
     record[0..4].copy_from_slice(b"MLog");
     record[4..8].copy_from_slice(&control[4..8]);
     record[0x20..0x28].copy_from_slice(&control[0x20..0x28]);
     record[0x28..0x30].copy_from_slice(&(lsn + 1).to_le_bytes());
-    image.insert(offset + start * 4096, &record);
+    image.insert(offset + page * 4096, &record);
 }
 
 #[test]

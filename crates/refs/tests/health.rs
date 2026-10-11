@@ -313,20 +313,22 @@ fn a_damaged_checkpoint_leaves_the_other_and_two_fail() {
     }
 }
 
-/// Gives the first record page of the log the log sequence number `lsn`
-/// (in the log's current epoch).
+/// Gives the log a record with the log sequence number `lsn` (in the log's
+/// current epoch), at the page that number names: the region's start plus
+/// its low half.
 fn set_record(image: &mut SparseImage, offset: u64, lsn: u64) {
     let control = (0..0x400u64)
         .map(|lcn| read(image, offset + lcn * 4096, 4096))
         .find(|c| &c[0..4] == b"MLog" && le64(c, 0x28) == 0)
         .expect("a log control page");
-    let (epoch, start) = (le64(&control, 0x20), le64(&control, 0xb8));
-    let mut record = read(image, offset + start * 4096, 4096);
+    let (epoch, start, end) = (le64(&control, 0x20), le64(&control, 0xb8), le64(&control, 0xc0));
+    let page = start + (lsn & 0xffff_ffff) % (end - start);
+    let mut record = read(image, offset + page * 4096, 4096);
     record[0..4].copy_from_slice(b"MLog");
     record[4..8].copy_from_slice(&control[4..8]);
     record[0x20..0x28].copy_from_slice(&epoch.to_le_bytes());
     record[0x28..0x30].copy_from_slice(&lsn.to_le_bytes());
-    image.insert(offset + start * 4096, &record);
+    image.insert(offset + page * 4096, &record);
 }
 
 #[test]

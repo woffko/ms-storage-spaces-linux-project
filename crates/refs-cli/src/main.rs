@@ -482,7 +482,13 @@ fn mount(
         }
         let vol = Volume::open(Box::new(file) as fuse::Rw, offset)?;
         vol.writable_version()?;
-        if vol.log_state()?.needs_replay() {
+        let log = vol.log_state().map_err(|e| {
+            anyhow::anyhow!(
+                "the volume's log cannot be read ({e}): whether Windows would replay changes over the \
+                 checkpoint is not known, so it is not mounted for writing"
+            )
+        })?;
+        if log.needs_replay() {
             bail!(
                 "the volume's log has changes its checkpoint lacks: attach it to Windows once and \
                      detach it before mounting it for writing"
