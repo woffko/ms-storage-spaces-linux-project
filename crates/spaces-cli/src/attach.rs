@@ -798,21 +798,125 @@ pub fn attach_space(
         Ok(())
     })();
     if let Err(e) = result {
-        let _ = teardown(&state);
+        // What could not be removed stays known, for `spaces detach`.
+        if teardown(&state).is_err() {
+            let _ = state.save();
+        }
         return Err(e);
     }
     state.save()?;
     Ok(state)
 }
 
-/// Removes what `state` describes, most dependent parts first.
+/// The kernel name a device path leads to (/dev/mapper/ss-x: dm-3).
+fn kernel_of(path: &Path) -> Option<String> {
+    Some(fs::canonicalize(path).ok()?.file_name()?.to_str()?.to_string())
+}
+
+/// A mount point as /proc/self/mountinfo writes it (\040 for a space).
+fn unescape_mount(field: &str) -> String {
+    let mut out = Vec::new();
+    let b = field.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let octal = b
+            .get(i + 1..i + 4)
+            .filter(|d| d.iter().all(|c| (b'0'..=b'7').contains(c)));
+        match (b[i], octal) {
+            (b'\\', Some(d)) => {
+                out.push((d[0] - b'0') * 64 + (d[1] - b'0') * 8 + (d[2] - b'0'));
+                i += 4;
+            }
+            (c, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// What uses the devices of `state` besides the space's own: mounts of its
+/// device-mapper devices or of the backend device and its kernel
+/// partitions, and devices built on them (LVM, dm-crypt). Detaching would
+/// pull the space out from under them.
+pub fn users(state: &State) -> Vec<String> {
+    let mapper = |d: &String| Path::new("/dev/mapper").join(d);
+    let ours: Vec<String> = state.dm.iter().filter_map(|d| kernel_of(&mapper(d))).collect();
+    let mut devices: Vec<(String, String)> = state
+        .dm
+        .iter()
+        .filter_map(|d| Some((mapper(d).display().to_string(), kernel_of(&mapper(d))?)))
+        .collect();
+    if let Some(kernel) = state.device.as_deref().and_then(|d| kernel_of(Path::new(d))) {
+        let sys = Path::new("/sys/class/block").join(&kernel);
+        for entry in fs::read_dir(&sys).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(&kernel) && entry.path().join("partition").exists() {
+                devices.push((format!("/dev/{name}"), name));
+            }
+        }
+        devices.push((format!("/dev/{kernel}"), kernel));
+    }
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    let mut found = Vec::new();
+    for (shown, kernel) in &devices {
+        let sys = Path::new("/sys/class/block").join(kernel);
+        if let Ok(numbers) = fs::read_to_string(sys.join("dev")) {
+            for line in mountinfo.lines() {
+                let f: Vec<&str> = line.split(' ').collect();
+                if f.len() > 4 && f[2] == numbers.trim() {
+                    found.push(format!("{shown} is mounted on {}", unescape_mount(f[4])));
+                }
+            }
+        }
+        for holder in fs::read_dir(sys.join("holders")).into_iter().flatten().flatten() {
+            let holder = holder.file_name().to_string_lossy().into_owned();
+            if !ours.contains(&holder) {
+                let name = fs::read_to_string(format!("/sys/block/{holder}/dm/name"))
+                    .map(|n| format!("/dev/mapper/{}", n.trim()))
+                    .unwrap_or(format!("/dev/{holder}"));
+                found.push(format!("{shown} is held by {name}"));
+            }
+        }
+    }
+    found
+}
+
+/// Whether the server of `state` runs a copy of `program` that was replaced
+/// since it started (by an upgrade): its executable is gone from that path.
+pub fn outdated(state: &State, program: &Path) -> bool {
+    let Some(unit) = &state.unit else {
+        return false;
+    };
+    let pid = run("systemctl", &["show", "-p", "MainPID", "--value", unit], None).unwrap_or_default();
+    let pid = pid.trim();
+    if pid.is_empty() || pid == "0" {
+        return false;
+    }
+    fs::read_link(format!("/proc/{pid}/exe"))
+        .is_ok_and(|exe| exe.as_os_str() == format!("{} (deleted)", program.display()).as_str())
+}
+
+/// Removes what `state` describes, most dependent parts first. Refuses,
+/// changing nothing, while something uses the space ([`users`]); and keeps
+/// the server when a device-mapper device cannot be removed (something
+/// still has it open), as stopping it would pull the space out from under
+/// that.
 pub fn teardown(state: &State) -> Result<()> {
+    let users = users(state);
+    if !users.is_empty() {
+        bail!("in use: {}; unmount it first (it stays attached)", users.join("; "));
+    }
     let mut errors = Vec::new();
     for name in state.dm.iter().rev() {
-        if let Err(e) = dm_remove(name) {
-            errors.push(e.to_string());
+        match dm_remove(name) {
+            Ok(()) => remove_props(name),
+            Err(e) => errors.push(e.to_string()),
         }
-        remove_props(name);
+    }
+    if !errors.is_empty() {
+        bail!("{}; its server keeps running", errors.join("; "));
     }
     match state.backend.as_str() {
         "nbd" => {
@@ -842,13 +946,9 @@ pub fn teardown(state: &State) -> Result<()> {
     if let Some(unit) = &state.unit {
         let _ = fs::remove_file(Path::new(STATE_DIR).join(format!("{unit}.sock")));
     }
-    if errors.is_empty() {
-        let _ = fs::remove_file(State::path(&state.space_guid));
-        remove_report(&state.space_guid);
-        Ok(())
-    } else {
-        bail!("{}", errors.join("; "))
-    }
+    let _ = fs::remove_file(State::path(&state.space_guid));
+    remove_report(&state.space_guid);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1071,5 +1171,32 @@ mod name_tests {
         assert!(!names_space("ss-Storage_pool-metadata", "data"));
         assert!(!names_space("ss-Storage_pool-data2-0735434c", "data"));
         assert!(names_space("ss-p-backup-2024abcd", "backup-2024abcd"));
+    }
+}
+
+#[cfg(test)]
+mod user_tests {
+    use super::*;
+
+    /// Mount points come escaped from /proc/self/mountinfo.
+    #[test]
+    fn mount_points_are_unescaped() {
+        assert_eq!(unescape_mount("/run/media/a\\040b"), "/run/media/a b");
+        assert_eq!(unescape_mount("/mnt/tab\\011x\\134y"), "/mnt/tab\tx\\y");
+        assert_eq!(unescape_mount("/mnt/plain"), "/mnt/plain");
+        assert_eq!(unescape_mount("/mnt/odd\\9"), "/mnt/odd\\9");
+    }
+
+    /// A space whose devices are gone is used by nothing, and its server
+    /// (none) runs no older program: detach may go ahead.
+    #[test]
+    fn a_space_without_devices_has_no_users() {
+        let state = State {
+            dm: vec!["ss-no-such-space-test".into()],
+            device: Some("/dev/no-such-device-test".into()),
+            ..Default::default()
+        };
+        assert!(users(&state).is_empty());
+        assert!(!outdated(&state, Path::new("/usr/sbin/spaces")));
     }
 }

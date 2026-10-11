@@ -13,6 +13,10 @@ post_install() {
 post_upgrade() {
   systemctl daemon-reload
   udevadm control --reload
+  # The spaces attached before are still served by the previous program:
+  # detach those nothing uses, and attach them with this one.
+  /usr/bin/spaces detach --outdated || true
+  systemctl start --no-block storage-spaces-attach.service || true
 }
 
 pre_remove() {

@@ -96,6 +96,12 @@ enum Command {
     Detach {
         /// Space name, GUID or device-mapper name; all spaces if omitted.
         space: Option<String>,
+        /// Only the spaces whose server runs an older copy of this program
+        /// (replaced by an upgrade since it started) and that are attached
+        /// read-only as healthy and not in use; the others are named. The
+        /// packages run it after an upgrade, before attaching again.
+        #[arg(long)]
+        outdated: bool,
     },
     /// List attached spaces.
     #[cfg(target_os = "linux")]
@@ -483,7 +489,7 @@ fn main() -> Result<()> {
             &devices,
         ),
         #[cfg(target_os = "linux")]
-        Command::Detach { space } => cmd_detach(space.as_deref()),
+        Command::Detach { space, outdated } => cmd_detach(space.as_deref(), outdated),
         #[cfg(target_os = "linux")]
         Command::Status => cmd_status(),
         Command::Check {
@@ -1340,8 +1346,9 @@ fn open_pool_quiet(paths: &[PathBuf]) -> Result<Pool<File>> {
 }
 
 #[cfg(target_os = "linux")]
-fn cmd_detach(sel: Option<&str>) -> Result<()> {
+fn cmd_detach(sel: Option<&str>, outdated: bool) -> Result<()> {
     let _lock = attach::lock()?;
+    let program = std::env::current_exe()?;
     let mut failures = 0;
     for state in attach::State::load_all()? {
         let matches = sel.is_none_or(|s| {
@@ -1351,16 +1358,36 @@ fn cmd_detach(sel: Option<&str>) -> Result<()> {
         if !matches {
             continue;
         }
+        let name = state.dm.first().map_or(state.space_guid.as_str(), |d| d);
+        if outdated {
+            // An upgrade replaced the program the server runs: what nothing
+            // uses is detached for the attach that follows; the rest keeps
+            // the old server until it is detached and attached again.
+            if !attach::outdated(&state, &program) {
+                continue;
+            }
+            let switch = "detach and attach it again (or restart) to read it with this version";
+            if state.rw || state.forced {
+                let how = if state.rw { "read-write" } else { "past its verdict" };
+                println!("{name} is served by the previous version, attached {how}: {switch}");
+                continue;
+            }
+            match attach::teardown(&state) {
+                Ok(()) => println!("detached {name} (served by the previous version)"),
+                Err(e) => println!("{name} is served by the previous version and stays attached ({e:#}): {switch}"),
+            }
+            continue;
+        }
         match attach::teardown(&state) {
-            Ok(()) => println!("detached {}", state.dm.first().map_or(state.space_guid.as_str(), |d| d)),
+            Ok(()) => println!("detached {name}"),
             Err(e) => {
-                eprintln!("cannot fully detach {}: {e:#}", state.space_guid);
+                eprintln!("cannot detach {name}: {e:#}");
                 failures += 1;
             }
         }
     }
     if failures > 0 {
-        bail!("{failures} space(s) not fully detached");
+        bail!("{failures} space(s) not detached");
     }
     Ok(())
 }

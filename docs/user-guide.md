@@ -79,8 +79,12 @@ attached.
 Check the installation: `spaces --version`, `refs --version`,
 `systemctl status storage-spaces-attach.service`, and `spaces scan` with a
 pool's disks plugged in. Man pages: `man spaces`, `man refs`. Upgrading is
-installing again; attached spaces keep running the old servers until they
-are detached and attached again.
+installing again. Spaces attached by the previous version are attached
+anew with the new one (`spaces detach --outdated`, then the attach unit),
+except those in use (a volume mounted), attached read-write or past their
+verdict: they keep the old server, as the upgrade says, until they are
+detached and attached again or the machine restarts. 1.2.0 and earlier
+left all of them on the old servers.
 
 ## Attaching and mounting
 
@@ -830,6 +834,10 @@ overflow checks, and its parsers are fuzzed (`docs/security.md`).
   with a missing disk or out-of-date copies; see
   [Replacing a failed disk](#replacing-a-failed-disk) or attach it to
   Windows first.
+* `cannot detach ...: in use: ... is mounted on ...`: unmount the volume
+  first; the space stays attached and working meanwhile. (1.2.0 and
+  earlier went on and stopped the server under the mount, which then
+  gave read errors.)
 * Logs of serving processes: `journalctl -u 'storage-spaces-*'`.
 * A ReFS volume takes long to mount: the first mount of a large volume on
   hard disks reads its tables (minutes on very large volumes; again after

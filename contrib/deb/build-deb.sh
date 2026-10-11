@@ -60,6 +60,12 @@ if [ "$1" = configure ]; then
   udevadm control --reload || true
   modprobe ublk_drv 2>/dev/null || true
   modprobe nbd 2>/dev/null || true
+  # After an upgrade the spaces attached before are still served by the
+  # previous program (prerm detaches only on remove): detach those nothing
+  # uses, for the attach below to serve them with this one.
+  if [ -n "$2" ]; then
+    /usr/sbin/spaces detach --outdated || true
+  fi
   # The udev rule acts on disks that appear later: attach the pools whose
   # disks are here now.
   if [ -d /run/systemd/system ]; then

@@ -24,6 +24,10 @@ modprobe nbd 2>/dev/null || true
 systemctl daemon-reload
 systemctl enable storage-spaces-attach.service
 udevadm control --reload
+# Spaces attached by an earlier installation are still served by its
+# program: detach those nothing uses, for the attach below to serve them
+# with this one.
+/usr/local/sbin/spaces detach --outdated || true
 # The udev rule acts on disks that appear later: attach the pools whose
 # disks are here now.
 systemctl start --no-block storage-spaces-attach.service

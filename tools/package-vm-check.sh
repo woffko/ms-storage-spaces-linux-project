@@ -10,8 +10,13 @@
 #   servers  the servers attach started are not ordered after
 #            systemd-tmpfiles-setup.service (at boot they would wait for the
 #            attach that waits for them) and have a /tmp of their own
+#   busy     spaces detach refuses a space whose volume is mounted, naming the
+#            mount, and leaves its server and the volume working
+#   upgrade  installing over attached pools (OLD_DEB, else DEB again) attaches
+#            the space nothing uses anew with the new program and keeps the
+#            one whose volume is mounted on its old server, saying so
 #   remove   removing it detaches the spaces its own spaces serves, and only those
-# Usage: [LINUX_VM_HOST=user@address] tools/package-vm-check.sh DEB [CASE...]
+# Usage: [LINUX_VM_HOST=user@address] [OLD_DEB=deb] tools/package-vm-check.sh DEB [CASE...]
 # Test pools: testdata/pools/{wc4k,ntfstier,sect4k}, copied to ~/sstest/pools
 # on the VM when missing, attached through read-only loop devices. Where an
 # installation by contrib/install.sh exists (its unit in /etc shadows the
@@ -22,7 +27,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 deb=${1:?usage: tools/package-vm-check.sh DEB [CASE...]}
 shift
-cases=${*:-install gpt user cycle servers remove}
+cases=${*:-install gpt user cycle servers busy upgrade remove}
 host=${LINUX_VM_HOST:-192.168.189.142}
 [[ $host == *@* ]] || host=codex@$host
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -i "$HOME/.ssh/rustadmin_vm_ed25519")
@@ -52,6 +57,8 @@ for pool in $need; do
   [[ $store == /* ]] && vm "ln -sfn $store/$pool ~/sstest/pools/$pool"
 done
 scp -q "${ssh_opts[@]}" "$deb" "$host:sstest/check.deb"
+vm 'rm -f sstest/old.deb'
+if [[ -n ${OLD_DEB:-} ]]; then scp -q "${ssh_opts[@]}" "$OLD_DEB" "$host:sstest/old.deb"; fi
 vm "CASES='$cases' bash -s" <<'REMOTE'
 set -u
 pass=0 fail=0
@@ -84,8 +91,26 @@ served_by() { # the program the server of attached space $1 (dm name) runs, "" w
   u=$(sudo sed -n 's/^unit=//p' "$f" 2>/dev/null)
   [[ -n $u ]] && systemctl show -p ExecStart --value "$u" | sed -n 's/^{ path=\([^ ;]*\).*/\1/p'
 }
+unit_of() { # the server unit of attached space $1 (dm name)
+  local f
+  f=$(sudo sh -c 'grep -lx "dm=$0" /run/storage-spaces/*.state' "$1" 2>/dev/null | head -1)
+  sudo sed -n 's/^unit=//p' "$f" 2>/dev/null
+}
+main_pid() { systemctl show -p MainPID --value "$(unit_of "$1")" 2>/dev/null; }
+mount_ntfs() { # mount_ntfs DM DIR: the NTFS partition of attached space DM, read-only
+  local part
+  part=$(lsblk -nro NAME,FSTYPE "/dev/mapper/$1" 2>/dev/null | awk '$2 == "ntfs" {print $1; exit}')
+  [[ -n $part ]] || return 1
+  sudo mkdir -p "$2"
+  sudo mount -o ro "/dev/mapper/$part" "$2" 2>/dev/null || sudo mount -t ntfs3 -o ro "/dev/mapper/$part" "$2" 2>/dev/null ||
+    sudo mount -t ntfs-3g -o ro "/dev/mapper/$part" "$2"
+}
+readable() { # every file of a directory reads
+  sudo find "$1" -type f -print0 | sudo xargs -0 -r cat >/dev/null 2>&1 && echo yes || echo no
+}
 cleanup() { # the test pools' spaces and loop devices, by whichever spaces is there
   local d b l
+  for d in /mnt/sstest-busy /mnt/sstest-upgrade; do mountpoint -q "$d" && sudo umount "$d"; done
   for d in $(ours); do
     for b in /usr/sbin/spaces "$other" /usr/local/sbin/spaces ~/sstest/spaces-fixed; do
       [[ -x $b ]] && sudo "$b" detach "$d" >/dev/null 2>&1 && break
@@ -97,7 +122,7 @@ cleanup() { # the test pools' spaces and loop devices, by whichever spaces is th
   sudo rm -rf /opt/sstest
 }
 cleanup # what an interrupted run left behind
-trap 'cleanup; rm -f ~/sstest/check.deb' EXIT
+trap 'cleanup; rm -f ~/sstest/check.deb ~/sstest/old.deb' EXIT
 
 since=$(date '+%F %T')
 for c in $CASES; do
@@ -158,6 +183,43 @@ for c in $CASES; do
     if ((n == 0)); then result fail servers "no server of the test pools"
     elif [[ -z $bad ]]; then result ok servers "$n servers"
     else result fail servers "$bad"; fi ;;
+  busy)
+    d=ss-ss_ntfstier-ntfstier
+    if ! mount_ntfs "$d" /mnt/sstest-busy; then result fail busy "cannot mount the NTFS volume of $d"; continue; fi
+    unit=$(unit_of "$d")
+    out=$(sudo /usr/sbin/spaces detach ntfstier 2>&1)
+    rc=$?
+    alive=no
+    systemctl is-active -q "$unit" && alive=yes
+    ok=$(readable /mnt/sstest-busy)
+    sudo umount /mnt/sstest-busy
+    if [[ $rc != 0 && $out == *"mounted on /mnt/sstest-busy"* && $alive == yes && $ok == yes && -b /dev/mapper/$d ]]; then
+      result ok busy "${out//$'\n'/ | }"
+    else
+      result fail busy "exit $rc, server active: $alive, readable: $ok: ${out//$'\n'/ | }"
+    fi ;;
+  upgrade)
+    if ((explicit)); then result skip upgrade "an install.sh installation's unit shadows the package's here"; continue; fi
+    old=~/sstest/check.deb
+    [[ -e ~/sstest/old.deb ]] && old=~/sstest/old.deb
+    # The test pools attached by the first package's program, a volume of
+    # one mounted; then the second package over it.
+    for d in $(ours); do sudo /usr/sbin/spaces detach "$d" >/dev/null; done
+    sudo dpkg -i "$old" >/dev/null 2>&1
+    for _ in $(seq 60); do [[ $(ours | wc -l) -ge 2 ]] && break; sleep 1; done
+    w=ss-ss_wc4k-wc4k n=ss-ss_ntfstier-ntfstier
+    if ! mount_ntfs "$n" /mnt/sstest-upgrade; then result fail upgrade "cannot mount the NTFS volume of $n"; continue; fi
+    pw=$(main_pid "$w") pn=$(main_pid "$n")
+    out=$(sudo dpkg -i ~/sstest/check.deb 2>&1)
+    for _ in $(seq 60); do p=$(main_pid "$w"); [[ -n $p && $p != 0 && $p != "$pw" ]] && break; sleep 1; done
+    ew=$(sudo readlink "/proc/$(main_pid "$w")/exe") en=$(sudo readlink "/proc/$(main_pid "$n")/exe")
+    ok=$(readable /mnt/sstest-upgrade)
+    sudo umount /mnt/sstest-upgrade
+    bad=
+    [[ $(main_pid "$w") != "$pw" && $ew == /usr/sbin/spaces ]] || bad+=" $w: server $pw -> $(main_pid "$w") ($ew);"
+    [[ $(main_pid "$n") == "$pn" && $en == *"(deleted)" && $ok == yes ]] || bad+=" $n: server $pn -> $(main_pid "$n") ($en), readable: $ok;"
+    [[ $out == *"$n is served by the previous version and stays attached"* ]] || bad+=" no notice: ${out//$'\n'/ | }"
+    if [[ -z $bad ]]; then result ok upgrade "$(basename "$old") -> check.deb: $w attached anew, $n kept (mounted)"; else result fail upgrade "$bad"; fi ;;
   remove)
     if ((!explicit)); then
       # Another installation's spaces: sect4k, served by a copy elsewhere.

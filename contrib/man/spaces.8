@@ -21,6 +21,7 @@ spaces \- read, write and manage Microsoft Storage Spaces pools on Linux
 .RI [ device ...]
 .br
 .B spaces detach
+.RB [ \-\-outdated ]
 .RI [ space ]
 .br
 .B spaces status
@@ -176,7 +177,15 @@ or
 .TP
 .B detach
 Removes the devices of the given space (name, GUID or device-mapper name) or
-of all attached spaces, and stops their serving processes.
+of all attached spaces, and stops their serving processes. A space whose
+devices are mounted or held by another device (LVM, dm-crypt) stays
+attached, with what uses it named: unmount it first.
+.B \-\-outdated
+detaches only the spaces whose serving process runs an older copy of
+.B spaces
+(replaced by an upgrade since it started), attached read-only as healthy
+and not in use, and names the others; the packages run it after an upgrade
+and then attach again, so that the new version serves them.
 .TP
 .B status
 Lists attached spaces, their backends, partition devices and verdicts
