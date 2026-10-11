@@ -24,7 +24,11 @@ ProtectSystem=strict
 ReadWritePaths=/run
 # Pool disks may be image files in a home directory.
 ProtectHome=read-only
-PrivateTmp=yes
+# A /tmp of its own, but not through PrivateTmp=yes: that orders the unit
+# after systemd-tmpfiles-setup.service, which comes after local-fs.target,
+# and this runs before local-fs-pre.target: an ordering cycle at every
+# boot, which systemd breaks by dropping jobs (mounts, this unit) at random.
+TemporaryFileSystem=/tmp /var/tmp
 ProtectKernelTunables=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes

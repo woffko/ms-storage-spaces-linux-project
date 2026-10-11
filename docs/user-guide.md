@@ -765,7 +765,14 @@ security`, scores 9.5 UNSAFE before, 5.1 MEDIUM after):
   no new privileges, the file system read-only except `/run`, a private
   `/tmp`, no namespaces, no network but local sockets and netlink, only
   the capabilities device-mapper and the module loader need. Home
-  directories stay readable, as pool disks may be image files.
+  directories stay readable, as pool disks may be image files. The
+  private `/tmp` and `/var/tmp` are empty file systems of its own
+  (`TemporaryFileSystem=`), not `PrivateTmp=`: that orders a unit after
+  `systemd-tmpfiles-setup.service`, which comes after `local-fs.target`,
+  and the unit runs before `local-fs-pre.target` so that fstab can mount
+  volumes on spaces. 1.1.0 and 1.2.0 had that ordering cycle, and systemd
+  broke it at every boot by dropping jobs: other units' mounts, the setup
+  of `/tmp` (then logging in to GNOME failed), or the unit itself.
 * The servers `spaces attach` starts (`serve-ublk`, `serve-nbd`,
   `serve-fuse`, as transient `storage-spaces-<guid>.service` units) get
   the same limits from the program itself, but for the FUSE server a
@@ -779,8 +786,9 @@ security`, scores 9.5 UNSAFE before, 5.1 MEDIUM after):
   mounts the block device itself (mount(2)) rather than through the
   setuid helper `fusermount3`, which only users' mounts need.
 
-The limits need systemd 231 or later for the unit file and 247 for the
-servers' (older ones refuse the unknown property): then `spaces attach`
+The limits need systemd 231 or later for the unit file (238 for the
+private `/tmp`) and 247 for the servers' (older ones refuse the unknown
+property): then `spaces attach`
 says so and starts the server without limits, rather than not at all.
 The udev rule starts parsing a disk with the Storage Spaces partition type
 without anyone asking (see Installing for turning it off). The code
@@ -795,6 +803,14 @@ overflow checks, and its parsers are fuzzed (`docs/security.md`).
   and `spaces check` (or `/run/storage-spaces/reports/<space GUID>.txt`)
   the whole report with what to do. `--degraded` or `--force` read it
   anyway, read-only; see "Health checks and forced attach".
+* The boot journal says `Found ordering cycle ... after
+  storage-spaces-attach.service` and `Job ... deleted to break ordering
+  cycle` (1.1.0 and 1.2.0; snaps, `/boot/efi` or `/tmp` may then be
+  missing, and logging in may fail): update. A copy of the unit made as a
+  workaround in `/etc/systemd/system/storage-spaces-attach.service`
+  overrides the package's: remove it and run `systemctl daemon-reload`.
+  `systemd-analyze verify default.target 2>&1 | grep 'ordering cycle'`
+  shows such cycles without a restart.
 * udisks2 says `Unknown error when mounting` a ReFS volume: `mount.ReFS`
   refused it, and udisks2 does not pass the reason on;
   `journalctl -u udisks2 -n 20` shows it (for example `SUSPECT:

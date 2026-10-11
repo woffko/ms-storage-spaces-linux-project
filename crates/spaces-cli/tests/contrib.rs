@@ -17,6 +17,29 @@ fn the_attach_unit_documents_this_project() {
     assert!(docs.contains(&"man:spaces(8)"), "{docs:?}");
 }
 
+/// The attach unit runs before local-fs-pre.target (so that fstab can mount
+/// volumes of spaces) and must not order itself after anything that comes
+/// after it: PrivateTmp= orders it after systemd-tmpfiles-setup.service,
+/// which comes after local-fs.target. 1.1.0 and 1.2.0 had that cycle, and
+/// systemd broke it at every boot by dropping jobs, other units' mounts
+/// among them.
+#[test]
+fn the_attach_unit_has_no_ordering_cycle_at_boot() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contrib/systemd/storage-spaces-attach.service");
+    let unit = std::fs::read_to_string(path).unwrap();
+    let settings: Vec<&str> = unit
+        .lines()
+        .filter(|l| !l.starts_with('#') && l.contains('='))
+        .collect();
+    assert!(settings.contains(&"Before=local-fs-pre.target"), "{unit}");
+    assert!(settings.contains(&"DefaultDependencies=no"), "{unit}");
+    for s in &settings {
+        assert!(!s.starts_with("PrivateTmp="), "{s}");
+        assert!(!s.starts_with("After=") || !s.contains("local-fs"), "{s}");
+    }
+    assert!(settings.contains(&"TemporaryFileSystem=/tmp /var/tmp"), "{unit}");
+}
+
 /// The udev rule imports what attach writes for the devices of attached
 /// spaces, and hides from udisks2 the devices a space is served through
 /// (with their kernel partitions, which duplicate the space's partition

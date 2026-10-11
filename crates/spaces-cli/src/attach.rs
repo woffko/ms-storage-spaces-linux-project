@@ -588,7 +588,10 @@ const SERVER_PRIVATE_VIEW: &[&str] = &[
     "ProtectSystem=strict",
     "ReadWritePaths=/run",
     "ProtectHome=read-only",
-    "PrivateTmp=yes",
+    // Not PrivateTmp=yes: it orders the server after
+    // systemd-tmpfiles-setup.service, that is after local-fs.target, which
+    // at boot waits for the attach service that waits for this server.
+    "TemporaryFileSystem=/tmp /var/tmp",
     "ProtectKernelTunables=yes",
     "ProtectProc=invisible",
 ];
@@ -871,6 +874,18 @@ mod hardening_tests {
                 .iter()
                 .any(|p| p.starts_with("Protect") && p.contains("System"))
         );
+    }
+
+    #[test]
+    fn servers_do_not_wait_for_tmpfiles_at_boot() {
+        // PrivateTmp= orders a unit after systemd-tmpfiles-setup.service
+        // (also with DefaultDependencies=no), which comes after
+        // local-fs.target: the attach service, before local-fs-pre.target,
+        // would wait for a server that waits for it.
+        for p in SERVER_RESTRICTIONS.iter().chain(SERVER_PRIVATE_VIEW) {
+            assert!(!p.starts_with("PrivateTmp"), "{p}");
+        }
+        assert!(SERVER_PRIVATE_VIEW.contains(&"TemporaryFileSystem=/tmp /var/tmp"));
     }
 }
 
