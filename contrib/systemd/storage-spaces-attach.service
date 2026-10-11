@@ -2,7 +2,9 @@
 Description=Attach Microsoft Storage Spaces pools read-only
 Documentation=man:spaces(8) https://github.com/woffko/ms-storage-spaces-linux-project
 DefaultDependencies=no
-After=systemd-udevd.service systemd-modules-load.service
+# After the coldplug, which settle (below) then waits for: what attach asks
+# of udev should not race the events of every device at boot.
+After=systemd-udevd.service systemd-udev-trigger.service systemd-modules-load.service
 Before=local-fs-pre.target
 Wants=local-fs-pre.target
 # udev starts it for every member disk that appears or changes, several

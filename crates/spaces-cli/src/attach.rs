@@ -315,10 +315,12 @@ fn mark_backend(dev: &str, state: &State) -> Result<()> {
         &names[0],
         &names[1],
     ];
-    if run("udevadm", &[&args[..], &["--settle"]].concat(), None).is_err() {
-        run("udevadm", &args, None).ok();
-        run("udevadm", &["settle"], None).ok();
-    }
+    // Not `trigger --settle`: at boot, while udev worked through the
+    // coldplug, it waited for good for events udev had handled (systemd
+    // 261), and the attach unit timed out. settle waits for udev's queue,
+    // and not for ever.
+    run("udevadm", &args, None).ok();
+    run("udevadm", &["settle", "--timeout=30"], None).ok();
     Ok(())
 }
 
@@ -399,7 +401,7 @@ fn dm_create(name: &str, table: &str, rw: bool) -> Result<()> {
         &["create", "--readonly", name]
     };
     run("dmsetup", args, Some(table))?;
-    run("udevadm", &["settle"], None).ok();
+    run("udevadm", &["settle", "--timeout=30"], None).ok();
     Ok(())
 }
 
