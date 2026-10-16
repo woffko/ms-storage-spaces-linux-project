@@ -37,11 +37,15 @@ pub enum Issue {
         error: String,
         newer: bool,
     },
-    /// Copies of the sequence used that differ from it (a torn write).
+    /// Copies of the sequence used that differ from it (a torn write):
+    /// `differs` when what they say differs too (not only their bytes),
+    /// `held` the copies of the version used and of that sequence.
     TornCopy {
         devices: Vec<usize>,
         sequence: u64,
         used: Vec<usize>,
+        differs: bool,
+        held: (usize, usize),
     },
     /// A copy older than the one used, on a disk that is not retired.
     StaleCopy { device: usize, sequence: u64, current: u64 },
@@ -51,6 +55,14 @@ pub enum Issue {
     UnlistedDevice { device: usize },
     /// A disk of the pool that is not among the devices.
     MissingDisk { disk: u64, guid: Guid },
+    /// An extent on a disk the database does not list.
+    UnknownDiskExtent { space: u64, disk: u64 },
+    /// Devices whose disk headers name the same disk (a clone, or one disk
+    /// given twice): the first is read.
+    DuplicateMember { devices: Vec<usize>, guid: Guid },
+    /// Records of one kind with one id (or disks with one GUID): the last
+    /// is kept.
+    DuplicateRecord { kind: &'static str, id: String },
 }
 
 impl std::fmt::Display for Issue {
@@ -74,14 +86,20 @@ impl std::fmt::Display for Issue {
                 devices,
                 sequence,
                 used,
+                differs,
+                ..
             } => write!(
                 f,
-                "device(s) {devices:?}: pool database copy of sequence {sequence} differs from the one on {used:?} (torn write)"
+                "device(s) {devices:?}: pool database copy of sequence {sequence} differs from the one on {used:?} (torn write{})",
+                if *differs { ", and in what it says" } else { "" }
             ),
             Issue::StaleCopy { device, .. } => write!(f, "device {device}: {STALE_COPY}"),
             Issue::UnknownSpaceExtent { space } => write!(f, "extent for unknown space {space}"),
             Issue::UnlistedDevice { device } => write!(f, "device {device} is not listed in the pool database"),
             Issue::MissingDisk { disk, guid } => write!(f, "disk {disk} ({guid}) is missing"),
+            Issue::UnknownDiskExtent { space, disk } => write!(f, "space {space} has an extent on unknown disk {disk}"),
+            Issue::DuplicateMember { devices, guid } => write!(f, "devices {devices:?} are the same disk {guid}"),
+            Issue::DuplicateRecord { kind, id } => write!(f, "two {kind} records with {id}"),
         }
     }
 }
@@ -170,6 +188,32 @@ fn decode_records(raw: &[RawRecord]) -> Result<Decoded> {
     })
 }
 
+/// Whether two decoded copies of the pool database say the same: the pool,
+/// its disks, spaces and extents, whatever the order and ids of their
+/// records and the sequence each record was written at.
+fn same_meaning(a: &Decoded, b: &Decoded) -> bool {
+    let disks = |d: &Decoded| {
+        let mut v: Vec<_> = d
+            .disks
+            .iter()
+            .map(|r| (r.id, r.guid, r.name.clone(), r.usage, r.media, r.database_copy))
+            .collect();
+        v.sort_by_key(|x| (x.0, x.1));
+        v
+    };
+    let spaces = |d: &Decoded| {
+        let mut v = d.spaces.clone();
+        v.sort_by_key(|s| s.id);
+        v
+    };
+    let extents = |d: &Decoded| {
+        let mut v = d.extents.clone();
+        v.sort_by_key(|e| (e.space_id, e.virtual_slab, e.column, e.copy, e.disk_id, e.physical_slab));
+        v
+    };
+    a.pool_record == b.pool_record && disks(a) == disks(b) && spaces(a) == spaces(b) && extents(a) == extents(b)
+}
+
 /// An assembled pool.
 pub struct Pool<D> {
     pub(crate) devices: Vec<D>,
@@ -230,6 +274,18 @@ impl<D: ReadAt> Pool<D> {
                 "device {} belongs to pool {}, device 0 to pool {guid}",
                 m.device, m.header.pool_guid
             )));
+        }
+        // One disk given twice, or a clone of it: which holds the current
+        // data is not known.
+        let mut by_disk: BTreeMap<Guid, Vec<usize>> = BTreeMap::new();
+        for m in &members {
+            by_disk.entry(m.header.disk_guid).or_default().push(m.device);
+        }
+        for (disk_guid, devices) in by_disk.into_iter().filter(|(_, d)| d.len() > 1) {
+            issues.push(Issue::DuplicateMember {
+                devices,
+                guid: disk_guid,
+            });
         }
 
         // Members carry copies of the pool database. Identical copies are
@@ -329,12 +385,31 @@ impl<D: ReadAt> Pool<D> {
                     newer: sequence > database.sequence,
                 }),
         );
-        for (header, _, devs) in &versions {
+        // Copies of the sequence used that differ: in what they say too, or
+        // only in their bytes (decoded, then compared).
+        let of_sequence: usize = versions
+            .iter()
+            .filter(|v| v.0.sequence == database.sequence)
+            .map(|v| v.2.len())
+            .sum();
+        for (header, digest, devs) in &versions {
             if header.sequence == database.sequence && *devs != used {
+                let member = members
+                    .iter()
+                    .find(|m| m.device == devs[0])
+                    .expect("a member read before");
+                let differs = match read_database(&devices[member.device], at(member)) {
+                    Ok(Some((_, records))) if keys.hash_one(&records) == *digest => {
+                        decode_records(&records).map_or(true, |other| !same_meaning(&other, &decoded))
+                    }
+                    _ => true,
+                };
                 issues.push(Issue::TornCopy {
                     devices: devs.clone(),
                     sequence: header.sequence,
                     used: used.clone(),
+                    differs,
+                    held: (used.len(), of_sequence),
                 });
             }
         }
@@ -362,8 +437,21 @@ impl<D: ReadAt> Pool<D> {
             extents,
         } = decoded;
         let mut disks = BTreeMap::new();
+        let mut guids = std::collections::BTreeSet::new();
         for d in disk_records {
             let member = members.iter().position(|m| m.header.disk_guid == d.guid);
+            if disks.contains_key(&d.id) {
+                issues.push(Issue::DuplicateRecord {
+                    kind: "disk",
+                    id: format!("id {}", d.id),
+                });
+            }
+            if !guids.insert(d.guid) {
+                issues.push(Issue::DuplicateRecord {
+                    kind: "disk",
+                    id: format!("GUID {}", d.guid),
+                });
+            }
             disks.insert(
                 d.id,
                 PhysicalDisk {
@@ -379,6 +467,12 @@ impl<D: ReadAt> Pool<D> {
         }
         let mut spaces = BTreeMap::new();
         for s in space_records {
+            if spaces.contains_key(&s.id) {
+                issues.push(Issue::DuplicateRecord {
+                    kind: "space",
+                    id: format!("id {}", s.id),
+                });
+            }
             spaces.insert(
                 s.id,
                 Space {
@@ -387,7 +481,14 @@ impl<D: ReadAt> Pool<D> {
                 },
             );
         }
+        let mut unknown_disks = std::collections::BTreeSet::new();
         for e in extents {
+            if !disks.contains_key(&e.disk_id) && unknown_disks.insert((e.space_id, e.disk_id)) {
+                issues.push(Issue::UnknownDiskExtent {
+                    space: e.space_id,
+                    disk: e.disk_id,
+                });
+            }
             match spaces.get_mut(&e.space_id) {
                 Some(space) => space.extents.push(e),
                 None => issues.push(Issue::UnknownSpaceExtent { space: e.space_id }),
@@ -455,20 +556,26 @@ impl<D: ReadAt> Pool<D> {
                 }
             }
         }
-        // Every extent on the disks this space uses, by disk and start; an
-        // extent that starts before the furthest end so far overlaps the
-        // extent with that end (and if this space's overlaps any, such a
-        // pair includes it).
-        let used: std::collections::BTreeSet<u64> = space.extents.iter().map(|e| e.disk_id).collect();
-        let mut on: BTreeMap<u64, Vec<(u64, u64, u64, &ExtentRecord)>> = BTreeMap::new();
+        // Every extent on the devices this space uses, by device and
+        // start (two disk records naming one device share it); an extent
+        // that starts before the furthest end so far overlaps the extent
+        // with that end (and if this space's overlaps any, such a pair
+        // includes it). Disks not at hand go by their id.
+        let device = |disk: u64| match self.disks.get(&disk).and_then(|d| d.member) {
+            Some(m) => (0, self.members[m].device as u64),
+            None => (1, disk),
+        };
+        let used: std::collections::BTreeSet<(u8, u64)> = space.extents.iter().map(|e| device(e.disk_id)).collect();
+        type Mapped<'a> = Vec<(u64, u64, u64, &'a ExtentRecord)>;
+        let mut on: BTreeMap<(u8, u64), Mapped> = BTreeMap::new();
         for s in self.spaces.values() {
-            for f in s.extents.iter().filter(|f| used.contains(&f.disk_id)) {
+            for f in s.extents.iter().filter(|f| used.contains(&device(f.disk_id))) {
                 if let Some((start, end)) = run(f) {
-                    on.entry(f.disk_id).or_default().push((start, end, s.id(), f));
+                    on.entry(device(f.disk_id)).or_default().push((start, end, s.id(), f));
                 }
             }
         }
-        for (disk, list) in &mut on {
+        for list in on.values_mut() {
             list.sort_by_key(|x| (x.0, x.1));
             let mut furthest: Option<(u64, usize)> = None;
             for (i, x) in list.iter().enumerate() {
@@ -483,8 +590,13 @@ impl<D: ReadAt> Pool<D> {
                                 e.virtual_slab, e.column, e.copy
                             )
                         };
+                        let disk = if x.3.disk_id == y.3.disk_id {
+                            format!("disk {}", x.3.disk_id)
+                        } else {
+                            format!("disks {} and {} (one device)", y.3.disk_id, x.3.disk_id)
+                        };
                         return Some(format!(
-                            "slab {} of disk {disk} is mapped twice: by {} and by {}",
+                            "slab {} of {disk} is mapped twice: by {} and by {}",
                             x.0.max(y.0),
                             place(y),
                             place(x)

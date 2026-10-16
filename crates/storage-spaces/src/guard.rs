@@ -170,6 +170,10 @@ fn database_check<D>(pool: &Pool<D>, names: &[String]) -> Check {
     };
     let mut evidence = Vec::new();
     let mut newer_unusable = false;
+    // Copies of the sequence read that say something else, and the
+    // version read not held by most copies of it: which one Windows reads
+    // is not known (with equal sequences it read the first disk's).
+    let mut torn_apart = false;
     for issue in &pool.issues {
         let e = match issue {
             Issue::StaleCopy {
@@ -186,9 +190,27 @@ fn database_check<D>(pool: &Pool<D>, names: &[String]) -> Check {
                 devices: list,
                 sequence,
                 used,
-            } => Evidence::new(format!("the copies of sequence {sequence}"))
-                .expected(format!("the same as on {}", devices(used)))
-                .found(format!("different on {} (a torn write, not used)", devices(list))),
+                differs,
+                held,
+            } => {
+                torn_apart |= *differs && held.0 * 2 <= held.1;
+                Evidence::new(format!("the copies of sequence {sequence}"))
+                    .expected(format!(
+                        "the same as on {} ({} of {} copies)",
+                        devices(used),
+                        held.0,
+                        held.1
+                    ))
+                    .found(format!(
+                        "different on {} ({}a torn write, not used)",
+                        devices(list),
+                        if *differs {
+                            "in what it says: "
+                        } else {
+                            "only in its bytes: "
+                        }
+                    ))
+            }
             Issue::UnusableCopy {
                 devices: list,
                 sequence,
@@ -215,14 +237,22 @@ fn database_check<D>(pool: &Pool<D>, names: &[String]) -> Check {
         evidence.push(e);
     }
     let copies = pool.members.iter().filter(|m| m.db_sequence.is_some()).count();
+    if evidence.is_empty() && copies == 1 {
+        // Its entries have no checksum: nothing tells a damaged one.
+        return Check::new(
+            ID,
+            Status::Info,
+            format!(
+                "one copy, of sequence {}: nothing to compare it with",
+                pool.database.sequence
+            ),
+        )
+        .truth(Truth::CrossCheck);
+    }
     if evidence.is_empty() {
         return Check::ok(
             ID,
-            format!(
-                "{copies} cop{} of sequence {}, all the same",
-                if copies == 1 { "y" } else { "ies" },
-                pool.database.sequence
-            ),
+            format!("{copies} copies of sequence {}, all the same", pool.database.sequence),
         )
         .truth(Truth::CrossCheck);
     }
@@ -239,6 +269,20 @@ fn database_check<D>(pool: &Pool<D>, names: &[String]) -> Check {
             "What Windows recorded last cannot be read: the older state may map data where it no \
              longer is. Attach the pool to Windows, which rewrites its copies.",
         )
+    } else if torn_apart {
+        Check::new(
+            ID,
+            Status::Suspect,
+            format!(
+                "copies of sequence {} disagree in what they say, and no version is held by most of them",
+                pool.database.sequence
+            ),
+        )
+        .advice(
+            "A write of the pool database was cut short: which version Windows reads is not known (with \
+             equal sequences it read the first disk's copy, and rewrote neither). Attach the pool to Windows \
+             to see what it makes of it.",
+        )
     } else {
         Check::new(
             ID,
@@ -251,8 +295,8 @@ fn database_check<D>(pool: &Pool<D>, names: &[String]) -> Check {
             ),
         )
         .advice(
-            "Windows reads the newest copy too and rewrites the others when it attaches the pool; \
-             nothing that is read depends on them.",
+            "Windows reads the newest copy, as spaces does (with equal sequences the first disk's, and it \
+             rewrites neither): what is read does not depend on the others.",
         )
     }
     .truth(Truth::CrossCheck);
@@ -277,6 +321,28 @@ fn clean_check<D>(pool: &Pool<D>, names: &[String]) -> Check {
                 Evidence::new(format!("an extent of space {space}"))
                     .expected("a space the pool database lists")
                     .found("no such space"),
+            ),
+            Issue::UnknownDiskExtent { space, disk } => suspect.push(
+                Evidence::new(format!("an extent of space {space}"))
+                    .expected("on a disk the pool database lists")
+                    .found(format!("on disk {disk}, which it does not list")),
+            ),
+            Issue::DuplicateMember { devices, guid } => suspect.push(
+                Evidence::new(format!("the disk {guid}"))
+                    .expected("on one device")
+                    .found(format!(
+                        "on {} (a clone, or one disk given twice: the first is read)",
+                        devices
+                            .iter()
+                            .map(|&d| device_name(names, d))
+                            .collect::<Vec<_>>()
+                            .join(" and ")
+                    )),
+            ),
+            Issue::DuplicateRecord { kind, id } => suspect.push(
+                Evidence::new(format!("the {kind} records of the pool database"))
+                    .expected("one per id")
+                    .found(format!("two with {id} (the last is read)")),
             ),
             Issue::UnlistedDevice { device } => warn.push(
                 Evidence::new(format!(
@@ -1519,6 +1585,8 @@ mod tests {
             devices: vec![1],
             sequence: pool.database.sequence,
             used: vec![0, 2],
+            differs: true,
+            held: (2, 3),
         });
         let r = &reports(&pool, &Options::default())[0];
         assert_eq!(check(r, "pool.database").status, Status::Warning);

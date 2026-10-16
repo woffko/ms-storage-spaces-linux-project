@@ -215,7 +215,7 @@ pub fn assemble_records(raw: &[u8], entry_size: usize) -> Result<Vec<RawRecord>>
 }
 
 /// Record type 1: the pool.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolRecord {
     pub guid: Guid,
     pub name: String,
@@ -227,7 +227,7 @@ pub struct PoolRecord {
 }
 
 /// Record type 2: a physical disk.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiskRecord {
     pub id: u64,
     /// Database sequence at which the record was last written.
@@ -353,7 +353,7 @@ pub struct Policy {
 }
 
 /// Record types 3 (space) and 6 (child space).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceRecord {
     pub id: u64,
     pub guid: Guid,

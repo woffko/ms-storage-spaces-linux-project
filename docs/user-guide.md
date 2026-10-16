@@ -393,10 +393,15 @@ volume in a space attached with `--degraded` or `--force` mounts only with
 * `pool.quorum`: more than half of the copies of the pool database are at
   hand (Windows takes the pool read-only otherwise).
 * `pool.members`: every disk of the pool is there.
-* `pool.database`: the copies of the pool database agree; older, torn or
+* `pool.database`: the copies of the pool database agree; older or
   unusable copies that are not used are warnings, a newer copy that does
-  not decode is suspect.
-* `pool.clean`: the metadata agrees with itself and with the devices.
+  not decode is suspect, as are copies of the sequence read that say
+  something else when most copies do not hold the version read (copies that
+  differ only in their bytes are a warning). One copy is a note: there is
+  nothing to compare it with.
+* `pool.clean`: the metadata agrees with itself and with the devices (no
+  extent on a disk it does not list, no disk given twice or cloned, no two
+  records with one id).
 * `space.state`: the state Windows would show (Healthy, Warning /
   Degraded, Unhealthy).
 * `space.layout`: the slab map parses; no slab is mapped twice, no extent

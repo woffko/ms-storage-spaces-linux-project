@@ -79,22 +79,75 @@ pub fn scan() -> Scan {
             Err(_) => {}
         }
     }
+    Scan {
+        pools: group(found, partition_of),
+        denied,
+    }
+}
+
+/// Whether block device `part` is a partition of the disk `disk` (sysfs).
+fn partition_of(part: &Path, disk: &Path) -> bool {
+    let (Some(p), Some(d)) = (part.file_name(), disk.file_name()) else {
+        return false;
+    };
+    let sys = Path::new("/sys/class/block").join(p);
+    sys.join("partition").exists()
+        && fs::canonicalize(&sys)
+            .ok()
+            .is_some_and(|real| real.parent().and_then(|x| x.file_name()) == Some(d))
+}
+
+/// The members by pool. A disk found whole and as its own Storage Spaces
+/// partition is the partition; two devices with one disk GUID otherwise (a
+/// clone) are both kept, for the pool to report.
+fn group(found: Vec<Candidate>, partition_of: impl Fn(&Path, &Path) -> bool) -> BTreeMap<Guid, Vec<Candidate>> {
     let mut pools: BTreeMap<Guid, Vec<Candidate>> = BTreeMap::new();
     for c in found {
         let members = pools.entry(c.pool_guid).or_default();
-        match members.iter_mut().find(|m| m.disk_guid == c.disk_guid) {
-            Some(existing) if c.is_partition && !existing.is_partition => *existing = c,
+        let same = members.iter().position(|m| {
+            m.disk_guid == c.disk_guid
+                && (c.is_partition && !m.is_partition && partition_of(&c.path, &m.path)
+                    || m.is_partition && !c.is_partition && partition_of(&m.path, &c.path))
+        });
+        match same {
+            Some(i) if c.is_partition => members[i] = c,
             Some(_) => {}
             None => members.push(c),
         }
     }
-    Scan { pools, denied }
+    pools
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// A disk and its own partition: the partition. Two devices with one
+    /// disk GUID that are not: both (in 1.2.1 the first by name).
+    #[test]
+    fn a_clone_is_kept_beside_its_original() {
+        let guid = |b: u8| Guid([b; 16]);
+        let c = |path: &str, disk: u8, is_partition: bool| Candidate {
+            path: PathBuf::from(path),
+            pool_guid: guid(1),
+            disk_guid: guid(disk),
+            is_partition,
+        };
+        let partition_of = |p: &Path, d: &Path| p.to_str().unwrap().starts_with(d.to_str().unwrap());
+        let pools = group(
+            vec![
+                c("/dev/sdb", 2, false),
+                c("/dev/sdb1", 2, true),
+                c("/dev/sdc1", 3, true),
+            ],
+            partition_of,
+        );
+        let paths: Vec<_> = pools[&guid(1)].iter().map(|m| m.path.to_str().unwrap()).collect();
+        assert_eq!(paths, ["/dev/sdb1", "/dev/sdc1"]);
+        let pools = group(vec![c("/dev/sdb1", 2, true), c("/dev/sdd1", 2, true)], partition_of);
+        assert_eq!(pools[&guid(1)].len(), 2);
+    }
 
     /// A device this user may not open is an error (the scan counts them),
     /// not "no pool member"; one without a disk header is no member.

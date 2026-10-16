@@ -66,6 +66,17 @@
   leaves a new space's), and writing refuses all of these. The dirty
   region log says when one of its two header pages is lost. The guard no
   longer calls a parity space without a journal "not a parity space".
+* Copies of the pool database of one sequence that differ were a warning,
+  with advice saying Windows rewrites them (it does not): with one sector of
+  the first copy of a two-disk pool zeroed, the copy read laid the space out
+  on one disk instead of two, and the space was healthy. Copies are
+  compared by what they say now: different meaning is suspect unless most
+  copies hold the version read; a pool with one copy has nothing to compare
+  it with (a note). An extent on a disk the database does not list (a read
+  error later), one disk given twice or a clone of it beside it (healthy,
+  reading the first; `spaces scan` kept only the first by name), and two
+  records with one id are suspect, as is a slab mapped twice through two
+  disk records of one device.
 * A space whose layout is not understood made every space of its pool
   failed (`space.state`), since 1.2.0 worked out the health of a pool as a
   whole: the others are judged on their own again, as 1.1.0 did.

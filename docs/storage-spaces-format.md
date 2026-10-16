@@ -138,6 +138,17 @@ rewrote neither; a newer copy that does not decode made it treat that disk
 as lost ("Lost Communication", the space degraded) and write the good copy
 again with a sequence above every copy seen (5 after a broken 4).
 
+The guard compares copies of one sequence that differ by what they say, not
+by their bytes: decoded, the pool, its disks, spaces and extents (the order
+and ids of the records, and the sequence each record was written at, aside).
+Copies that differ only in their bytes are a warning; copies that say
+something else are suspect unless most copies of that sequence hold the
+version read (then a warning: which one Windows reads is known only for a
+tie, the first disk's). A pool with one copy of the database has nothing to
+compare it with (a note): SDBB entries carry no checksum. Copies are told
+apart by a digest of their records, keyed at random per run, and only the
+version read is kept in memory.
+
 ## Creating a pool
 
 Pools of version 28 (Windows 11 24H2) only. Insider build 26340 (version
@@ -1067,8 +1078,12 @@ values; `spaces check` reports it as failed). All hold for every pool and
 scenario state of the corpus.
 
 * No physical slab is mapped twice, by extents of the same or of different
-  spaces, current or out of date, and the slabs of a disk at hand lie in
-  its partition's data area.
+  spaces, current or out of date (two disk records naming one device count
+  as one disk), and the slabs of a disk at hand lie in its partition's data
+  area.
+* (Suspect, not refused: the guard's `pool.clean`.) Every extent is on a disk
+  the database lists, no two devices carry one disk, no two disk or space
+  records share an id, no two disk records a GUID.
 * Within a column copy, extents do not overlap (the layout's rule), and
   every extent lies inside its space: for a space with a size, inside its
   size rounded up to whole rows; for a tier, inside its range.
