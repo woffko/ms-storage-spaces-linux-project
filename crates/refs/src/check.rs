@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 
 use storage_spaces::io::ReadAt;
 
-use crate::error::Result;
+use crate::error::{Result, format_err};
 use crate::file::{Content, Target};
 use crate::node::Node;
 use crate::page::{PAGE_HEADER_SIZE, PageRef};
@@ -78,6 +78,11 @@ impl Allocator {
             let v = row.value;
             if v.len() >= 0x18 {
                 let (start, count) = (le64(v, 0), le64(v, 8));
+                if start.checked_add(count).is_none() {
+                    return Err(format_err!(
+                        "allocator {root}: a row of {count:#x} clusters from {start:#x}"
+                    ));
+                }
                 let bits = match le16(v, 0x12) {
                     1 | 5 | 9 => Bits::Map(v[0x18..].to_vec()),
                     // A uniform range: no free clusters when wholly used
@@ -116,22 +121,50 @@ impl Allocator {
 
     /// Whether cluster `c` is used.
     pub(crate) fn used(&self, c: u64) -> bool {
-        let i = self.0.partition_point(|r| r.0 <= c);
-        let Some((start, count, bits)) = i.checked_sub(1).map(|i| &self.0[i]) else {
-            return false;
-        };
-        if c >= start + count {
-            return false;
-        }
-        match bits {
-            Bits::Map(b) => {
-                let j = (c - start) as usize;
-                b.get(j / 8).is_some_and(|byte| byte >> (j % 8) & 1 != 0)
+        self.first_free(c, 1).is_none()
+    }
+
+    /// The first cluster of the `n` from `from` on that is not used, if
+    /// any: in steps of whole rows where they are uniform, so that the work
+    /// is bounded by the allocator's rows and bitmaps, not by `n`.
+    pub(crate) fn first_free(&self, from: u64, n: u64) -> Option<u64> {
+        let end = from.saturating_add(n);
+        let mut c = from;
+        while c < end {
+            // The row of `c`: the last that starts at it or before.
+            let i = self.0.partition_point(|r| r.0 <= c);
+            let Some((start, count, bits)) = i.checked_sub(1).map(|i| &self.0[i]) else {
+                return Some(c);
+            };
+            if c - start >= *count {
+                return Some(c);
             }
-            Bits::Uniform(used) => *used,
+            let row_end = start.saturating_add(*count).min(end);
+            match bits {
+                Bits::Uniform(true) => c = row_end,
+                Bits::Uniform(false) => return Some(c),
+                Bits::Map(b) => {
+                    while c < row_end {
+                        let j = c - start;
+                        if !usize::try_from(j / 8)
+                            .ok()
+                            .and_then(|k| b.get(k))
+                            .is_some_and(|byte| byte >> (j % 8) & 1 != 0)
+                        {
+                            return Some(c);
+                        }
+                        c += 1;
+                    }
+                }
+            }
         }
+        None
     }
 }
+
+/// A page for the check to read: (its reference, physical, its allocator,
+/// what it is of, the level and depth of the node naming it).
+type Page = (PageRef, bool, Option<u8>, String, Option<(u8, usize)>);
 
 /// The page structure check: problems found in one page.
 fn page_problems(page: &[u8]) -> Option<String> {
@@ -223,23 +256,35 @@ impl<D: ReadAt> Volume<D> {
         let medium = Allocator::read(self, 1)?;
         let container = Allocator::read(self, 2)?;
         let per_page = (self.page_size / self.cluster) as usize;
-        // Pages, by table: (reference, physical, allocator, what).
-        let mut todo: Vec<(PageRef, bool, Option<u8>, String)> = Vec::new();
+        let mut todo: Vec<Page> = Vec::new();
         for (i, r) in self.checkpoint.roots.iter().enumerate() {
             let (physical, allocator) = match i {
                 7 | 8 | 12 => (true, None),
                 1 | 2 | 6 | 11 => (false, Some(2)),
                 _ => (false, Some(1)),
             };
-            todo.push((r.clone(), physical, allocator, format!("root {i}")));
+            todo.push((r.clone(), physical, allocator, format!("root {i}"), None));
         }
         for oid in self.object_ids().collect::<Vec<_>>() {
             // Objects 7 and 8 name the container tables' physical clusters.
             if oid != 7 && oid != 8 && !skip.contains(&oid) {
-                todo.push((self.object(oid)?.clone(), false, Some(1), format!("object {oid:#x}")));
+                todo.push((
+                    self.object(oid)?.clone(),
+                    false,
+                    Some(1),
+                    format!("object {oid:#x}"),
+                    None,
+                ));
             }
         }
-        while let Some((r, physical, allocator, what)) = todo.pop() {
+        // Each page once: rows naming a page again (or an ancestor) would
+        // make the walk read it as often, or forever.
+        let mut seen = std::collections::HashSet::new();
+        while let Some((r, physical, allocator, what, parent)) = todo.pop() {
+            if !seen.insert((physical, r.lcns[0])) {
+                report.problem(format!("{what}: page {:#x} named twice", r.lcns[0]));
+                continue;
+            }
             report.pages += 1;
             let page = match self.read_page(&r, physical) {
                 Ok(p) => p,
@@ -266,10 +311,26 @@ impl<D: ReadAt> Volume<D> {
                 continue;
             }
             let node = Node::at(&page, PAGE_HEADER_SIZE)?;
-            if !node.is_leaf() {
+            let depth = match parent {
+                Some((level, _)) if node.level.checked_add(1) != Some(level) => {
+                    report.problem(format!(
+                        "{what}: page {:#x} of level {} below a node of level {level}",
+                        r.lcns[0], node.level
+                    ));
+                    continue;
+                }
+                Some((_, depth)) => depth + 1,
+                None => 0,
+            };
+            if !node.is_leaf() && depth >= crate::volume::MAX_DEPTH {
+                report.problem(format!(
+                    "{what}: B+-tree deeper than {} levels",
+                    crate::volume::MAX_DEPTH
+                ));
+            } else if !node.is_leaf() {
                 for row in node.rows() {
                     match row.and_then(|row| PageRef::parse(row.value)) {
-                        Ok(child) => todo.push((child, physical, allocator, what.clone())),
+                        Ok(child) => todo.push((child, physical, allocator, what.clone(), Some((node.level, depth)))),
                         Err(e) => report.problem(format!("{what}: {e}")),
                     }
                 }
@@ -323,7 +384,7 @@ impl<D: ReadAt> Volume<D> {
                             // In a compacted container: its compressed
                             // clusters stand for them (checked below).
                             if self.is_compacted(x.vlcn) {
-                                report.data_clusters += x.clusters;
+                                report.data_clusters = report.data_clusters.saturating_add(x.clusters);
                                 for v in x.vlcn..x.vlcn.saturating_add(x.clusters.min(self.clusters_per_container)) {
                                     let e = compacted.entry(v).or_insert_with(|| (name.clone(), false));
                                     e.1 |= e.0 != name;
@@ -344,22 +405,34 @@ impl<D: ReadAt> Volume<D> {
                 }
             }
         }
-        // The compressed clusters of compacted containers.
+        // The compressed clusters of compacted containers, a container's
+        // worth at a time (the run they are in may be any length).
+        let cpc = self.clusters_per_container;
         for (id, c) in &self.compacted {
-            for k in 0..c.clusters {
-                match self.translate(c.data + k) {
-                    Ok(lcn) if !medium.used(lcn) => {
+            let mut k = 0;
+            while k < c.clusters {
+                let Some(v) = c.data.checked_add(k) else {
+                    report.problem(format!(
+                        "compacted container {id:#x}: {} compressed clusters from {:#x}",
+                        c.clusters, c.data
+                    ));
+                    break;
+                };
+                let n = (cpc - (v & (cpc - 1))).min(c.clusters - k);
+                match self.translate(v).map(|lcn| (lcn, medium.first_free(lcn, n))) {
+                    Ok((_, Some(free))) => {
                         report.problem(format!(
-                            "compacted container {id:#x}: compressed cluster {lcn:#x} free in the medium allocator"
+                            "compacted container {id:#x}: compressed cluster {free:#x} free in the medium allocator"
                         ));
                         break;
                     }
-                    Ok(_) => {}
+                    Ok((_, None)) => {}
                     Err(e) => {
                         report.problem(format!("compacted container {id:#x}: {e}"));
                         break;
                     }
                 }
+                k += n;
             }
         }
         // Snapshots and the live data share the clusters the newer levels
@@ -374,7 +447,7 @@ impl<D: ReadAt> Volume<D> {
             let Ok(v) = self.virtual_of(c) else { return false };
             refcounts
                 .iter()
-                .find(|(first, count, _)| *first <= v && v < first + count)
+                .find(|(first, count, _)| *first <= v && v - first < *count)
                 .is_some_and(|(_, _, value)| refcount::count_of(value, v).is_some_and(|c| c > 0))
         };
         let shift = 64 - self.clusters_per_container.leading_zeros();
@@ -413,7 +486,7 @@ impl<D: ReadAt> Volume<D> {
             for (&v, (name, _)) in mine.filter(|(_, (_, shared))| *shared) {
                 let counted = refcounts
                     .iter()
-                    .find(|(first, count, _)| *first <= v && v < first + count)
+                    .find(|(first, count, _)| *first <= v && v - first < *count)
                     .is_some_and(|(_, _, value)| refcount::count_of(value, v).is_some_and(|c| c > 0));
                 if !counted {
                     report.problem(format!(
@@ -425,12 +498,9 @@ impl<D: ReadAt> Volume<D> {
         }
         let mut last: Option<(u64, String)> = None;
         for (lcn, n, name) in &runs {
-            report.data_clusters += n;
-            for c in *lcn..lcn + n {
-                if !medium.used(c) {
-                    report.problem(format!("{name}: data cluster {c:#x} free in the medium allocator"));
-                    break;
-                }
+            report.data_clusters = report.data_clusters.saturating_add(*n);
+            if let Some(c) = medium.first_free(*lcn, *n) {
+                report.problem(format!("{name}: data cluster {c:#x} free in the medium allocator"));
             }
             if let Some((end, other)) = &last
                 && *lcn < *end
@@ -443,8 +513,9 @@ impl<D: ReadAt> Volume<D> {
                     ));
                 }
             }
-            if last.as_ref().is_none_or(|(end, _)| lcn + n > *end) {
-                last = Some((lcn + n, name.clone()));
+            let end = lcn.saturating_add(*n);
+            if last.as_ref().is_none_or(|(e, _)| end > *e) {
+                last = Some((end, name.clone()));
             }
         }
         Ok(report)
@@ -532,7 +603,7 @@ impl<D: ReadAt> Volume<D> {
                 for s in streams {
                     if let Content::Extents(x) = &s.content {
                         for x in x {
-                            report.data_clusters += x.clusters;
+                            report.data_clusters = report.data_clusters.saturating_add(x.clusters);
                             if x.vlcn.checked_add(x.clusters).is_none_or(|end| end > total) {
                                 report.problem(format!(
                                     "{name}: a run of {} clusters at {:#x}, past the volume's end",
@@ -596,8 +667,17 @@ impl<D: ReadAt> Volume<D> {
                 problems.push(format!("reference count row of {} bytes", row.value.len()));
                 return Ok(());
             };
+            if first.checked_add(n).is_none() {
+                problems.push(format!("reference count row {first:#x} of {n:#x} clusters"));
+                return Ok(());
+            }
+            // A u16 per cluster from 0x1c.
+            let short = n
+                .checked_mul(2)
+                .and_then(|b| b.checked_add(0x1c))
+                .is_none_or(|need| (row.value.len() as u64) < need);
             match le32(row.value, 0x14) {
-                refcount::COUNTS if row.value.len() < 0x1c + 2 * n as usize => problems.push(format!(
+                refcount::COUNTS if short => problems.push(format!(
                     "reference count row {first:#x}: {n:#x} clusters, {} bytes",
                     row.value.len()
                 )),

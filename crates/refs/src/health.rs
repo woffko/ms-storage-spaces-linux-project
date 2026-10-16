@@ -11,7 +11,7 @@ use storage_spaces::report::{Check, Evidence, Status, Truth, hex, signature};
 use crate::boot::{BOOT_SECTOR_SIZE, BootSector};
 use crate::page::V1_BLOCK;
 use crate::util::{le32, le64};
-use crate::volume::{SUPERBLOCK_LCN, log_state, self_checksum_ok};
+use crate::volume::{Lsn, SUPERBLOCK_LCN, log_state, self_checksum_ok};
 
 /// The fewest units (clusters, blocks of 1.x) a volume can have: its boot
 /// area, the superblock at unit 0x1e and its copies at the end leave no
@@ -228,7 +228,9 @@ pub fn quick_checks_in<D: ReadAt + ?Sized>(
         })
         .collect();
     let clock = |c: &Copy| c.page.as_deref().map_or(0, |p| le64(p, if v1 { 8 } else { 0x60 }));
-    let current = points.iter().filter(|c| c.valid).max_by_key(|c| clock(c));
+    // The first of equal clocks, as `Volume::load` takes (`max_by_key`
+    // takes the last).
+    let current = points.iter().filter(|c| c.valid).rev().max_by_key(|c| clock(c));
     let check = match (points.iter().filter(|c| c.valid).count(), current) {
         (2, Some(c)) => Check::ok(
             "fs.refs.checkpoint",
@@ -341,6 +343,32 @@ pub fn quick_checks_in<D: ReadAt + ?Sized>(
             .truth(Truth::CrossCheck),
             Err(_) if boot.major == 3 && boot.minor == 1 => {
                 Check::skipped("fs.refs.log", format!("{label}: the log of ReFS 3.1 is not read"))
+            }
+            Err(crate::Error::NotFound(e)) => {
+                // Records written since the volume was made move the low
+                // half of the checkpoint's log sequence number on.
+                let lsn = Lsn::from(current.page.as_deref().map_or(0, |p| le64(p, 0x70)));
+                let used = lsn.low != 0;
+                Check::new(
+                    "fs.refs.log",
+                    if used { Status::Suspect } else { Status::Warning },
+                    format!("{label}: the log is not found ({e})"),
+                )
+                .evidence(
+                    Evidence::new("the log sequence number the current checkpoint covers")
+                        .at(at(current.n).map_or_else(|| place(current.n), |b| locate(b + 0x70)))
+                        .expected("a low half of 0 where the log was never written")
+                        .found(format!("{:#x}:{:#x}", lsn.high, lsn.low)),
+                )
+                .truth(Truth::CrossCheck)
+                .advice(if used {
+                    "The checkpoint shows records written to the log, and the log may hold changes the \
+                     checkpoint lacks, which Windows replays when it next attaches the volume: what is read \
+                     may be older than what Windows shows. Start Windows with the volume attached and shut it \
+                     down fully (shutdown /s /t 0), or read the older state anyway."
+                } else {
+                    "The checkpoint shows no record written to the log, so it holds nothing to replay."
+                })
             }
             Err(e) => Check::new(
                 "fs.refs.log",

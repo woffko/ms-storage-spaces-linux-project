@@ -16,11 +16,14 @@
 //! snapshot freezes the live level and starts a new one on top of it. The
 //! stream reads as its levels laid over each other, the newest on top.
 
+use std::collections::HashSet;
+
 use storage_spaces::io::ReadAt;
 
 use crate::checksum::{crc32c, crc64};
 use crate::error::{Error, Result, format_err};
 use crate::node::{Node, Row};
+use crate::page::PageRef;
 use crate::util::{le16, le32, le64, utf16};
 use crate::volume::{ROOT_DIRECTORY, Volume};
 
@@ -93,7 +96,10 @@ impl Entry {
     fn parse(key: &[u8], value: &[u8], v1: bool) -> Result<Self> {
         let sizes = if v1 { 0x68 } else { 0x58 };
         let flags = le16(key, 2);
-        let name = utf16(&key[4..]);
+        let name = utf16(
+            key.get(4..)
+                .ok_or_else(|| format_err!("name row with a key of {} bytes", key.len()))?,
+        );
         let windows = |a: u32| {
             if a & REFS_DIRECTORY != 0 {
                 (a & !REFS_DIRECTORY) | FILE_ATTRIBUTE_DIRECTORY
@@ -353,8 +359,7 @@ impl<D: ReadAt> Volume<D> {
                     )));
                 }
                 let size = le64(v, 0x20);
-                let content = v
-                    .get(0x3c..0x3c + size as usize)
+                let content = resident(v, size)
                     .ok_or_else(|| format_err!("stream {name:?} of {size} bytes in a value of {}", v.len()))?;
                 file.streams.push((
                     name,
@@ -440,8 +445,7 @@ impl<D: ReadAt> Volume<D> {
         match (marker, descriptor & 0xffff) {
             (SINGLE, DATA) => {
                 let size = le64(v, 0x20);
-                let content = v
-                    .get(0x3c..0x3c + size as usize)
+                let content = resident(v, size)
                     .ok_or_else(|| format_err!("inline data of {size} bytes in a value of {}", v.len()))?;
                 file.data = Some(Stream {
                     size,
@@ -468,7 +472,7 @@ impl<D: ReadAt> Volume<D> {
                     )
                 } else {
                     Content::Inline(
-                        v.get(0x3c..0x3c + size as usize)
+                        resident(v, size)
                             .ok_or_else(|| format_err!("stream {name:?} of {size} bytes in a value of {}", v.len()))?
                             .to_vec(),
                     )
@@ -558,7 +562,7 @@ impl<D: ReadAt> Volume<D> {
         let mut out = Vec::new();
         // The checksum of integrity streams' data.
         let kind = le16(value, 0x16);
-        self.extent_node(&self.node_in(value, 0)?, 0, kind, &mut out)?;
+        self.extent_node(&self.node_in(value, 0)?, 0, kind, &mut HashSet::new(), &mut out)?;
         out.sort_by_key(|e| e.vcn);
         Ok(out)
     }
@@ -567,11 +571,11 @@ impl<D: ReadAt> Volume<D> {
     /// value (large maps: the value's node is an index over pages).
     pub(crate) fn extent_map_pages(&self, value: &[u8]) -> Result<Vec<u64>> {
         let mut out = Vec::new();
-        self.map_pages(&self.node_in(value, 0)?, 0, &mut out)?;
+        self.map_pages(&self.node_in(value, 0)?, 0, &mut HashSet::new(), &mut out)?;
         Ok(out)
     }
 
-    fn map_pages(&self, node: &Node<'_>, depth: usize, out: &mut Vec<u64>) -> Result<()> {
+    fn map_pages(&self, node: &Node<'_>, depth: usize, seen: &mut HashSet<u64>, out: &mut Vec<u64>) -> Result<()> {
         if depth > 16 {
             return Err(format_err!("extent map deeper than 16 levels"));
         }
@@ -584,10 +588,28 @@ impl<D: ReadAt> Volume<D> {
             for &l in &child.lcns[..per_page] {
                 out.push(self.translate(l)?);
             }
-            let page = self.read_page(&child, false)?;
-            self.map_pages(&self.node_in(&page, self.node_offset())?, depth + 1, out)?;
+            let page = self.map_page(&child, node, seen)?;
+            self.map_pages(&self.node_in(&page, self.node_offset())?, depth + 1, seen, out)?;
         }
         Ok(())
+    }
+
+    /// The node of a page an index node of an extent map names: each page
+    /// once (rows naming one page again and again would read it as often),
+    /// a level below its parent's.
+    fn map_page(&self, child: &PageRef, parent: &Node<'_>, seen: &mut HashSet<u64>) -> Result<Vec<u8>> {
+        if !seen.insert(child.lcns[0]) {
+            return Err(format_err!("extent map page {:#x} named twice", child.lcns[0]));
+        }
+        let page = self.read_page(child, false)?;
+        let level = self.node_in(&page, self.node_offset())?.level;
+        if level.checked_add(1) != Some(parent.level) {
+            return Err(format_err!(
+                "an extent map page of level {level} below a node of level {}",
+                parent.level
+            ));
+        }
+        Ok(page)
     }
 
     /// A ReFS 1.x run row (see `extent_node`) as an extent in clusters.
@@ -601,6 +623,16 @@ impl<D: ReadAt> Volume<D> {
             return Err(Error::Unsupported(format!(
                 "a data run of {n} blocks at block {block:#x}, not of whole clusters"
             )));
+        }
+        // Its end is counted in bytes (where a read finds it).
+        if vcn
+            .checked_add(n)
+            .and_then(|end| end.checked_mul(crate::page::V1_BLOCK))
+            .is_none()
+        {
+            return Err(format_err!(
+                "a data run of {n} blocks from block {vcn:#x} of its stream"
+            ));
         }
         let checksums = match v.get(0x1a).copied().unwrap_or(0) {
             0 => None,
@@ -622,7 +654,14 @@ impl<D: ReadAt> Volume<D> {
         })
     }
 
-    fn extent_node(&self, node: &Node<'_>, depth: usize, kind: u16, out: &mut Vec<Extent>) -> Result<()> {
+    fn extent_node(
+        &self,
+        node: &Node<'_>,
+        depth: usize,
+        kind: u16,
+        seen: &mut HashSet<u64>,
+        out: &mut Vec<Extent>,
+    ) -> Result<()> {
         if depth > 16 {
             return Err(format_err!("extent map deeper than 16 levels"));
         }
@@ -660,8 +699,8 @@ impl<D: ReadAt> Volume<D> {
         } else {
             for row in node.rows() {
                 let child = self.page_ref(row?.value)?;
-                let page = self.read_page(&child, false)?;
-                self.extent_node(&self.node_in(&page, self.node_offset())?, depth + 1, kind, out)?;
+                let page = self.map_page(&child, node, seen)?;
+                self.extent_node(&self.node_in(&page, self.node_offset())?, depth + 1, kind, seen, out)?;
             }
         }
         Ok(())
@@ -724,7 +763,7 @@ impl<D: ReadAt> Volume<D> {
                                         "bytes {:#x}..{:#x} of the stream (virtual cluster {:#x})",
                                         start + at,
                                         start + at + part,
-                                        e.vlcn + at / cluster
+                                        e.vlcn.saturating_add(at / cluster)
                                     )));
                                 }
                             }
@@ -741,6 +780,13 @@ impl<D: ReadAt> Volume<D> {
 
 /// The default stream's levels are set 0 (the $DATA rows of the record).
 const OWN_SET: u64 = 0;
+
+/// The `size` bytes of resident data at 0x3c of an attribute's value, if
+/// the value holds them.
+fn resident(v: &[u8], size: u64) -> Option<&[u8]> {
+    let end = usize::try_from(size).ok()?.checked_add(0x3c)?;
+    v.get(0x3c..end)
+}
 
 /// Joins the parts of values too long for one row: their keys start
 /// with (u32 the value's bytes, u32 where this part starts) and are the
@@ -951,5 +997,34 @@ mod tests {
         // Whole clusters of 64 KiB, so a row of zeros is a run of none.
         let run = vol.v1_run(&[0u8; 0x18]).unwrap();
         assert_eq!((run.vcn, run.clusters), (0, 0));
+    }
+
+    /// A run whose end in bytes passes 2^64: an error (1.2.1 decoded it,
+    /// and reading the stream panicked counting its bytes).
+    #[test]
+    fn runs_ending_past_2_64_bytes_are_errors() {
+        let vol = v1_volume();
+        let mut row = vec![0u8; 0x18];
+        row[..8].copy_from_slice(&(u64::MAX - 3).to_le_bytes());
+        row[8..16].copy_from_slice(&4u64.to_le_bytes());
+        assert!(vol.v1_run(&row).is_err());
+        row[..8].copy_from_slice(&(1u64 << 62).to_le_bytes());
+        assert!(vol.v1_run(&row).is_err());
+    }
+
+    /// Resident named streams of ReFS 3.4's records whose size is near
+    /// 2^64: an error (1.2.1 panicked adding the size to 0x3c).
+    #[test]
+    fn resident_streams_of_impossible_sizes_are_errors() {
+        let vol = v1_volume();
+        for size in [u64::MAX, u64::MAX - 0x3b, 1 << 40] {
+            let mut value = vec![0u8; 0x60];
+            value[0x20..0x28].copy_from_slice(&size.to_le_bytes());
+            let mut file = File::default();
+            assert!(
+                vol.legacy_attribute(&mut file, NAMED, b"s\0", &value).is_err(),
+                "{size:#x}"
+            );
+        }
     }
 }

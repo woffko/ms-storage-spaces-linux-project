@@ -85,6 +85,28 @@
   pool health` and `refs ls`, `stat`, `map` and `check` escape control and
   format characters as `\u{..}` now, and cut names at 1024 characters;
   `--json` keeps them, JSON-escaped.
+* ReFS volumes (read by `refs` and its mounts, checked by `spaces
+  attach`): a container table row naming a start near 2^64 made opening
+  the volume panic; a name row with a key of 2 or 3 bytes, or resident
+  data claiming a size near 2^64, made listing the directory or opening
+  the file panic; an index node naming one page again and again had it
+  read once per row (a few such levels: millions of reads), and `refs
+  check` walked pages with no limit to depth or repetition and panicked on
+  allocator or reference count rows whose clusters pass 2^64. Containers
+  must now be of one size, inside the volume and apart; a tree's pages are
+  read once per walk, each a level below the node naming it; such keys,
+  sizes and rows are errors or problems of `refs check`.
+* `refs mount`: a panic while serving a request ended the thread serving
+  it, the mount with its last (after four, with `--rw` after the first),
+  and the data of open files with it. The request fails with EIO now and
+  the mount goes on; after a panic inside a change (`--rw`) every later
+  request fails so, as the volume in memory may be half changed.
+* ReFS `fs.refs.log`: a log whose control page was not found was a
+  warning, so healthy; it is suspect now when the checkpoint shows records
+  written to the log, a warning when it shows none, and the summary says
+  where it looked. A read error at one place where the control page may be
+  no longer ends the search. With two checkpoints of one clock, the checks
+  took the second and the reader the first: both take the first.
 * A space whose layout is not understood made every space of its pool
   failed (`space.state`), since 1.2.0 worked out the health of a pool as a
   whole: the others are judged on their own again, as 1.1.0 did.

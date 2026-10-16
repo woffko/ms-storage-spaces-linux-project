@@ -83,8 +83,9 @@ block number at 0). The guard's `fs.refs.superblock` compares them so.
 ### Checkpoint
 
 Two copies; the one with the higher clock (0x60) whose own checksum holds
-is current. Its own reference is at the offset in 0x58 (same rule as the
-superblock's). 0x5c: page reference size; 0x78: flags; 0x90: number of
+is current (of equal clocks, `refs` takes the first the superblock lists,
+and so do the guard's checks). Its own reference is at the offset in 0x58
+(same rule as the superblock's). 0x5c: page reference size; 0x78: flags; 0x90: number of
 roots (13); with flag 0x200 the u32 at 0x94 is the offset of an array of
 root offsets, otherwise the array is at 0x94; each offset names a page
 reference within the checkpoint. Roots used: 0 object table, 7 and 8 the
@@ -104,6 +105,13 @@ relative to the row). An index node's rows hold page references to its
 children in their values. (**verified**: all tables, including a
 directory of 5000 names spanning several pages.)
 
+`refs` reads each page of a tree once in a walk (rows naming a page again,
+or an ancestor, would have it read once per row, or forever) and expects
+a child node's level to be one less than its parent's; it refuses a tree
+otherwise, as it does one deeper than 16 levels. `refs check` reports such
+pages. Name rows (type 0x30) need keys of 4 bytes or more, resident data
+(at 0x3c of its value) must lie in its value.
+
 ### Virtual clusters and the container table
 
 Clusters named anywhere but in roots 7, 8 and 12 are virtual. The
@@ -113,6 +121,12 @@ container table (key: container id at 0; value: clusters per container at
 `bits(cpc)` is one more than log2(cpc) (15 on 4 KiB clusters, 11 on 64
 KiB): containers are twice their size apart in virtual numbers, so a run
 never crosses one. (**verified**)
+
+Every container of the corpus is 64 MiB (0x4000 clusters of 4 KiB, 0x400
+of 64 KiB). `refs` refuses a table whose rows give containers of different
+sizes, of more than 2^20 clusters, a container starting at or past the
+volume's end, or two whose clusters overlap: every address is computed
+from these.
 
 ### Object table
 

@@ -1573,11 +1573,15 @@ fn writes_stay_inside_the_volume_the_boot_sector_claims() {
     storage_spaces::io::WriteAt::write_all_at(&overlay, &boot, offset).unwrap();
     let before = overlay.written_pages().len();
     let end = offset + (low + 1) * cluster;
-    let mut vol = Volume::open(&overlay, offset).unwrap();
-    assert!(
-        vol.set_attributes("/small.txt", 0x21).is_err(),
-        "the other slot is outside"
-    );
+    // Its containers lie past that end too: the volume is refused at once
+    // (since 1.2.2), or the commit is.
+    match Volume::open(&overlay, offset) {
+        Ok(mut vol) => assert!(
+            vol.set_attributes("/small.txt", 0x21).is_err(),
+            "the other slot is outside"
+        ),
+        Err(e) => assert!(e.to_string().contains("beyond the volume"), "{e}"),
+    }
     let outside: Vec<u64> = overlay.written_pages().into_iter().filter(|&at| at >= end).collect();
     assert!(outside.is_empty(), "written past the volume: {outside:x?}");
     assert!(overlay.written_pages().len() >= before);

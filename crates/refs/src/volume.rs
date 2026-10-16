@@ -2,7 +2,7 @@
 //! and its roots, the container table that translates virtual cluster
 //! numbers, and the object table.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use storage_spaces::io::ReadAt;
 
@@ -24,7 +24,12 @@ pub const ROOT_CONTAINER_INDEX: usize = 10;
 /// Object ids.
 pub const ROOT_DIRECTORY: u64 = 0x600;
 /// Deepest tree walked (real trees have a few levels).
-const MAX_DEPTH: usize = 16;
+pub(crate) const MAX_DEPTH: usize = 16;
+/// The most clusters a container may have: Windows makes containers of 64
+/// MiB (0x4000 clusters of 4 KiB, 0x400 of 64 KiB); `refs check` and the
+/// reader of compacted containers do work for each of a container's
+/// clusters.
+const MAX_CONTAINER_CLUSTERS: u64 = 1 << 20;
 
 #[derive(Debug, Clone)]
 pub struct Checkpoint {
@@ -252,11 +257,13 @@ impl<D: ReadAt> Volume<D> {
         out: &mut Vec<PageRef>,
     ) -> Result<()> {
         let mut todo = vec![(r.clone(), 0)];
+        let mut seen = HashSet::new();
         while let Some((r, depth)) = todo.pop() {
             if depth > MAX_DEPTH {
                 return Err(format_err!("B+-tree deeper than {MAX_DEPTH} levels"));
             }
-            if skip.contains(&r.lcns[0]) {
+            // Each page once, however often it is named.
+            if skip.contains(&r.lcns[0]) || !seen.insert(r.lcns[0]) {
                 continue;
             }
             let page = match self.read_page(&r, physical) {
@@ -560,7 +567,7 @@ impl<D: ReadAt> Volume<D> {
         let shift = 64 - cpc.leading_zeros();
         self.containers
             .iter()
-            .find(|&(_, &start)| start <= lcn && lcn < start + cpc)
+            .find(|&(_, &start)| start <= lcn && lcn - start < cpc)
             .map(|(&cid, &start)| (cid << shift) | (lcn - start))
             .ok_or_else(|| format_err!("cluster {lcn:#x} in no container"))
     }
@@ -573,7 +580,9 @@ impl<D: ReadAt> Volume<D> {
             .containers
             .get(&(vlcn >> shift))
             .ok_or_else(|| format_err!("virtual cluster {vlcn:#x} in no container"))?;
-        Ok(start + (vlcn & (cpc - 1)))
+        start
+            .checked_add(vlcn & (cpc - 1))
+            .ok_or_else(|| format_err!("virtual cluster {vlcn:#x} beyond any device"))
     }
 
     /// Reads the page a reference points at (virtual clusters unless
@@ -613,7 +622,7 @@ impl<D: ReadAt> Volume<D> {
 
     /// Like `walk`, until `f` returns false.
     pub fn walk_while(&self, root: &PageRef, physical: bool, f: &mut dyn FnMut(Row<'_>) -> Result<bool>) -> Result<()> {
-        self.level(root, physical, 0, f).map(drop)
+        self.level(root, physical, 0, None, &mut HashSet::new(), f).map(drop)
     }
 
     /// Like `walk`, from a node already at hand (one embedded in a value).
@@ -624,23 +633,43 @@ impl<D: ReadAt> Volume<D> {
         depth: usize,
         f: &mut dyn FnMut(Row<'_>) -> Result<()>,
     ) -> Result<()> {
-        self.node(node, physical, depth, &mut |row| f(row).map(|()| true))
-            .map(drop)
+        self.node(node, physical, depth, &mut HashSet::new(), &mut |row| {
+            f(row).map(|()| true)
+        })
+        .map(drop)
     }
 
-    /// Walks the tree below `r`; false when `f` stopped the walk.
+    /// Walks the tree below `r` (a page below a node of level `below`, if
+    /// any; `seen` holds the pages walked so far); false when `f` stopped
+    /// the walk.
     fn level(
         &self,
         r: &PageRef,
         physical: bool,
         depth: usize,
+        below: Option<u8>,
+        seen: &mut HashSet<u64>,
         f: &mut dyn FnMut(Row<'_>) -> Result<bool>,
     ) -> Result<bool> {
         if depth > MAX_DEPTH {
             return Err(format_err!("B+-tree deeper than {MAX_DEPTH} levels"));
         }
+        // A page named twice (rows naming one child again and again, or a
+        // page itself) would be read as often as it is named.
+        if !seen.insert(r.lcns[0]) {
+            return Err(format_err!("page {:#x} is named twice in one B+-tree", r.lcns[0]));
+        }
         let page = self.read_page(r, physical)?;
-        self.node(&self.node_in(&page, self.node_offset())?, physical, depth, f)
+        let node = self.node_in(&page, self.node_offset())?;
+        if let Some(parent) = below
+            && node.level.checked_add(1) != Some(parent)
+        {
+            return Err(format_err!(
+                "a page of level {} below a node of level {parent}",
+                node.level
+            ));
+        }
+        self.node(&node, physical, depth, seen, f)
     }
 
     fn node(
@@ -648,6 +677,7 @@ impl<D: ReadAt> Volume<D> {
         node: &Node<'_>,
         physical: bool,
         depth: usize,
+        seen: &mut HashSet<u64>,
         f: &mut dyn FnMut(Row<'_>) -> Result<bool>,
     ) -> Result<bool> {
         for row in node.rows() {
@@ -655,7 +685,14 @@ impl<D: ReadAt> Volume<D> {
             let more = if node.is_leaf() {
                 f(row)?
             } else {
-                self.level(&self.page_ref(row.value)?, physical, depth + 1, f)?
+                self.level(
+                    &self.page_ref(row.value)?,
+                    physical,
+                    depth + 1,
+                    Some(node.level),
+                    seen,
+                    f,
+                )?
             };
             if !more {
                 return Ok(false);
@@ -675,12 +712,18 @@ impl<D: ReadAt> Volume<D> {
             containers.clear();
             classes.clear();
             compacted.clear();
+            cpc = 0;
             last = self.walk(&r, true, &mut |row| {
                 let v = row.value;
                 if row.key.len() < 8 || v.len() < 0x30 {
                     return Err(format_err!("container table row of {} bytes", v.len()));
                 }
-                cpc = le32(v, 0x18) as u64;
+                // One size for every container.
+                let size = le32(v, 0x18) as u64;
+                if cpc != 0 && size != cpc {
+                    return Err(format_err!("containers of {cpc} and of {size} clusters"));
+                }
+                cpc = size;
                 // A compacted container names its compressed bytes by a
                 // virtual cluster instead (see `compress`).
                 if le32(v, 0x14) == crate::compress::COMPACTED {
@@ -698,8 +741,30 @@ impl<D: ReadAt> Volume<D> {
         last?;
         // The boot sector names the containers' size from 3.4 on (0 on 3.1).
         let named = self.boot.container_size;
-        if !cpc.is_power_of_two() || (named != 0 && cpc.checked_mul(self.cluster) != Some(named)) {
+        if !cpc.is_power_of_two()
+            || cpc > MAX_CONTAINER_CLUSTERS
+            || (named != 0 && cpc.checked_mul(self.cluster) != Some(named))
+        {
             return Err(format_err!("{cpc} clusters per container"));
+        }
+        // Every container starts inside the volume, and none overlaps
+        // another (their addresses are computed from these).
+        let clusters = self.boot.volume_size() / self.cluster;
+        let mut starts: Vec<u64> = containers.values().copied().collect();
+        starts.sort_unstable();
+        if let Some(&last) = starts.last()
+            && last >= clusters
+        {
+            return Err(format_err!(
+                "a container at cluster {last:#x}, beyond the volume's {clusters:#x}"
+            ));
+        }
+        if let Some(w) = starts.windows(2).find(|w| w[1] - w[0] < cpc) {
+            return Err(format_err!(
+                "containers at clusters {:#x} and {:#x} overlap ({cpc} clusters each)",
+                w[0],
+                w[1]
+            ));
         }
         self.clusters_per_container = cpc;
         self.containers = containers;
@@ -965,8 +1030,13 @@ fn read_log<D: ReadAt + ?Sized>(
     let mut lcn = 0;
     while lcn < first && copies.is_empty() {
         let n = (first - lcn).min(64);
-        // One cluster more, for the copy after one in the batch's last.
-        let batch = read(lcn * cluster, (n + 1).min(volume_size / cluster - lcn) * cluster)?;
+        // One cluster more, for the copy after one in the batch's last. A
+        // batch that cannot be read is passed over (as a candidate after a
+        // region below).
+        let Ok(batch) = read(lcn * cluster, (n + 1).min(volume_size / cluster - lcn) * cluster) else {
+            lcn += n;
+            continue;
+        };
         for (i, c) in (0..).zip(batch.chunks_exact(cluster as usize)) {
             // The extra cluster counts only as the copy of one found here.
             if i == n && copies.is_empty() {
@@ -993,7 +1063,9 @@ fn read_log<D: ReadAt + ?Sized>(
             else {
                 continue;
             };
-            let pages = read(after, len)?;
+            let Ok(pages) = read(after, len) else {
+                continue;
+            };
             for (i, c) in (0..).zip(pages.as_chunks::<{ PAGE as usize }>().0) {
                 if is_control(c) && le64(c, 0xb8) == start && le64(c, 0xc0) == end {
                     copies.push((end + i, c.to_vec()));
@@ -1007,15 +1079,17 @@ fn read_log<D: ReadAt + ?Sized>(
     // The newer copy counts higher at 0xb0.
     let Some((control_page, control)) = copies.into_iter().max_by_key(|(_, c)| le64(c, 0xb0)) else {
         let tried: Vec<String> = tried.iter().map(|p| format!("{p:#x}")).collect();
-        return Err(format_err!(
+        return Err(Error::NotFound(format!(
             "no log control page among the first {first:#x} clusters nor after a log of 512 MiB to 2 GiB \
              from page {}",
             tried.join(" or ")
-        ));
+        )));
     };
     let (epoch, start, end) = (le64(&control, 0x20), le64(&control, 0xb8), le64(&control, 0xc0));
     if start >= end || (end - start) > 1 << 22 || end.checked_mul(PAGE).is_none_or(|e| e > volume_size) {
-        return Err(format_err!("log of pages {start:#x}..{end:#x}"));
+        return Err(Error::NotFound(format!(
+            "the log control page at 4 KiB page {control_page:#x} names a log of pages {start:#x}..{end:#x}"
+        )));
     }
     let found = |newest: Option<(Lsn, u64)>| LogState {
         checkpoint,

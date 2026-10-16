@@ -426,7 +426,9 @@ volume in a space attached with `--degraded` or `--force` mounts only with
   `fs.refs.log`: the ReFS boot sector (the volume fits its partition), the
   superblock and its two copies, both checkpoints, and that the log holds
   nothing newer than the checkpoint (ReFS 1.x and 3.1 keep logs `refs`
-  does not read).
+  does not read). A log whose control page is not found is suspect when
+  the checkpoint shows records written to it (whether Windows would
+  replay some is not known), a warning when it shows none.
 * `space.checks`: only when the checks of a space did not finish. A panic
   in them (a defect of this program that the metadata reaches) fails the
   space; checks that take longer than 40 s make it suspect
@@ -660,7 +662,11 @@ streams (`setfattr -n user.NAME`). Every change is one transaction with a new ch
 crash or a pulled cable leaves the volume as it was after the last
 completed change. Symbolic links cannot be made. The mount is served by
 one thread; it suits copying files to or from a Dev Drive, not heavy
-use.
+use. A request that stops on an internal error (a defect of `refs` that
+the volume reaches) fails with EIO and the mount goes on, read-only or
+not; after one inside a change, the volume in memory may be half changed,
+so every later request fails with EIO: unmount it (the volume on disk is
+as after the last completed change).
 
 `contrib/mount.refs`, installed as `/sbin/mount.ReFS` (the type blkid
 reports) and `/sbin/mount.refs`, lets `mount -t ReFS /dev/sdb2 /mnt`,

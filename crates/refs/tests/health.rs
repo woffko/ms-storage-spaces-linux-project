@@ -339,7 +339,8 @@ fn a_log_newer_than_the_checkpoint_is_suspect() {
     assert_eq!(log.status, Status::Ok, "{log:#?}");
     // The checkpoint's log sequence number (u64 at 0x70 of the current one).
     let vol = refs::Volume::open(&image, offset).unwrap();
-    let lsn = le64(&read(&image, offset + vol.checkpoint.lcn * 4096, 4096), 0x70);
+    let checkpoint = vol.checkpoint.lcn;
+    let lsn = le64(&read(&image, offset + checkpoint * 4096, 4096), 0x70);
     drop(vol);
     set_record(&mut image, offset, lsn + 1);
     let c = checks(&image, offset);
@@ -350,7 +351,9 @@ fn a_log_newer_than_the_checkpoint_is_suspect() {
     assert_eq!(e.found.as_deref(), Some(newer.as_str()));
     assert!(log.advice.as_deref().unwrap().contains("shut it down fully"));
     assert_eq!(verdict(&c), Verdict::Suspect);
-    // The log not found: not known, a warning.
+    // The log not found while the checkpoint shows records written to it:
+    // whether Windows would replay some is not known, suspect (1.2.1: a
+    // warning, so healthy).
     let mut lost = image.clone();
     for lcn in 0..0x400u64 {
         let page = read(&lost, offset + lcn * 4096, 4096);
@@ -358,11 +361,92 @@ fn a_log_newer_than_the_checkpoint_is_suspect() {
             lost.insert(offset + lcn * 4096, &[0u8; 4096]);
         }
     }
+    assert_ne!(lsn as u32, 0);
+    let c = checks(&lost, offset);
+    let log = status(&c, "fs.refs.log");
+    assert_eq!(log.status, Status::Suspect, "{log:#?}");
+    assert!(log.summary.contains("no log control page"), "{}", log.summary);
+    assert!(log.summary.contains("0x24000"), "where it looked: {}", log.summary);
+    assert_eq!(verdict(&c), Verdict::Suspect);
+    // A checkpoint whose log sequence number shows no record written (its
+    // low half 0): nothing to replay, a warning.
+    let at = offset + checkpoint * 4096;
+    let mut page = read(&lost, at, 4096);
+    page[0x70..0x74].fill(0);
+    let (sat, slen) = (le32(&page, 0x58), le32(&page, 0x5c));
+    seal(&mut page, sat, slen, 4096, false);
+    lost.insert(at, &page);
     let c = checks(&lost, offset);
     let log = status(&c, "fs.refs.log");
     assert_eq!(log.status, Status::Warning, "{log:#?}");
-    assert!(log.summary.contains("no log control page"), "{}", log.summary);
     assert_eq!(verdict(&c), Verdict::Healthy);
+}
+
+/// Both checkpoints valid with one clock: the quick checks take the one
+/// the volume is read from (the first the superblock lists, as
+/// `Volume::open`), so the log is checked against the checkpoint that is
+/// read (1.2.1 took the other).
+#[test]
+fn equal_clocks_take_the_checkpoint_that_is_read() {
+    let (mut image, offset) = fixture("r314small");
+    let (unit, _, _) = geometry(&image, offset);
+    let supb = read(&image, offset + 0x1e * unit, unit as usize);
+    let list = le32(&supb, 0x70);
+    let points = [le64(&supb, list), le64(&supb, list + 8)];
+    let clock = |image: &SparseImage, n: u64| le64(&read(image, offset + n * unit, unit as usize), 0x60);
+    // The older one gets the newer one's clock.
+    let (older, newer) = if clock(&image, points[0]) < clock(&image, points[1]) {
+        (points[0], points[1])
+    } else {
+        (points[1], points[0])
+    };
+    let mut page = read(&image, offset + older * unit, unit as usize);
+    page[0x60..0x68].copy_from_slice(&clock(&image, newer).to_le_bytes());
+    let (sat, slen) = (le32(&page, 0x58), le32(&page, 0x5c));
+    seal(&mut page, sat, slen, unit as usize, false);
+    image.insert(offset + older * unit, &page);
+    let c = checks(&image, offset);
+    let cp = status(&c, "fs.refs.checkpoint");
+    assert_eq!(cp.status, Status::Ok, "{c:#?}");
+    assert!(
+        cp.summary.ends_with(&format!("at cluster {:#x}", points[0])),
+        "{}",
+        cp.summary
+    );
+    if let Ok(vol) = refs::Volume::open(&image, offset) {
+        assert_eq!(vol.checkpoint.lcn, points[0]);
+    }
+}
+
+/// A device whose bytes in a range cannot be read.
+struct Unreadable<'a>(&'a SparseImage, std::ops::Range<u64>);
+
+impl ReadAt for Unreadable<'_> {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        if offset < self.1.end && self.1.start < offset + buf.len() as u64 {
+            return Err(std::io::Error::other("an unreadable sector"));
+        }
+        self.0.read_exact_at(buf, offset)
+    }
+
+    fn size(&self) -> std::io::Result<u64> {
+        self.0.size()
+    }
+}
+
+/// An unreadable sector among the first clusters, where the log's control
+/// page may be: the search goes on, and finds it after the log's region
+/// (where ReFS 3.4 keeps it; 1.2.1 gave up at the read error).
+#[test]
+fn an_unreadable_place_of_the_log_is_passed_over() {
+    let (image, offset) = fixture("r34small");
+    let (unit, _, _) = geometry(&image, offset);
+    let c = checks(&image, offset);
+    assert_eq!(status(&c, "fs.refs.log").status, Status::Ok, "{c:#?}");
+    let bad = offset + 0x10 * unit;
+    let dev = Unreadable(&image, bad..bad + 512);
+    let c = quick_checks(&dev, offset, "p2", &|o| format!("byte {o:#x}"));
+    assert_eq!(status(&c, "fs.refs.log").status, Status::Ok, "{c:#?}");
 }
 
 /// The boot sector at `offset` claiming `sectors` sectors, its checksum
