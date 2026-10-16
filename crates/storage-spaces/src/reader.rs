@@ -525,17 +525,20 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
             Some(size) => size,
             None => base.layout.mapped_size(),
         };
-        let cache = Self::open_cache(pool, space).map_err(|e| (Part::Cache, e))?;
-        let mut tiers = pool
-            .children(space.id())
+        // The hidden spaces under it, looked up once (a pool can have
+        // tens of thousands).
+        let children: Vec<&'p Space> = pool.children(space.id()).collect();
+        let cache = Self::open_cache(pool, space, &children).map_err(|e| (Part::Cache, e))?;
+        let mut tiers = children
+            .iter()
             .filter(|c| c.info.is_child && !c.extents.is_empty())
             .map(|c| Mapped::new(pool, c))
             .collect::<Result<Vec<_>>>()
             .map_err(|e| (Part::Tiers, e))?;
-        let journal = Self::open_journal(pool, space)
+        let journal = Self::open_journal(pool, space, &children)
             .map_err(|e| (Part::Journal, e))?
             .map(Arc::new);
-        let drt = Self::open_drt(pool, space)
+        let drt = Self::open_drt(pool, &children)
             .map_err(|e| (Part::DirtyRegions, e))?
             .map(Arc::new);
         // What the logs name lies inside the space.
@@ -562,13 +565,13 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
         })
     }
 
-    fn open_cache(pool: &'p Pool<D>, space: &Space) -> Result<Option<(Mapped<'p, D>, CacheIndex)>> {
-        let containers: Vec<_> = pool
-            .children(space.id())
-            .filter(|c| c.info.role == SpaceRole::Cache)
-            .collect();
+    fn open_cache(
+        pool: &'p Pool<D>,
+        space: &Space,
+        children: &[&'p Space],
+    ) -> Result<Option<(Mapped<'p, D>, CacheIndex)>> {
         let mut found = None;
-        for container in containers {
+        for container in children.iter().filter(|c| c.info.role == SpaceRole::Cache) {
             for child in pool.children(container.id()).filter(|c| !c.extents.is_empty()) {
                 if found.is_some() {
                     return Err(Error::Unsupported(format!("space {} has several caches", space.id())));
@@ -599,11 +602,8 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
     }
 
     /// Loads the parity journal of a space, if it has one.
-    fn open_journal(pool: &'p Pool<D>, space: &Space) -> Result<Option<ParityJournal>> {
-        let containers = pool
-            .children(space.id())
-            .filter(|c| c.info.role == SpaceRole::Other(0x0a));
-        for container in containers {
+    fn open_journal(pool: &'p Pool<D>, space: &Space, children: &[&'p Space]) -> Result<Option<ParityJournal>> {
+        for container in children.iter().filter(|c| c.info.role == SpaceRole::Other(0x0a)) {
             if let Some(child) = pool.children(container.id()).find(|c| !c.extents.is_empty()) {
                 let mapped = Mapped::new(pool, child)?;
                 return ParityJournal::load(space.info.guid, Slots(&mapped));
@@ -612,11 +612,8 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
         Ok(None)
     }
 
-    fn open_drt(pool: &'p Pool<D>, space: &Space) -> Result<Option<DirtyRegions>> {
-        let containers = pool
-            .children(space.id())
-            .filter(|c| c.info.role == SpaceRole::Other(0x06));
-        for container in containers {
+    fn open_drt(pool: &'p Pool<D>, children: &[&'p Space]) -> Result<Option<DirtyRegions>> {
+        for container in children.iter().filter(|c| c.info.role == SpaceRole::Other(0x06)) {
             if let Some(child) = pool.children(container.id()).find(|c| !c.extents.is_empty()) {
                 // Read through the child's own layout: opening it as a
                 // SpaceReader would look for tracking of its own, which
@@ -694,6 +691,10 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
             return Ok(None);
         };
         let mut out = ParityCheck::default();
+        // Stripes looked at one by one, at most: the journal lists ranges
+        // of up to 2^51 stripes (a run of 2^32 rows), which are counted
+        // whole; the rest is left, as past the read budget.
+        let mut visits: u64 = 1 << 26;
         let parity = std::iter::once(&self.base)
             .chain(&self.tiers)
             .filter(|m| m.layout.resiliency == Resiliency::Parity);
@@ -707,31 +708,35 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
             };
             for run in runs {
                 let start = l.run_start_offset(run.first_row);
-                for stripe in 0..run.rows * per_row {
-                    if !journal.is_dirty(start, stripe) {
-                        continue;
-                    }
-                    out.listed += 1;
-                    let offset = start + stripe * width;
-                    if let Some((_, index)) = &self.cache
-                        && let Lookup::Hit { len, .. } = index.lookup(offset)
-                        && len >= width
-                    {
-                        out.cached += 1;
-                        continue;
-                    }
-                    if budget.is_some_and(|b| out.bytes + cost > b) {
-                        out.incomplete = true;
-                        continue;
-                    }
-                    out.bytes += cost;
-                    match m.stripe_check(&l.locate(offset), l.interleave as usize)? {
-                        Some(true) => out.checked += 1,
-                        Some(false) => {
-                            out.checked += 1;
-                            out.mismatches.push(offset);
+                for (from, to) in journal.dirty_ranges(start, run.rows * per_row) {
+                    out.listed += to - from;
+                    for stripe in from..to {
+                        if out.incomplete || visits == 0 {
+                            out.incomplete = true;
+                            break;
                         }
-                        None => out.unreadable += 1,
+                        visits -= 1;
+                        let offset = start + stripe * width;
+                        if let Some((_, index)) = &self.cache
+                            && let Lookup::Hit { len, .. } = index.lookup(offset)
+                            && len >= width
+                        {
+                            out.cached += 1;
+                            continue;
+                        }
+                        if budget.is_some_and(|b| out.bytes + cost > b) {
+                            out.incomplete = true;
+                            break;
+                        }
+                        out.bytes += cost;
+                        match m.stripe_check(&l.locate(offset), l.interleave as usize)? {
+                            Some(true) => out.checked += 1,
+                            Some(false) => {
+                                out.checked += 1;
+                                out.mismatches.push(offset);
+                            }
+                            None => out.unreadable += 1,
+                        }
                     }
                 }
             }
@@ -836,6 +841,11 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
     /// Whether the space stores its data in storage tiers.
     pub fn is_tiered(&self) -> bool {
         !self.tiers.is_empty()
+    }
+
+    /// The number of its storage tiers that hold data.
+    pub fn tier_count(&self) -> usize {
+        self.tiers.len()
     }
 
     /// Reads what the write-back cache holds for `offset`, if anything.

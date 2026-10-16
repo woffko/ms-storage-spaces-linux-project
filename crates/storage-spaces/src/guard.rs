@@ -435,10 +435,27 @@ pub fn space_report<D: ReadAt>(
     options: &Options,
     fs: &mut FsHook<'_, D>,
 ) -> Report {
+    space_report_with(pool, space, &pool_health(pool), names, options, fs)
+}
+
+/// The health of `pool` as the reports take it ([`space_report_with`]):
+/// worked out once for all its spaces.
+pub fn pool_health<D: ReadAt>(pool: &Pool<D>) -> Result<Health, String> {
+    health(pool).map_err(|e| e.to_string())
+}
+
+/// [`space_report`], with the pool's health ([`pool_health`]) at hand.
+pub fn space_report_with<D: ReadAt>(
+    pool: &Pool<D>,
+    space: &Space,
+    health: &Result<Health, String>,
+    names: &[String],
+    options: &Options,
+    fs: &mut FsHook<'_, D>,
+) -> Report {
     let mut report = empty_report(pool, space);
     report.checks = pool_checks(pool, names);
-    let h = health(pool).map_err(|e| e.to_string());
-    report.checks.push(state_check(pool, space, &h));
+    report.checks.push(state_check(pool, space, health));
     report.checks.extend(space_checks(pool, space, names, options, fs));
     report
 }
@@ -450,8 +467,9 @@ pub fn pool_reports<D: ReadAt>(
     options: &Options,
     fs: &mut FsHook<'_, D>,
 ) -> Vec<Report> {
+    let health = pool_health(pool);
     pool.user_spaces()
-        .map(|s| space_report(pool, s, names, options, fs))
+        .map(|s| space_report_with(pool, s, &health, names, options, fs))
         .collect()
 }
 
@@ -493,7 +511,7 @@ fn space_checks<D: ReadAt>(
             return checks;
         }
     };
-    let mut checks = vec![layout_check(pool, space, &reader)];
+    let mut checks = vec![layout_check(space, &reader)];
     checks.push(cache_check(&reader, names));
     checks.push(journal_check(&reader, names, options));
     checks.push(drl_check(&reader));
@@ -519,13 +537,10 @@ fn space_checks<D: ReadAt>(
     checks
 }
 
-fn layout_check<D: ReadAt>(pool: &Pool<D>, space: &Space, reader: &SpaceReader<'_, D>) -> Check {
+fn layout_check<D: ReadAt>(space: &Space, reader: &SpaceReader<'_, D>) -> Check {
     let l = reader.layout();
     let disks: BTreeSet<u64> = space.extents.iter().map(|e| e.disk_id).collect();
-    let tiers = pool
-        .children(space.id())
-        .filter(|c| c.info.is_child && !c.extents.is_empty())
-        .count();
+    let tiers = reader.tier_count();
     Check::ok(
         "space.layout",
         format!(
@@ -654,16 +669,20 @@ fn journal_check<D: ReadAt>(reader: &SpaceReader<'_, D>, names: &[String], optio
     };
     if check.incomplete {
         let left = check.listed - check.checked - check.cached - check.unreadable;
+        let beyond = match options.journal_budget {
+            Some(b) => format!(
+                "left to the read budget of {} MiB (each is checked when read; spaces check --deep checks more)",
+                b >> 20
+            ),
+            None => "left unchecked (more stripes than are checked at once; each is checked when read)".into(),
+        };
         return Check::new(
             ID,
             Status::Info,
             format!(
                 "{} stripe(s) not recorded as consistent (never written, or written when last in use): \
-                 {} checked and matching{cached}{unread}, {left} left to the read budget of {} MiB \
-                 (each is checked when read; spaces check --deep checks them all)",
-                check.listed,
-                check.checked,
-                options.journal_budget.unwrap_or(0) >> 20
+                 {} checked and matching{cached}{unread}, {left} {beyond}",
+                check.listed, check.checked,
             ),
         )
         .truth(Truth::CrossCheck);

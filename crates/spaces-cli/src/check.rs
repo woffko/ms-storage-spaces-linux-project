@@ -11,6 +11,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use storage_spaces::gpt::{MSR_PARTITION_TYPE, Partition};
 use storage_spaces::guard::{self, Options};
+use storage_spaces::health::Health;
 use storage_spaces::io::ReadAt;
 use storage_spaces::isolate::{self, Stopped};
 use storage_spaces::report::{Check, Evidence, Report, Status, Truth, Verdict, reports_to_json};
@@ -98,11 +99,26 @@ pub fn refusal_note(verdict: Verdict, rw: bool, command: &str) -> String {
     }
 }
 
+/// The health of a pool as the checks of its spaces take it, worked out
+/// once for them all, on a thread of its own ([`pool_health`]).
+pub type PoolHealth = Arc<Result<Result<Health, String>, Stopped>>;
+
+/// Works out the health of `pool` for [`space_report`].
+pub fn pool_health<D: ReadAt + 'static>(pool: &Arc<Pool<D>>, limit: Option<Duration>) -> PoolHealth {
+    let shared = Arc::clone(pool);
+    Arc::new(isolate::isolated(limit, move || guard::pool_health(&shared)))
+}
+
 /// The report on space `space` of `pool` (quick checks, as attach makes),
 /// made on a thread of its own: checks that panic give a failed
 /// `space.checks`, checks past the [`deadline`] a suspect one.
-pub fn space_report<D: ReadAt + 'static>(pool: &Arc<Pool<D>>, paths: &[PathBuf], space: &Space) -> Report {
-    report(pool, paths, space, false, deadline(), fs_checks)
+pub fn space_report<D: ReadAt + 'static>(
+    pool: &Arc<Pool<D>>,
+    health: &PoolHealth,
+    paths: &[PathBuf],
+    space: &Space,
+) -> Report {
+    report(pool, health, paths, space, false, deadline(), fs_checks)
 }
 
 /// What the file systems of a space are checked with: [`fs_checks`] (the
@@ -113,19 +129,24 @@ type FsChecks<D> = fn(&SpaceReader<'_, D>, &Partition, &[String], bool) -> Vec<C
 /// thread of its own that may take `limit`.
 fn report<D: ReadAt + 'static>(
     pool: &Arc<Pool<D>>,
+    health: &PoolHealth,
     paths: &[PathBuf],
     space: &Space,
     deep: bool,
     limit: Option<Duration>,
     fs: FsChecks<D>,
 ) -> Report {
-    let (shared, names, id) = (Arc::clone(pool), names(paths), space.id());
+    if let Err(stopped) = health.as_ref() {
+        return stopped_report(pool, space, stopped);
+    }
+    let (shared, health, names, id) = (Arc::clone(pool), Arc::clone(health), names(paths), space.id());
     let work = move || {
         let space = &shared.spaces[&id];
         let options = Options {
             journal_budget: if deep { None } else { Options::default().journal_budget },
         };
-        let mut r = guard::space_report(&shared, space, &names, &options, &mut |reader, part, names| {
+        let health = health.as_ref().as_ref().expect("a stopped health returned above");
+        let mut r = guard::space_report_with(&shared, space, health, &names, &options, &mut |reader, part, names| {
             fs(reader, part, names, deep)
         });
         if deep {
@@ -302,9 +323,10 @@ pub fn reports<D: ReadAt + 'static>(
 ) -> Vec<Report> {
     // The deep checks read every copy: no time limit.
     let limit = if deep { None } else { deadline() };
+    let health = pool_health(pool, deadline());
     pool.user_spaces()
         .filter(|s| only.is_none_or(|key| names_space(s, key)))
-        .map(|space| report(pool, paths, space, deep, limit, fs_checks))
+        .map(|space| report(pool, &health, paths, space, deep, limit, fs_checks))
         .collect()
 }
 
@@ -507,11 +529,14 @@ mod tests {
         let pool = Arc::new(Pool::open(disks).unwrap());
         let space = pool.user_spaces().next().unwrap();
         let limit = Some(Duration::from_secs(30));
-        let fine = report(&pool, &[], space, false, limit, |_, _, _, _| Vec::new());
+        let health = pool_health(&pool, limit);
+        let fine = report(&pool, &health, &[], space, false, limit, |_, _, _, _| Vec::new());
         assert_eq!(fine.verdict(), Verdict::Healthy, "{}", fine.to_text());
         assert!(fine.subject.starts_with("space \""), "{}", fine.subject);
 
-        let r = report(&pool, &[], space, false, limit, |_, _, _, _| panic!("a defect"));
+        let r = report(&pool, &health, &[], space, false, limit, |_, _, _, _| {
+            panic!("a defect")
+        });
         assert_eq!(r.verdict(), Verdict::Failed, "{}", r.to_text());
         let c = r.checks.iter().find(|c| c.id == "space.checks").unwrap();
         assert!(c.evidence[0].found.as_deref().unwrap().contains("a defect"), "{c:?}");
@@ -520,6 +545,7 @@ mod tests {
 
         let r = report(
             &pool,
+            &health,
             &[],
             space,
             false,

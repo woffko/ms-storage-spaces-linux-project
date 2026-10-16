@@ -29,6 +29,14 @@
   for a space of 1 EiB). Such a space is refused now (`space.layout` failed,
   with the value; the limits are in docs/storage-spaces-format.md,
   "Plausible values"), and the table follows the extent runs.
+* Work that grew with what a pool's metadata claims instead of what it
+  holds: a parity journal can list a run of 2^30 stripes, which the check
+  walked one by one (days); the health of the pool was worked out again
+  for each of its spaces (1600 spaces: minutes); hidden spaces and
+  out-of-date extents were searched again for every row and space. The
+  check now takes the journal's ranges, the health is worked out once per
+  pool, and the rest is looked up: a pool of 10 000 spaces with 40 000
+  hidden ones is checked in seconds.
 * A space whose layout is not understood made every space of its pool
   failed (`space.state`), since 1.2.0 worked out the health of a pool as a
   whole: the others are judged on their own again, as 1.1.0 did.

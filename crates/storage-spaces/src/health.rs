@@ -136,10 +136,11 @@ pub fn health<D: ReadAt>(pool: &Pool<D>) -> Result<Health> {
     };
     let mut spaces = Vec::new();
     let mut unknown = Vec::new();
+    let parents = pool.parents();
     for space in pool.user_spaces() {
         // The space and every hidden space under it (tiers, write-back
         // cache, dirty region log, parity journal).
-        let family = pool.family(space.id());
+        let family = pool.family_in(&parents, space.id());
         let mut r = Redundancy {
             left: Some(u64::MAX),
             missing: false,

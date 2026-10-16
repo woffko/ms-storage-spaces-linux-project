@@ -206,6 +206,69 @@ impl ParityJournal {
             .is_some_and(|versions| versions.iter().any(|c| c.is_dirty(stripe)))
     }
 
+    /// The stripes of the extent run at owner offset `run_start` (of
+    /// `stripes` stripes) that may have stale parity, as [`Self::is_dirty`]
+    /// says of each, in ranges `from..to`, in order and apart: none for a
+    /// run without an entry. (A run can have 2^51 stripes; its entry's
+    /// runs and bitmap have at most 2^19.)
+    pub fn dirty_ranges(&self, run_start: u64, stripes: u64) -> Vec<(u64, u64)> {
+        let Some(versions) = self.runs.get(&run_start) else {
+            return Vec::new();
+        };
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        for c in versions {
+            match c {
+                Consistency::All => {}
+                Consistency::Bitmap(bits) => {
+                    // Bit set = consistent; stripes past the bitmap are not.
+                    let covered = (bits.len() as u64).saturating_mul(8).min(stripes);
+                    let mut from = None;
+                    for s in 0..covered {
+                        let dirty = bits[(s / 8) as usize] >> (s % 8) & 1 == 0;
+                        match (dirty, from) {
+                            (true, None) => from = Some(s),
+                            (false, Some(f)) => {
+                                ranges.push((f, s));
+                                from = None;
+                            }
+                            _ => {}
+                        }
+                    }
+                    ranges.extend(from.map(|f| (f, covered)));
+                    if covered < stripes {
+                        ranges.push((covered, stripes));
+                    }
+                }
+                Consistency::Runs(runs) => {
+                    // Stripes past the runs are not consistent either.
+                    let mut start = 0u64;
+                    for &(consistent, len) in runs {
+                        if start >= stripes {
+                            break;
+                        }
+                        let end = start.saturating_add(len).min(stripes);
+                        if !consistent && start < end {
+                            ranges.push((start, end));
+                        }
+                        start = start.saturating_add(len);
+                    }
+                    if start < stripes {
+                        ranges.push((start, stripes));
+                    }
+                }
+            }
+        }
+        ranges.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+        for (from, to) in ranges {
+            match merged.last_mut() {
+                Some(last) if from <= last.1 => last.1 = last.1.max(to),
+                _ => merged.push((from, to)),
+            }
+        }
+        merged
+    }
+
     /// Every version of the entry per extent run (keyed by the owner offset
     /// where the run starts), in offset order.
     pub fn entries(&self) -> Vec<(u64, &[Consistency])> {

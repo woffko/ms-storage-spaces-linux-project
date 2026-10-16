@@ -778,6 +778,7 @@ fn info(pool: &Arc<Pool<File>>, paths: &[PathBuf], all: bool) -> Result<()> {
         );
     }
     println!("Spaces:");
+    let health = check::pool_health(pool, check::deadline());
     for s in pool.spaces.values().filter(|s| all || s.is_user()) {
         let role = match s.info.role {
             SpaceRole::User => "user".to_string(),
@@ -808,7 +809,7 @@ fn info(pool: &Arc<Pool<File>>, paths: &[PathBuf], all: bool) -> Result<()> {
         if s.is_user() {
             // The verdict of the checks attach makes (spaces check reports
             // them whole).
-            let report = check::space_report(pool, paths, s);
+            let report = check::space_report(pool, &health, paths, s);
             println!(
                 "       verdict {}{}",
                 report.verdict().as_str(),
@@ -1248,6 +1249,7 @@ fn cmd_attach(
         if pool_sel.is_some_and(|p| p != pool.name && !p.eq_ignore_ascii_case(&pool.guid.to_string())) {
             continue;
         }
+        let health = check::pool_health(&pool, check::deadline());
         for space in pool.user_spaces() {
             if space_sel.is_some_and(|s| s != space.name() && !s.eq_ignore_ascii_case(&space.info.guid.to_string())) {
                 continue;
@@ -1256,7 +1258,7 @@ fn cmd_attach(
                 println!("{:?} is already attached", space.name());
                 continue;
             }
-            let mut report = check::space_report(&pool, &paths, space);
+            let mut report = check::space_report(&pool, &health, &paths, space);
             let verdict = report.verdict();
             let decision = check::gate(verdict, rw, degraded, force);
             let mut command = format!("spaces attach --space {}", space.info.guid);

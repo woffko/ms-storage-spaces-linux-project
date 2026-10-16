@@ -412,7 +412,7 @@ impl<D: ReadAt> Pool<D> {
     /// a disk at hand. (Within a column copy, overlapping extents are the
     /// layout's to refuse.)
     pub fn slab_map_problem(&self, id: u64) -> Option<String> {
-        let space = self.spaces.get(&id)?;
+        let space = self.spaces.get(&id).filter(|s| !s.extents.is_empty())?;
         let run = |e: &ExtentRecord| {
             e.physical_slab
                 .checked_add(e.slab_count)
@@ -491,12 +491,31 @@ impl<D: ReadAt> Pool<D> {
     /// dirty region log, parity journal), each once (parent links of
     /// corrupt metadata may form a cycle).
     pub fn family(&self, id: u64) -> Vec<&Space> {
+        self.family_in(&self.parents(), id)
+    }
+
+    /// The spaces by parent, for [`Pool::family_in`]: looking up the
+    /// families of many spaces through it costs one pass over the spaces,
+    /// not one per space and child.
+    pub fn parents(&self) -> BTreeMap<u64, Vec<&Space>> {
+        let mut by_parent: BTreeMap<u64, Vec<&Space>> = BTreeMap::new();
+        for s in self.spaces.values() {
+            if let Some(parent) = s.info.parent.filter(|&p| p != s.id()) {
+                by_parent.entry(parent).or_default().push(s);
+            }
+        }
+        by_parent
+    }
+
+    /// [`Pool::family`], with the spaces by parent at hand.
+    pub fn family_in<'p>(&'p self, parents: &BTreeMap<u64, Vec<&'p Space>>, id: u64) -> Vec<&'p Space> {
         let mut seen = std::collections::BTreeSet::new();
         let mut out: Vec<&Space> = self.spaces.get(&id).into_iter().collect();
         seen.insert(id);
         let mut i = 0;
         while i < out.len() {
-            let next: Vec<&Space> = self.children(out[i].id()).filter(|c| seen.insert(c.id())).collect();
+            let children = parents.get(&out[i].id()).into_iter().flatten();
+            let next: Vec<&Space> = children.filter(|c| seen.insert(c.id())).copied().collect();
             out.extend(next);
             i += 1;
         }

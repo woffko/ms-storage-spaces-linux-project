@@ -40,6 +40,63 @@ impl Redundancy {
     }
 }
 
+/// Out-of-date copies of one column: disjoint ranges of rows, each with
+/// the disks of the copies over it, for lookups in log time (a space can
+/// have thousands of them, and its health asks of every row and column).
+#[derive(Debug, Clone, Default)]
+struct Coverage {
+    /// Where each range starts; one ends where the next starts, the last
+    /// covers no copy.
+    starts: Vec<u64>,
+    disks: Vec<Vec<u64>>,
+}
+
+impl Coverage {
+    /// More copies of a row than any column can have are not believed.
+    const MAX_DEPTH: usize = 4 * MAX_COPIES as usize;
+
+    fn new(runs: &[Run]) -> Result<Coverage> {
+        // Ends sort before starts at the same row.
+        let mut events: Vec<(u64, bool, u64)> = runs
+            .iter()
+            .filter(|r| r.rows > 0)
+            .flat_map(|r| [(r.first_row, true, r.disk_id), (r.first_row + r.rows, false, r.disk_id)])
+            .collect();
+        events.sort_unstable_by_key(|&(row, start, _)| (row, start));
+        let mut cover = Coverage::default();
+        let mut active: Vec<u64> = Vec::new();
+        let mut i = 0;
+        while i < events.len() {
+            let row = events[i].0;
+            while let Some(&(_, start, disk)) = events.get(i).filter(|e| e.0 == row) {
+                if start {
+                    active.push(disk);
+                } else if let Some(p) = active.iter().position(|&d| d == disk) {
+                    active.swap_remove(p);
+                }
+                i += 1;
+            }
+            if active.len() > Self::MAX_DEPTH {
+                return Err(format_err!(
+                    "{} out-of-date copies of row {row} of a column: implausible",
+                    active.len()
+                ));
+            }
+            cover.starts.push(row);
+            cover.disks.push(active.clone());
+        }
+        Ok(cover)
+    }
+
+    /// The disks of the copies over row `row`.
+    fn at(&self, row: u64) -> &[u64] {
+        match self.starts.partition_point(|&s| s <= row) {
+            0 => &[],
+            i => &self.disks[i - 1],
+        }
+    }
+}
+
 /// A run of consecutive physical slabs backing consecutive rows of one column copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Run {
@@ -88,9 +145,12 @@ pub struct Layout {
     pub interleave: u64,
     runs: BTreeMap<(u64, u64), Vec<Run>>,
     /// Out-of-date copies per column.
-    stale: BTreeMap<u64, Vec<Run>>,
+    stale: BTreeMap<u64, Coverage>,
     /// The copies of `stale` with a stale marker (not those being rebuilt).
-    outdated: BTreeMap<u64, Vec<Run>>,
+    outdated: BTreeMap<u64, Coverage>,
+    /// The columns with extents, current or out of date, with the copy
+    /// numbers of their current ones.
+    used: BTreeMap<u64, Vec<u64>>,
 }
 
 impl Layout {
@@ -225,6 +285,17 @@ impl Layout {
             .max()
             .unwrap_or(1)
             .max(policy.copies.max(1));
+        let mut used: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        for &(column, copy) in runs.keys() {
+            used.entry(column).or_default().push(copy);
+        }
+        for &column in stale.keys() {
+            used.entry(column).or_default();
+        }
+        let cover = |m: BTreeMap<u64, Vec<Run>>| -> Result<BTreeMap<u64, Coverage>> {
+            m.into_iter().map(|(c, runs)| Ok((c, Coverage::new(&runs)?))).collect()
+        };
+        let (stale, outdated) = (cover(stale)?, cover(outdated)?);
         Ok(Layout {
             resiliency: policy.resiliency,
             columns: policy.columns,
@@ -241,6 +312,7 @@ impl Layout {
             runs,
             stale,
             outdated,
+            used,
         })
     }
 
@@ -340,11 +412,7 @@ impl Layout {
     /// The copy numbers of a column (a moved copy may be numbered beyond the
     /// policy's copies).
     pub fn copies_of(&self, column: u64) -> Vec<u64> {
-        self.runs
-            .keys()
-            .filter(|(c, _)| *c == column)
-            .map(|(_, copy)| *copy)
-            .collect()
+        self.used.get(&column).cloned().unwrap_or_default()
     }
 
     /// Physical slab backing a row of a column copy, if allocated.
@@ -357,25 +425,28 @@ impl Layout {
 
     /// Whether the row of a column has an out-of-date copy only.
     pub fn has_stale_copy(&self, column: u64, row: u64) -> bool {
-        self.stale
-            .get(&column)
-            .is_some_and(|runs| runs.iter().any(|r| r.first_row <= row && row < r.first_row + r.rows))
+        self.stale.get(&column).is_some_and(|c| !c.at(row).is_empty())
+    }
+
+    /// The rows where what the extents map changes, in order: the state of
+    /// the space is the same from one to the next.
+    fn bounds(&self) -> Vec<u64> {
+        let mut bounds: Vec<u64> = self
+            .runs
+            .values()
+            .flatten()
+            .flat_map(|r| [r.first_row, r.first_row + r.rows])
+            .chain(self.stale.values().flat_map(|c| c.starts.iter().copied()))
+            .collect();
+        bounds.sort_unstable();
+        bounds.dedup();
+        bounds
     }
 
     /// How much redundancy is left when only the disks for which `present`
     /// returns true can be read. Rows without any extent (thin provisioning)
     /// do not count.
     pub fn condition(&self, present: impl Fn(u64) -> bool) -> Condition {
-        // The state is constant between run boundaries.
-        let mut bounds: Vec<u64> = self
-            .runs
-            .values()
-            .chain(self.stale.values())
-            .flatten()
-            .flat_map(|r| [r.first_row, r.first_row + r.rows])
-            .collect();
-        bounds.sort_unstable();
-        bounds.dedup();
         // Disk failures a row survives.
         let tolerance = match self.resiliency {
             Resiliency::Parity if self.groups > 1 => 2,
@@ -383,14 +454,15 @@ impl Layout {
             _ => self.copies.saturating_sub(1),
         };
         let mut worst = Condition::Healthy;
-        for row in bounds {
+        for row in self.bounds() {
             let mut lost_columns = 0;
             let mut reduced = false;
             let mut allocated = false;
-            for column in 0..self.columns {
+            for (&column, numbers) in &self.used {
                 let stale = self.has_stale_copy(column, row);
-                let copies: Vec<u64> = (0..self.copies)
-                    .filter_map(|copy| self.physical(column, copy, row).map(|(disk, _)| disk))
+                let copies: Vec<u64> = numbers
+                    .iter()
+                    .filter_map(|&copy| self.physical(column, copy, row).map(|(disk, _)| disk))
                     .collect();
                 if copies.is_empty() && !stale {
                     continue;
@@ -426,15 +498,6 @@ impl Layout {
     /// counts them) count as current; copies being rebuilt do not count.
     /// Rows without any extent (thin provisioning) do not count.
     pub fn redundancy(&self, present: impl Fn(u64) -> bool, evacuating: impl Fn(u64) -> bool) -> Redundancy {
-        let mut bounds: Vec<u64> = self
-            .runs
-            .values()
-            .chain(self.stale.values())
-            .flatten()
-            .flat_map(|r| [r.first_row, r.first_row + r.rows])
-            .collect();
-        bounds.sort_unstable();
-        bounds.dedup();
         let tolerance = match self.resiliency {
             Resiliency::Parity if self.groups > 1 => 2,
             Resiliency::Parity => self.parity_units,
@@ -445,21 +508,13 @@ impl Layout {
             missing: false,
             stale: false,
         };
-        for row in bounds {
+        for row in self.bounds() {
             let mut lost_columns = 0;
             let mut least_copies = u64::MAX;
             let mut allocated = false;
-            for column in 0..self.columns {
-                let in_row = |runs: Option<&Vec<Run>>| -> Vec<u64> {
-                    runs.into_iter()
-                        .flatten()
-                        .filter(|r| r.first_row <= row && row < r.first_row + r.rows)
-                        .map(|r| r.disk_id)
-                        .collect()
-                };
-                let outdated = in_row(self.outdated.get(&column));
-                let copies: Vec<u64> = self
-                    .copies_of(column)
+            for (&column, numbers) in &self.used {
+                let outdated = self.outdated.get(&column).map_or(&[][..], |c| c.at(row));
+                let copies: Vec<u64> = numbers
                     .iter()
                     .filter_map(|&copy| self.physical(column, copy, row).map(|(disk, _)| disk))
                     .chain(outdated.iter().copied().filter(|&d| evacuating(d)))
