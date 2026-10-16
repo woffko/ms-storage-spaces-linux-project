@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::error::{Error, Result, format_err};
 use crate::format::{ExtentRecord, Policy, Resiliency, SLAB_SIZE};
+use crate::limits::{MAX_COLUMNS, MAX_COPIES, MAX_GROUPS, MAX_REDUNDANCY, MAX_SLABS, MAX_SPACE_SIZE};
 
 /// Redundancy state of a space or layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -38,9 +39,6 @@ impl Redundancy {
         }
     }
 }
-
-/// Largest slab number or count accepted from extent records.
-const MAX_SLABS: u64 = 1 << 32;
 
 /// A run of consecutive physical slabs backing consecutive rows of one column copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,8 +100,25 @@ impl Layout {
 
     /// A layout that starts at byte `base` of the owner space (a tier).
     pub fn with_base(policy: &Policy, extents: &[ExtentRecord], base: u64) -> Result<Self> {
-        if !base.is_multiple_of(SLAB_SIZE) {
-            return Err(format_err!("layout starts at {base:#x}, not on a slab boundary"));
+        if !base.is_multiple_of(SLAB_SIZE) || base > MAX_SPACE_SIZE {
+            return Err(format_err!(
+                "layout starts at {base:#x}, not on a slab boundary inside 1 EiB"
+            ));
+        }
+        // Numbers far beyond any pool's are not computed with (see
+        // `crate::limits`): the space is not read.
+        if !(1..=MAX_COLUMNS).contains(&policy.columns)
+            || policy.copies > MAX_COPIES
+            || policy.groups > MAX_GROUPS
+            || policy.redundancy > MAX_REDUNDANCY
+        {
+            return Err(format_err!(
+                "implausible placement policy: {} columns, {} copies, {} groups, redundancy {}",
+                policy.columns,
+                policy.copies,
+                policy.groups,
+                policy.redundancy
+            ));
         }
         let base_slab = base / SLAB_SIZE;
         let data_columns = match policy.resiliency {
@@ -137,13 +152,6 @@ impl Layout {
         // remembered so that a row without a current copy is an error.
         let mut stale: BTreeMap<u64, Vec<Run>> = BTreeMap::new();
         let mut outdated: BTreeMap<u64, Vec<Run>> = BTreeMap::new();
-        // Copy numbers can exceed the policy while a copy is regenerated.
-        let copies = extents
-            .iter()
-            .map(|e| e.copy + 1)
-            .max()
-            .unwrap_or(1)
-            .max(policy.copies.max(1));
         for e in extents {
             // Slab numbers beyond 2^32 (1 EiB) cannot be real; the limit keeps
             // all offset arithmetic far from overflowing.
@@ -158,7 +166,9 @@ impl Layout {
                     e.physical_slab
                 ));
             }
-            if e.column >= policy.columns || e.copy >= copies.max(policy.copies + 1) {
+            // Copy numbers can exceed the policy's while a copy is
+            // regenerated, but not by much.
+            if e.column >= policy.columns || e.copy >= MAX_COPIES {
                 return Err(format_err!(
                     "extent column {} copy {} outside a {}x{} layout",
                     e.column,
@@ -198,6 +208,23 @@ impl Layout {
                 return Err(format_err!("overlapping extents"));
             }
         }
+        // What the extents map must be addressable (rows of at most 2^33).
+        let rows = runs.values().flatten().map(|r| r.first_row + r.rows).max().unwrap_or(0);
+        let mapped = rows
+            .checked_mul(SLAB_SIZE * data_columns)
+            .and_then(|b| b.checked_add(base))
+            .filter(|&end| end <= MAX_SPACE_SIZE);
+        if mapped.is_none() {
+            return Err(format_err!(
+                "extents reaching row {rows} of {data_columns} slabs from {base:#x}: beyond 1 EiB"
+            ));
+        }
+        let copies = extents
+            .iter()
+            .map(|e| e.copy + 1)
+            .max()
+            .unwrap_or(1)
+            .max(policy.copies.max(1));
         Ok(Layout {
             resiliency: policy.resiliency,
             columns: policy.columns,
@@ -462,7 +489,8 @@ impl Layout {
     }
 
     /// Bytes of the owner space the extents cover, up to the end of the
-    /// last row (the size of spaces whose record gives none).
+    /// last row (the size of spaces whose record gives none; at most 1 EiB,
+    /// as [`Layout::with_base`] checks).
     pub fn mapped_size(&self) -> u64 {
         let rows = self
             .runs

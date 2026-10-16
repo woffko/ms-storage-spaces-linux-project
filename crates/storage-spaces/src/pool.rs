@@ -130,9 +130,12 @@ impl Space {
         !self.info.is_child && self.info.role == SpaceRole::User
     }
 
-    /// Bytes allocated to this space on the pool disks.
+    /// Bytes allocated to this space on the pool disks (at most `u64::MAX`:
+    /// the counts come from records nothing checks).
     pub fn allocated(&self) -> u64 {
-        self.extents.iter().map(|e| e.slab_count * SLAB_SIZE).sum()
+        self.extents.iter().fold(0u64, |sum, e| {
+            sum.saturating_add(e.slab_count.saturating_mul(SLAB_SIZE))
+        })
     }
 }
 

@@ -80,6 +80,9 @@ pub struct Health {
     pub database_copies: (usize, usize),
     pub disks: Vec<DiskHealth>,
     pub spaces: Vec<SpaceHealth>,
+    /// The user spaces whose state cannot be worked out (a slab map that is
+    /// not understood): id and why. The others do not depend on them.
+    pub unknown: Vec<(u64, String)>,
 }
 
 /// The health Windows would show for `pool` with the disks at hand.
@@ -132,6 +135,7 @@ pub fn health<D: ReadAt>(pool: &Pool<D>) -> Result<Health> {
             .is_some_and(|d| d.member.is_some() && d.usage == DiskUsage::Retired)
     };
     let mut spaces = Vec::new();
+    let mut unknown = Vec::new();
     for space in pool.user_spaces() {
         // The space and every hidden space under it (tiers, write-back
         // cache, dirty region log, parity journal).
@@ -141,10 +145,20 @@ pub fn health<D: ReadAt>(pool: &Pool<D>) -> Result<Health> {
             missing: false,
             stale: false,
         };
-        for s in family.iter().filter(|s| !s.extents.is_empty()) {
-            if let Some(policy) = &s.info.policy {
-                r = r.and(Layout::new(policy, &s.extents)?.redundancy(present, evacuating));
+        let layouts = family
+            .iter()
+            .filter(|s| !s.extents.is_empty())
+            .filter_map(|s| s.info.policy.as_ref().map(|policy| Layout::new(policy, &s.extents)))
+            .collect::<Result<Vec<Layout>>>();
+        let layouts = match layouts {
+            Ok(l) => l,
+            Err(e) => {
+                unknown.push((space.id(), e.to_string()));
+                continue;
             }
+        };
+        for l in &layouts {
+            r = r.and(l.redundancy(present, evacuating));
         }
         let mut words = Vec::new();
         let health = match r.left {
@@ -187,5 +201,6 @@ pub fn health<D: ReadAt>(pool: &Pool<D>) -> Result<Health> {
         database_copies: (at_hand, copies),
         disks,
         spaces,
+        unknown,
     })
 }

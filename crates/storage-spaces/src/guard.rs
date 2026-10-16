@@ -342,6 +342,11 @@ fn state_check<D: ReadAt>(pool: &Pool<D>, space: &Space, health: &Result<Health,
                 .advice("The layout of the space is not understood; nothing reads it.");
         }
     };
+    if let Some((_, e)) = h.unknown.iter().find(|(id, _)| *id == space.id()) {
+        return Check::new(ID, Status::Failed, format!("the state cannot be worked out: {e}"))
+            .truth(Truth::Windows)
+            .advice("The layout of the space is not understood; nothing reads it.");
+    }
     let Some(s) = h.spaces.iter().find(|s| s.id == space.id()) else {
         return Check::skipped(ID, "the space is not in the pool's list of spaces");
     };
@@ -1485,17 +1490,67 @@ mod tests {
     /// Device and byte offset of byte `offset` of the write-back cache of
     /// `space`, copy `copy`.
     fn cache_byte<D: ReadAt>(pool: &Pool<D>, space: &Space, copy: u64, offset: u64) -> (usize, u64) {
-        let container = pool
-            .children(space.id())
-            .find(|c| c.info.role == SpaceRole::Cache)
-            .unwrap();
-        let cache = pool.children(container.id()).find(|c| !c.extents.is_empty()).unwrap();
-        let base = cache.info.range.map_or(0, |(start, _)| start);
-        let l = Layout::with_base(cache.info.policy.as_ref().unwrap(), &cache.extents, base).unwrap();
+        hidden_byte(pool, space, SpaceRole::Cache, copy, offset).unwrap()
+    }
+
+    /// Device and byte offset of byte `offset` of copy `copy` of the hidden
+    /// space of `space` in the container of `role` (the cache, the parity
+    /// journal, the dirty region log); `None` without such a copy.
+    fn hidden_byte<D: ReadAt>(
+        pool: &Pool<D>,
+        space: &Space,
+        role: SpaceRole,
+        copy: u64,
+        offset: u64,
+    ) -> Option<(usize, u64)> {
+        let container = pool.children(space.id()).find(|c| c.info.role == role)?;
+        let child = pool.children(container.id()).find(|c| !c.extents.is_empty())?;
+        let base = child.info.range.map_or(0, |(start, _)| start);
+        let l = Layout::with_base(child.info.policy.as_ref().unwrap(), &child.extents, base).unwrap();
         let loc = l.locate(base + offset);
-        let (disk, slab) = l.physical(loc.column, copy, loc.row).unwrap();
+        let (disk, slab) = l.physical(loc.column, copy, loc.row)?;
         let (device, start) = pool.slab_location(disk, slab).unwrap().unwrap();
-        (device, start + loc.offset_in_slab)
+        Some((device, start + loc.offset_in_slab))
+    }
+
+    /// A cache or parity journal header (valid CRC) naming its slot area
+    /// near 2^64: the space fails (in 1.2.1 reading the slots overflowed).
+    #[test]
+    fn log_headers_naming_slots_beyond_any_space_fail_the_space() {
+        for (rel, role, id) in [
+            ("fixtures/paritythin", SpaceRole::Cache, "space.cache"),
+            ("fixtures/mirrorthin", SpaceRole::Cache, "space.cache"),
+            ("scenarios/m5pj2/s5", SpaceRole::Other(0x0a), "space.journal"),
+        ] {
+            let mut disks = images(rel);
+            let places: Vec<(usize, u64)> = {
+                let pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+                let space = pool.user_spaces().next().unwrap();
+                (0..4)
+                    .filter_map(|copy| hidden_byte(&pool, space, role, copy, 0))
+                    .collect()
+            };
+            // (A fixture holds the copies reading needs, of the headers
+            // the first one.)
+            let mut patched = 0;
+            for &(device, at) in &places {
+                let mut header = vec![0u8; 0x60];
+                disks[device].read_exact_at(&mut header, at).unwrap();
+                if &header[..6] != b"SPCACH" && &header[..5] != b"SPVDT" {
+                    continue;
+                }
+                patched += 1;
+                header[0x30..0x38].copy_from_slice(&0xffff_ffff_ffff_f000u64.to_le_bytes());
+                let crc = crate::crc::crc32_excluding(&header, 0x24);
+                header[0x24..0x28].copy_from_slice(&crc.to_le_bytes());
+                disks[device].insert(at, &header);
+            }
+            assert!(patched > 0, "{rel}");
+            let pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+            let r = &reports(&pool, &Options::default())[0];
+            assert_eq!(check(r, id).status, Status::Failed, "{rel}\n{}", r.to_text());
+            assert_eq!(r.verdict(), Verdict::Failed);
+        }
     }
 
     #[test]

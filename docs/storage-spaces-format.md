@@ -1082,6 +1082,32 @@ scenario state of the corpus.
 * Partitions that become device-mapper devices lie inside the space and
   do not overlap.
 
+### Plausible values
+
+Records carry no checksum and every number in them is a varint of up to
+64 bits, so the readers bound what they compute with, loop over or
+allocate by (`storage_spaces::limits`). A space (with its tiers, cache,
+journal and dirty region log) whose records exceed a limit is not read: its
+layout fails, `space.layout` and `space.state` say so with the value, and
+the other spaces of the pool are read as usual. The limits lie far above
+what Windows writes; the largest values of the corpus (every fixture,
+scenario state and pool image) are given for comparison.
+
+| Value | Limit | Largest in the corpus |
+|---|---|---|
+| columns of a space or tier | 1 to 1024 | 16 (`lrc16`) |
+| copies (the policy's, and an extent's copy number + 1) | 16 | 3 (extent copy numbers up to 2) |
+| local groups of dual parity | 64 (and at most half the columns) | 3 |
+| redundancy (disk failures tolerated) | 3 | 2 |
+| a space's size, a tier's or cache's range, what the extents map | 2^60 bytes | 16 GiB |
+| slab numbers and counts of an extent | 2^32 | 47 |
+| offsets in the cache and journal spaces (slot area, checkpoints, data) | 2^56 | a few GiB |
+
+The pool's own metadata space is mirrored once per disk (copies 8 and
+redundancy 7 on a pool of eight disks), and tier templates hold
+0xffffffff for columns and groups ("chosen when the tier is made"); the
+readers never lay those out, so the limits do not apply to them.
+
 ## Open questions
 
 * SDBB entries carry no checksum of their own: a torn copy of equal

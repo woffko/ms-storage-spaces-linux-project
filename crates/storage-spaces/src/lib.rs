@@ -31,6 +31,7 @@ pub mod io;
 pub mod isolate;
 pub mod journal;
 pub mod layout;
+pub mod limits;
 pub mod manage;
 pub mod ops;
 pub mod plan;

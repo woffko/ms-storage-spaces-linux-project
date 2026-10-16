@@ -10,6 +10,7 @@ use crate::gf16;
 use crate::io::ReadAt;
 use crate::journal::ParityJournal;
 use crate::layout::{Condition, Layout, Location};
+use crate::limits::MAX_SPACE_SIZE;
 use crate::pool::{Pool, Space};
 use std::sync::Arc;
 
@@ -97,6 +98,12 @@ impl<D: ReadAt> Mapped<'_, D> {
             (None, None) => None,
         };
         if let Some((start, len)) = bounds {
+            if start > MAX_SPACE_SIZE || len > MAX_SPACE_SIZE {
+                return Err(format_err!(
+                    "space {} of {len:#x} bytes from {start:#x}: beyond 1 EiB",
+                    space.id()
+                ));
+            }
             let row = SLAB_SIZE * layout.data_columns;
             let end = len.checked_next_multiple_of(row).and_then(|l| l.checked_add(start));
             for e in &space.extents {
@@ -417,6 +424,8 @@ impl<D: ReadAt> Mapped<'_, D> {
     }
 
     fn read_exact(&self, mut offset: u64, mut buf: &mut [u8]) -> Result<()> {
+        let beyond = || format_err!("a read of {} bytes at {offset:#x} reaches beyond any space", buf.len());
+        offset.checked_add(buf.len() as u64).ok_or_else(beyond)?;
         while !buf.is_empty() {
             let (n, allocated) = self.read_some(offset, buf)?;
             if !allocated {
@@ -432,6 +441,12 @@ impl<D: ReadAt> Mapped<'_, D> {
     /// not complete on the disks at hand.
     fn read_copy(&self, copy: u64, mut offset: u64, mut buf: &mut [u8]) -> Result<bool> {
         let l = &self.layout;
+        if offset.checked_add(buf.len() as u64).is_none() {
+            return Err(format_err!(
+                "a read of {} bytes at {offset:#x} reaches beyond any space",
+                buf.len()
+            ));
+        }
         while !buf.is_empty() {
             let loc = l.locate(offset);
             let n = buf.len().min(loc.contiguous as usize);

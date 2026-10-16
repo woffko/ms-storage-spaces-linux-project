@@ -911,7 +911,8 @@ pub(crate) fn extents_text<D: ReadAt>(pool: &Pool<D>, space: &Space) -> String {
             e.copy,
             e.slab_count,
             e.disk_id,
-            e.physical_slab * SLAB_SIZE
+            // The record's number, whatever it is (no address of any disk).
+            u128::from(e.physical_slab) * u128::from(SLAB_SIZE)
         );
     }
     for child in pool.children(space.id()) {

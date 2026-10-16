@@ -22,6 +22,16 @@
   2^52. They are suspect now, with where. A ReFS volume larger than its
   partition (or the rest of its device), or smaller than ReFS can be, is
   suspect too.
+* Numbers in a pool's records far beyond anything Windows writes (a space
+  of 2^31 columns or copies, an extent copy number of 2^64 - 1, a size of
+  2^62 bytes) made the checks of attach loop for minutes or overflow, and
+  the device-mapper table of a space was worked out row by row (2^32 rows
+  for a space of 1 EiB). Such a space is refused now (`space.layout` failed,
+  with the value; the limits are in docs/storage-spaces-format.md,
+  "Plausible values"), and the table follows the extent runs.
+* A space whose layout is not understood made every space of its pool
+  failed (`space.state`), since 1.2.0 worked out the health of a pool as a
+  whole: the others are judged on their own again, as 1.1.0 did.
 * `ruzstd` 0.9.1: with 0.9.0 a tiny ZSTD frame could exhaust memory
   (RUSTSEC-2026-0344) when `refs` read a compressed file of a hostile
   volume.

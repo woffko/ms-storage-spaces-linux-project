@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use crate::crc::{crc32, crc32_excluding};
 use crate::error::{Result, format_err};
 use crate::guid::Guid;
+use crate::limits::MAX_LOG_OFFSET;
 
 pub const SPCACHE_SIGNATURE: &[u8; 8] = b"SPCACHE\0";
 pub const SPSLOT_SIGNATURE: &[u8; 8] = b"SPSLOT\0\0";
@@ -800,7 +801,8 @@ impl CacheHeader {
             || h.chunk_size > MAX_CHUNK
             || !h.chunk_size.is_multiple_of(4096)
             // Keeps cache offsets far from overflowing (real caches: GiBs).
-            || h.data_offset > 1 << 56
+            || h.slot_offset > MAX_LOG_OFFSET
+            || h.data_offset > MAX_LOG_OFFSET
             || (h.chunk_size as u64) * (h.chunk_count as u64) > 1 << 56
         {
             return Err(format_err!("implausible cache geometry: {h:?}"));
@@ -808,7 +810,7 @@ impl CacheHeader {
         let mut h = h;
         if h.checkpoint_count > 4
             || !(CHECKPOINT_ENTRIES as u32..=16 << 20).contains(&h.checkpoint_size)
-            || h.checkpoint_offset > 1 << 56
+            || h.checkpoint_offset > MAX_LOG_OFFSET
         {
             h.checkpoint_count = 0;
         }

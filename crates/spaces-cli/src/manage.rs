@@ -477,6 +477,9 @@ pub fn pool(command: PoolCommand) -> Result<()> {
                     .map_or("data lost".to_owned(), |n| format!("survives {n} more disk failure(s)"));
                 println!("  space \"{}\": {} ({left})", s.name, s.state);
             }
+            for (id, why) in &h.unknown {
+                println!("  space \"{}\": not worked out ({why})", pool.spaces[id].name());
+            }
             Ok(())
         }
         PoolCommand::Scrub { repair, yes, devices } => {

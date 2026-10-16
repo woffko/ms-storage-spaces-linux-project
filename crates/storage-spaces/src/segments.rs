@@ -59,10 +59,24 @@ impl<D: ReadAt> SpaceReader<'_, D> {
             ));
         }
         let rows = self.size().div_ceil(row_size);
+        // Where what maps a column changes: between these rows every row is
+        // mapped as the first, a slab further on, and makes one segment (a
+        // space of 1 EiB has 2^32 rows, its runs are what count).
+        let mut bounds: Vec<u64> = l
+            .runs()
+            .values()
+            .flatten()
+            .flat_map(|r| [r.first_row, r.first_row + r.rows])
+            .filter(|&b| b < rows)
+            .chain([0, rows])
+            .collect();
+        bounds.sort_unstable();
+        bounds.dedup();
         let mut out: Vec<Segment> = Vec::new();
-        for row in 0..rows {
+        for stretch in bounds.windows(2) {
+            let (row, next) = (stretch[0], stretch[1]);
             let start = row * row_size;
-            let length = row_size.min(self.size() - start);
+            let length = (next * row_size).min(self.size()) - start;
             let mut stripes = Vec::with_capacity(l.columns as usize);
             let mut allocated = 0;
             for column in 0..l.columns {

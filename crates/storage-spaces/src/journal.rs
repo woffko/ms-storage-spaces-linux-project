@@ -26,6 +26,7 @@ use crate::cache::{Checkpoint, LogWrite, SlotSource, load_checkpoints, merge_slo
 use crate::crc::crc32_excluding;
 use crate::error::{Result, format_err};
 use crate::guid::Guid;
+use crate::limits::MAX_LOG_OFFSET;
 
 pub const SPVDT_SIGNATURE: &[u8; 8] = b"SPVDT\0\0\0";
 const SPSLOT_SIGNATURE: &[u8; 8] = b"SPSLOT\0\0";
@@ -100,7 +101,11 @@ impl ParityJournal {
         let slot_offset = le_u64(&head[0x30..]);
         let slot_size = le_u32(&head[0x38..]) as usize;
         let slot_count = le_u32(&head[0x3c..]) as usize;
-        if !(0x40..=0x10000).contains(&slot_size) || slot_count > 1 << 16 || slot_size * slot_count > 64 << 20 {
+        if !(0x40..=0x10000).contains(&slot_size)
+            || slot_count > 1 << 16
+            || slot_size * slot_count > 64 << 20
+            || slot_offset > MAX_LOG_OFFSET
+        {
             return Err(format_err!("implausible parity journal geometry"));
         }
         // Stripes per extent run: the run's size over the stripe's (both
@@ -112,7 +117,7 @@ impl ParityJournal {
         let mut checkpoint_geometry = (le_u64(&head[0x40..]), le_u32(&head[0x48..]), le_u32(&head[0x4c..]));
         // As for the cache: a geometry no real journal has (Windows: two
         // areas of 125 MiB at 6 MiB) describes no usable checkpoints.
-        if checkpoint_geometry.0 > 1 << 56 || checkpoint_geometry.2 > 4 {
+        if checkpoint_geometry.0 > MAX_LOG_OFFSET || checkpoint_geometry.2 > 4 {
             checkpoint_geometry.2 = 0;
         }
         let (cp_offset, cp_size, cp_count) = checkpoint_geometry;
