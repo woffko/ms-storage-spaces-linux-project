@@ -290,6 +290,11 @@ enum Command {
         /// most 64 MiB per disk).
         #[arg(long, conflicts_with = "without_cache_slots")]
         all_pages: bool,
+        /// Keep the fixture in OUTPUT and add what reading takes now (a
+        /// fixture made by an older version lacks what this one reads);
+        /// slots of caches and journals only to a fixture that has some.
+        #[arg(long, conflicts_with_all = ["without_cache_slots", "all_pages"])]
+        update: bool,
     },
     /// Turn member disk snapshots of tools/vm/Invoke-Scenario.ps1 into raw
     /// images (disk<N>.snap -> disk<N>.img in the same directory).
@@ -538,7 +543,8 @@ fn main() -> Result<()> {
             output,
             without_cache_slots,
             all_pages,
-        } => fixture(&pool_dir, &output, without_cache_slots, all_pages),
+            update,
+        } => fixture(&pool_dir, &output, without_cache_slots, all_pages, update),
         #[cfg(unix)]
         Command::SnapshotToRaw { snapshots } => {
             for snap in snapshots {
@@ -1430,7 +1436,13 @@ fn cmd_status() -> Result<()> {
     Ok(())
 }
 
-fn fixture(dir: &std::path::Path, out: &std::path::Path, without_cache_slots: bool, all_pages: bool) -> Result<()> {
+fn fixture(
+    dir: &std::path::Path,
+    out: &std::path::Path,
+    without_cache_slots: bool,
+    all_pages: bool,
+    update: bool,
+) -> Result<()> {
     use storage_spaces::io::{Recording, SparseImage};
     let mut paths = Vec::new();
     while dir.join(format!("disk{}.img", paths.len())).exists() {
@@ -1449,7 +1461,19 @@ fn fixture(dir: &std::path::Path, out: &std::path::Path, without_cache_slots: bo
     std::fs::create_dir_all(out)?;
     let mut total = 0;
     for (i, dev) in devices.iter().enumerate() {
+        let path = out.join(format!("disk{i}.fixture"));
         let mut image = SparseImage::new(dev.size()?);
+        let mut without_cache_slots = without_cache_slots;
+        if update {
+            image = SparseImage::read_from(File::open(&path).with_context(|| path.display().to_string())?)?;
+            let mut page = [0u8; 8];
+            let has_slots = image.ranges().iter().any(|&(at, len)| {
+                (at..at + len as u64)
+                    .step_by(4096)
+                    .any(|p| image.read_exact_at(&mut page, p).is_ok() && page == *b"SPSLOT\0\0")
+            });
+            without_cache_slots = !has_slots;
+        }
         let reads = if all_pages {
             // The whole disk, a MiB at a time.
             let size = dev.size()?;
@@ -1475,11 +1499,11 @@ fn fixture(dir: &std::path::Path, out: &std::path::Path, without_cache_slots: bo
             }
         }
         total += image.stored();
-        image.write_to(std::io::BufWriter::new(File::create(
-            out.join(format!("disk{i}.fixture")),
-        )?))?;
+        image.write_to(std::io::BufWriter::new(File::create(path)?))?;
     }
-    std::fs::copy(dir.join("manifest.json"), out.join("manifest.json"))?;
+    if !update {
+        std::fs::copy(dir.join("manifest.json"), out.join("manifest.json"))?;
+    }
     println!("{}: {} disks, {} bytes of metadata", out.display(), paths.len(), total);
     Ok(())
 }

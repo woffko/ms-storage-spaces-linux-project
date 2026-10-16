@@ -54,6 +54,18 @@
   for udev each), waits for udev once for all partitions of a space, and
   waits for udev for 60 s at most in one run, so that the attach unit
   finishes in its time.
+* The headers of a space's write-back cache, parity journal and dirty
+  region log were read from the first copy of their mirror only, and one
+  that did not check out was taken for no structure at all: zeroing one
+  sector of a disk made a cache vanish (and the newer data only it held,
+  15 corpus pools read other data), the verdict healthy, and `--rw` would
+  have written past it. Every copy at hand is read now, and a valid one
+  used: a damaged copy makes the space degraded, copies that disagree
+  suspect, no valid copy (or slots without their header) failed, a
+  header zero on every copy is a structure never written (as Windows
+  leaves a new space's), and writing refuses all of these. The dirty
+  region log says when one of its two header pages is lost. The guard no
+  longer calls a parity space without a journal "not a parity space".
 * A space whose layout is not understood made every space of its pool
   failed (`space.state`), since 1.2.0 worked out the health of a pool as a
   whole: the others are judged on their own again, as 1.1.0 did.

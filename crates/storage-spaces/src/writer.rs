@@ -843,6 +843,12 @@ pub(crate) fn refusal<D: ReadAt>(pool: &Pool<D>, reader: &SpaceReader<'_, D>) ->
     if reader.condition() != Condition::Healthy {
         return Some(format!("it is {:?}", reader.condition()).to_lowercase());
     }
+    // A cache, journal or log whose header copies are not all valid, or
+    // that is listed and was never written: writing would go on without
+    // it, or past a copy Windows may read instead.
+    if let Some(note) = reader.header_notes().first() {
+        return Some(note.summary.clone());
+    }
     if pool.children(id).any(|c| c.info.is_child && !c.extents.is_empty()) {
         return Some("writes to tiered spaces are not supported yet".into());
     }

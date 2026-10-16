@@ -1079,6 +1079,17 @@ scenario state of the corpus.
   bit for each stripe in whole bytes, and every entry names a run inside
   the space.
 * The dirty region log lists extent runs inside the space.
+* The header of a write-back cache, parity journal or dirty region log is
+  read from every copy of its mirror at hand, and a valid one used: a copy
+  that does not check out (zero or other) makes the space degraded, valid
+  copies that disagree (but in their checksum and sequence) suspect, no
+  valid copy failed. A header zero on every copy is a structure never
+  written: Windows lists the hidden spaces of a new space before it writes
+  their headers (snapshots `m5ids` s2 and s3: a second space's dirty region
+  log), but the slot area of a cache or journal (at 0x2000) holding a slot
+  then means the header is lost (failed), and with a copy on a missing disk
+  it is not known (suspect). Of the two header pages of a dirty region log,
+  one lost on every copy is degraded; both, failed.
 * Partitions that become device-mapper devices lie inside the space and
   do not overlap.
 

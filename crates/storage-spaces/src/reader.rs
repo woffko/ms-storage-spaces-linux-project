@@ -3,15 +3,17 @@
 use std::io::{self, Read, Seek, SeekFrom};
 
 use crate::cache::{CacheHeader, CacheIndex, Lookup, SlotSource};
-use crate::drt::DirtyRegions;
+use crate::crc::crc32_excluding;
+use crate::drt::{DirtyRegions, SPACEDRT_SIGNATURE};
 use crate::error::{Error, Result, format_err};
 use crate::format::{Resiliency, SLAB_SIZE, SpaceRole};
 use crate::gf16;
 use crate::io::ReadAt;
-use crate::journal::ParityJournal;
+use crate::journal::{ParityJournal, SPVDT_SIGNATURE};
 use crate::layout::{Condition, Layout, Location};
 use crate::limits::MAX_SPACE_SIZE;
 use crate::pool::{Pool, Space};
+use crate::report::{Status, signature};
 use std::sync::Arc;
 
 /// What to do with a parity stripe whose data does not match its parity
@@ -42,6 +44,37 @@ pub enum Part {
     Journal,
     DirtyRegions,
 }
+
+/// What one copy of the header of a hidden structure held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeaderCopy {
+    Valid,
+    /// Every byte zero.
+    Zero,
+    /// Something that is not a valid header: why.
+    Damaged(String),
+}
+
+/// The copies of a header of a hidden structure of a space (the write-back
+/// cache, the parity journal, a header page of the dirty region log), when
+/// they are not all valid and alike. Windows writes each on every copy of
+/// its mirror; the space is read through a valid one where there is one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderNote {
+    pub part: Part,
+    /// Degraded: a copy damaged, another valid; suspect: copies that
+    /// disagree, or no valid copy of a structure the pool lists; info:
+    /// copies of a dirty region log page that differ (one reached later).
+    pub status: Status,
+    pub summary: String,
+    /// Byte of the hidden space where the header is.
+    pub offset: u64,
+    /// Every copy at hand: its number, where it is, what it held.
+    pub copies: Vec<(u64, Option<Place>, HeaderCopy)>,
+}
+
+/// Where a byte of a copy is: (disk, physical slab, byte in the slab).
+pub type Place = (u64, u64, u64);
 
 /// What checking the stripes a parity journal does not record as
 /// consistent found ([`SpaceReader::check_unclean_parity`]).
@@ -483,14 +516,218 @@ impl<D: ReadAt> Mapped<'_, D> {
         }
         Ok(copies)
     }
+
+    /// The `len` bytes at `offset` of every copy of a mirror complete on
+    /// the disks at hand, with the copy's number (of another layout, what
+    /// reading gives, as copy 0).
+    fn copies_at(&self, offset: u64, len: usize) -> Result<Vec<(u64, Vec<u8>)>> {
+        let l = &self.layout;
+        let mut out = Vec::new();
+        if l.resiliency == Resiliency::Mirror && offset >= l.base {
+            for copy in l.copies_of(l.locate(offset).column) {
+                let mut b = vec![0u8; len];
+                if self.read_copy(copy, offset, &mut b)? {
+                    out.push((copy, b));
+                }
+            }
+        }
+        if out.is_empty() {
+            let mut b = vec![0u8; len];
+            self.read_exact(offset, &mut b)?;
+            out.push((0, b));
+        }
+        Ok(out)
+    }
+
+    /// Where copy `copy` of owner offset `offset` is: (disk, physical slab,
+    /// byte in the slab).
+    fn place(&self, copy: u64, offset: u64) -> Option<Place> {
+        let l = &self.layout;
+        if offset < l.base {
+            return None;
+        }
+        let loc = l.locate(offset);
+        l.physical(loc.column, copy, loc.row)
+            .map(|(disk, slab)| (disk, slab, loc.offset_in_slab))
+    }
+
+    /// The copy of the header at `offset` (`len` bytes) of the hidden
+    /// structure `part` to read, by `state` of each copy: the first valid
+    /// one, with a note when not all copies are valid and `alike`; `None`
+    /// with a note when every copy is zero (the pool lists the structure);
+    /// an error when none is valid and some holds something else.
+    fn header(
+        &self,
+        part: Part,
+        offset: u64,
+        len: usize,
+        state: impl Fn(&[u8]) -> HeaderCopy,
+        alike: impl Fn(&[u8], &[u8]) -> bool,
+    ) -> Result<(Option<Vec<u8>>, Option<HeaderNote>)> {
+        let what = part.name();
+        let copies: Vec<(u64, Vec<u8>, HeaderCopy)> = self
+            .copies_at(offset, len)?
+            .into_iter()
+            .map(|(c, b)| {
+                let s = state(&b);
+                (c, b, s)
+            })
+            .collect();
+        let note = |status: Status, summary: String| HeaderNote {
+            part,
+            status,
+            summary,
+            offset,
+            copies: copies
+                .iter()
+                .map(|(c, _, s)| (*c, self.place(*c, offset), s.clone()))
+                .collect(),
+        };
+        let mut valid = copies.iter().filter(|c| c.2 == HeaderCopy::Valid);
+        if let Some(first) = valid.next() {
+            let bytes = first.1.clone();
+            if valid.any(|c| !alike(&c.1, &bytes)) {
+                let summary = format!("the copies of the header of the {what} disagree");
+                return Ok((Some(bytes), Some(note(Status::Suspect, summary))));
+            }
+            let bad = copies.iter().filter(|c| c.2 != HeaderCopy::Valid).count();
+            if bad > 0 {
+                let summary = format!(
+                    "{bad} of {} copies of the header of the {what} {}; another is read",
+                    copies.len(),
+                    if bad == 1 { "is damaged" } else { "are damaged" }
+                );
+                return Ok((Some(bytes), Some(note(Status::Degraded, summary))));
+            }
+            return Ok((Some(bytes), None));
+        }
+        if copies.iter().all(|c| c.2 == HeaderCopy::Zero) {
+            // Windows lists a new space's structures before it writes
+            // their headers (snapshots/m5ids): never written, as far as the
+            // copies at hand tell. With a copy on a missing disk, that is
+            // not known.
+            let all = if self.layout.resiliency == Resiliency::Mirror && offset >= self.layout.base {
+                self.layout.copies_of(self.layout.locate(offset).column).len()
+            } else {
+                1
+            };
+            if copies.len() < all {
+                let summary = format!("the header of the {what} is zero on every copy at hand, and not every copy is");
+                return Ok((None, Some(note(Status::Suspect, summary))));
+            }
+            let summary = format!("the {what} the pool lists was never written (its header is zero on every copy)");
+            return Ok((None, Some(note(Status::Info, summary))));
+        }
+        let why = copies
+            .iter()
+            .find_map(|c| match &c.2 {
+                HeaderCopy::Damaged(w) => Some(w.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        Err(format_err!(
+            "the header of the {what} does not check out on any copy at hand: {why}"
+        ))
+    }
 }
 
-/// Reads a cache or journal space, merging the slot areas of its copies.
-struct Slots<'a, 'p, D>(&'a Mapped<'p, D>);
+impl<D: ReadAt> Mapped<'_, D> {
+    /// A cache or journal whose header is zero on every copy was never
+    /// written, unless its slot area (where Windows puts it, 8 KiB in)
+    /// holds a slot: then the header is lost, and with it what the
+    /// structure holds.
+    fn no_slots_without_header(&self, part: Part) -> Result<()> {
+        for (copy, slot) in self.copies_at(0x2000, 8)? {
+            if slot == *b"SPSLOT\0\0" {
+                return Err(format_err!(
+                    "the header of the {} is zero on every copy, but copy {copy} holds slots: the header is lost",
+                    part.name()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Part {
+    /// What the part is, in words.
+    pub fn name(self) -> &'static str {
+        match self {
+            Part::Layout => "slab map",
+            Part::Tiers => "storage tier",
+            Part::Cache => "write-back cache",
+            Part::Journal => "parity journal",
+            Part::DirtyRegions => "dirty region log",
+        }
+    }
+}
+
+/// What a copy of a write-back cache's header holds.
+fn cache_header_state(b: &[u8]) -> HeaderCopy {
+    if b.iter().all(|&x| x == 0) {
+        return HeaderCopy::Zero;
+    }
+    match CacheHeader::parse(b) {
+        Ok(Some(_)) => HeaderCopy::Valid,
+        Ok(None) => HeaderCopy::Damaged(format!("{} where {:?} belongs", signature(&b[..8]), "SPCACHE")),
+        Err(e) => HeaderCopy::Damaged(e.to_string()),
+    }
+}
+
+/// What a copy of the header of the parity journal of space `owner` holds.
+fn journal_header_state(owner: crate::Guid, b: &[u8]) -> HeaderCopy {
+    if b.iter().all(|&x| x == 0) {
+        return HeaderCopy::Zero;
+    }
+    if &b[..8] != SPVDT_SIGNATURE {
+        return HeaderCopy::Damaged(format!("{} where {:?} belongs", signature(&b[..8]), "SPVDT"));
+    }
+    if crc32_excluding(&b[..0x60], 0x24) != u32::from_le_bytes(b[0x24..0x28].try_into().unwrap()) {
+        return HeaderCopy::Damaged("a checksum that does not match".into());
+    }
+    let of = crate::Guid::from_mixed_endian(b[8..24].try_into().unwrap());
+    if of != owner {
+        return HeaderCopy::Damaged(format!("the header of the journal of {of}"));
+    }
+    HeaderCopy::Valid
+}
+
+/// What a copy of a header page of a dirty region log holds.
+fn drt_page_state(b: &[u8]) -> HeaderCopy {
+    if b.iter().all(|&x| x == 0) {
+        return HeaderCopy::Zero;
+    }
+    if &b[..8] != SPACEDRT_SIGNATURE {
+        return HeaderCopy::Damaged(format!("{} where {:?} belongs", signature(&b[..8]), "SPACEDRT"));
+    }
+    match DirtyRegions::parse(b) {
+        Some(_) => HeaderCopy::Valid,
+        None => HeaderCopy::Damaged("a checksum that does not match, or too many entries".into()),
+    }
+}
+
+/// Whether two valid headers of a cache or journal agree: all but the
+/// checksum and the sequence (0x24..0x30).
+fn same_log_header(a: &[u8], b: &[u8]) -> bool {
+    a[..0x24] == b[..0x24] && a[0x30..0x60] == b[0x30..0x60]
+}
+
+/// Reads a cache or journal space, merging the slot areas of its copies;
+/// its header (at byte 0) as the copy chosen ([`Mapped::header`]).
+struct Slots<'a, 'p, D>(&'a Mapped<'p, D>, Vec<u8>);
 
 impl<D: ReadAt> SlotSource for Slots<'_, '_, D> {
     fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
-        self.0.read_exact(offset, buf)
+        self.0.read_exact(offset, buf)?;
+        // What of the header the read covers comes from the copy chosen.
+        let header = &self.1;
+        if let Ok(at) = usize::try_from(offset)
+            && at < header.len()
+        {
+            let n = (header.len() - at).min(buf.len());
+            buf[..n].copy_from_slice(&header[at..at + n]);
+        }
+        Ok(())
     }
 
     fn read_slot_copies(&mut self, offset: u64, len: usize) -> Result<Vec<Vec<u8>>> {
@@ -506,6 +743,8 @@ pub struct SpaceReader<'p, D> {
     /// Storage tiers: child spaces sharing the space's virtual slab numbers.
     tiers: Vec<Mapped<'p, D>>,
     cache: Option<(Mapped<'p, D>, CacheIndex)>,
+    /// The headers of hidden structures whose copies are not all valid.
+    notes: Vec<HeaderNote>,
 }
 
 impl<'p, D: ReadAt> SpaceReader<'p, D> {
@@ -528,17 +767,18 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
         // The hidden spaces under it, looked up once (a pool can have
         // tens of thousands).
         let children: Vec<&'p Space> = pool.children(space.id()).collect();
-        let cache = Self::open_cache(pool, space, &children).map_err(|e| (Part::Cache, e))?;
+        let mut notes = Vec::new();
+        let cache = Self::open_cache(pool, space, &children, &mut notes).map_err(|e| (Part::Cache, e))?;
         let mut tiers = children
             .iter()
             .filter(|c| c.info.is_child && !c.extents.is_empty())
             .map(|c| Mapped::new(pool, c))
             .collect::<Result<Vec<_>>>()
             .map_err(|e| (Part::Tiers, e))?;
-        let journal = Self::open_journal(pool, space, &children)
+        let journal = Self::open_journal(pool, space, &children, &mut notes)
             .map_err(|e| (Part::Journal, e))?
             .map(Arc::new);
-        let drt = Self::open_drt(pool, &children)
+        let drt = Self::open_drt(pool, &children, &mut notes)
             .map_err(|e| (Part::DirtyRegions, e))?
             .map(Arc::new);
         // What the logs name lies inside the space.
@@ -562,6 +802,7 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
             base,
             tiers,
             cache,
+            notes,
         })
     }
 
@@ -569,6 +810,7 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
         pool: &'p Pool<D>,
         space: &Space,
         children: &[&'p Space],
+        notes: &mut Vec<HeaderNote>,
     ) -> Result<Option<(Mapped<'p, D>, CacheIndex)>> {
         let mut found = None;
         for container in children.iter().filter(|c| c.info.role == SpaceRole::Cache) {
@@ -581,11 +823,15 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
         }
         let Some(child) = found else { return Ok(None) };
         let mapped = Mapped::new(pool, child)?;
-        let mut head = [0u8; CacheHeader::SIZE];
-        mapped.read_exact(0, &mut head)?;
-        let Some(header) = CacheHeader::parse(&head)? else {
+        // The header from a valid copy (a damaged one made the cache
+        // vanish, and data only it held with it).
+        let (head, note) = mapped.header(Part::Cache, 0, CacheHeader::SIZE, cache_header_state, same_log_header)?;
+        notes.extend(note);
+        let Some(head) = head else {
+            mapped.no_slots_without_header(Part::Cache)?;
             return Ok(None);
         };
+        let header = CacheHeader::parse(&head)?.ok_or_else(|| format_err!("cache header vanished"))?;
         if header.owner_guid != space.info.guid {
             return Err(format_err!(
                 "cache of space {} belongs to {}",
@@ -593,7 +839,7 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
                 header.owner_guid
             ));
         }
-        let index = CacheIndex::load(header, pool.logical_sector_size, Slots(&mapped))?;
+        let index = CacheIndex::load(header, pool.logical_sector_size, Slots(&mapped, head))?;
         Ok(Some((mapped, index)))
     }
 
@@ -602,17 +848,34 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
     }
 
     /// Loads the parity journal of a space, if it has one.
-    fn open_journal(pool: &'p Pool<D>, space: &Space, children: &[&'p Space]) -> Result<Option<ParityJournal>> {
+    fn open_journal(
+        pool: &'p Pool<D>,
+        space: &Space,
+        children: &[&'p Space],
+        notes: &mut Vec<HeaderNote>,
+    ) -> Result<Option<ParityJournal>> {
         for container in children.iter().filter(|c| c.info.role == SpaceRole::Other(0x0a)) {
             if let Some(child) = pool.children(container.id()).find(|c| !c.extents.is_empty()) {
                 let mapped = Mapped::new(pool, child)?;
-                return ParityJournal::load(space.info.guid, Slots(&mapped));
+                let owner = space.info.guid;
+                let state = |b: &[u8]| journal_header_state(owner, b);
+                let (head, note) = mapped.header(Part::Journal, 0, 0x60, state, same_log_header)?;
+                notes.extend(note);
+                let Some(head) = head else {
+                    mapped.no_slots_without_header(Part::Journal)?;
+                    return Ok(None);
+                };
+                return ParityJournal::load(owner, Slots(&mapped, head));
             }
         }
         Ok(None)
     }
 
-    fn open_drt(pool: &'p Pool<D>, children: &[&'p Space]) -> Result<Option<DirtyRegions>> {
+    fn open_drt(
+        pool: &'p Pool<D>,
+        children: &[&'p Space],
+        notes: &mut Vec<HeaderNote>,
+    ) -> Result<Option<DirtyRegions>> {
         for container in children.iter().filter(|c| c.info.role == SpaceRole::Other(0x06)) {
             if let Some(child) = pool.children(container.id()).find(|c| !c.extents.is_empty()) {
                 // Read through the child's own layout: opening it as a
@@ -624,10 +887,101 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
                     .info
                     .range
                     .map_or_else(|| mapped.layout.mapped_size(), |(_, len)| len);
-                return DirtyRegions::load(size, |off, buf| mapped.read_exact(base + off, buf));
+                return Self::drt_pages(&mapped, base, size, notes);
             }
         }
         Ok(None)
+    }
+
+    /// The dirty region log from its two header pages (at the start and 8
+    /// KiB before the end of its space, the newer generation counting),
+    /// each from a valid copy of the mirror.
+    fn drt_pages(
+        mapped: &Mapped<'p, D>,
+        base: u64,
+        size: u64,
+        notes: &mut Vec<HeaderNote>,
+    ) -> Result<Option<DirtyRegions>> {
+        const PAGE: usize = 0x1000;
+        let generation = |b: &[u8]| DirtyRegions::parse(b).map_or(0, |h| h.generation);
+        let mut pages = Vec::new();
+        let mut failed = Vec::new();
+        let mut zero_note = None;
+        for at in [0, size.saturating_sub(0x2000)] {
+            // Copies of a page may differ after a crash (a write reached
+            // one): the newest valid one counts, as among the two pages.
+            let alike = |a: &[u8], b: &[u8]| a == b;
+            match mapped.header(Part::DirtyRegions, base + at, PAGE, drt_page_state, alike) {
+                Ok((page, mut note)) => {
+                    if let Some(n) = note.as_mut().filter(|n| n.status == Status::Suspect && page.is_some()) {
+                        n.status = Status::Info;
+                        n.summary =
+                            "the copies of a header page of the dirty region log differ; the newest is read".into();
+                    }
+                    let page = page.map(|first| {
+                        mapped
+                            .copies_at(base + at, PAGE)
+                            .ok()
+                            .and_then(|copies| {
+                                copies
+                                    .into_iter()
+                                    .map(|(_, b)| b)
+                                    .filter(|b| drt_page_state(b) == HeaderCopy::Valid)
+                                    .max_by_key(|b| generation(b))
+                            })
+                            .unwrap_or(first)
+                    });
+                    if page.is_none() {
+                        // Zero on every copy: said once below, for both.
+                        failed.push((at, None));
+                        zero_note = zero_note.or(note);
+                    } else {
+                        notes.extend(note);
+                    }
+                    pages.push((at, page));
+                }
+                Err(e) => {
+                    failed.push((at, Some(e.to_string())));
+                    pages.push((at, None));
+                }
+            }
+        }
+        match failed.len() {
+            0 => {}
+            // One page lost on every copy: the other is read, and runs only
+            // the lost one listed would not be compared.
+            1 => notes.push(HeaderNote {
+                part: Part::DirtyRegions,
+                status: Status::Degraded,
+                summary: "one of the two header pages of the dirty region log does not check out on any copy; \
+                          the other is read"
+                    .into(),
+                offset: base + failed[0].0,
+                copies: Vec::new(),
+            }),
+            // Both zero: as the header of a cache or journal that is zero
+            // on every copy (never written, or not known with a copy away).
+            _ if failed.iter().all(|f| f.1.is_none()) => {
+                notes.extend(zero_note);
+                return Ok(None);
+            }
+            _ => {
+                let why = failed.iter().find_map(|f| f.1.clone()).unwrap_or_default();
+                return Err(format_err!(
+                    "neither header page of the dirty region log checks out: {why}"
+                ));
+            }
+        }
+        let read = |off: u64, buf: &mut [u8]| -> Result<()> {
+            match pages.iter().find(|(at, _)| *at == off) {
+                Some((_, Some(page))) => buf.copy_from_slice(&page[..buf.len()]),
+                // A page without a valid copy reads as nothing.
+                Some((_, None)) => buf.fill(0),
+                None => mapped.read_exact(base + off, buf)?,
+            }
+            Ok(())
+        };
+        DirtyRegions::load(size, read)
     }
 
     /// Number of mirror extent runs the dirty region log lists: those written
@@ -836,6 +1190,12 @@ impl<'p, D: ReadAt> SpaceReader<'p, D> {
         }
         buf[..n].fill(0);
         Ok(n)
+    }
+
+    /// The headers of the space's hidden structures (cache, parity
+    /// journal, dirty region log) whose copies are not all valid and alike.
+    pub fn header_notes(&self) -> &[HeaderNote] {
+        &self.notes
     }
 
     /// Whether the space stores its data in storage tiers.

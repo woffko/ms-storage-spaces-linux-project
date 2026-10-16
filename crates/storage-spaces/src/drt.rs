@@ -103,7 +103,7 @@ impl DirtyRegions {
     }
 
     /// A header copy, or `None` if it is missing, torn or implausible.
-    fn parse(h: &[u8]) -> Option<DrtHeader> {
+    pub(crate) fn parse(h: &[u8]) -> Option<DrtHeader> {
         if &h[0..8] != SPACEDRT_SIGNATURE {
             return None;
         }

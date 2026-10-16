@@ -757,7 +757,7 @@ const MAX_INDEX: u64 = 256 << 20;
 /// validity in a map), besides its runs.
 const ENTRY_WEIGHT: u64 = 64;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheHeader {
     pub owner_guid: Guid,
     pub sequence: u64,

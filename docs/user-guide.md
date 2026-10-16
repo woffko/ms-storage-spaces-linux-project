@@ -409,6 +409,9 @@ volume in a space attached with `--degraded` or `--force` mounts only with
   read).
 * `space.drl`: the extent runs the mirror's dirty region log lists (a
   note: their copies are compared when read).
+* For all three, the header on every copy of its mirror: a damaged copy
+  (another valid) is degraded, copies that disagree suspect, none valid
+  failed; a header zero everywhere is a structure never written (a note).
 * `space.partitions`: the protective MBR, both GPT headers with their
   CRCs and positions, both copies of the partition entries the same, the
   partitions inside the space and apart.

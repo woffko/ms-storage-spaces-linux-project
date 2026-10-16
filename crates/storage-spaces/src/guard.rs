@@ -21,7 +21,7 @@ use crate::gpt::Partition;
 use crate::health::{Health, HealthStatus, health};
 use crate::io::{ReadAt, read_vec};
 use crate::pool::{Issue, Space};
-use crate::reader::{OpenOptions, Part, SpaceReader};
+use crate::reader::{HeaderCopy, OpenOptions, Part, SpaceReader};
 use crate::report::{Check, Evidence, Report, Status, Truth, hex, signature};
 
 /// How much the checks may read.
@@ -514,7 +514,7 @@ fn space_checks<D: ReadAt>(
     let mut checks = vec![layout_check(space, &reader)];
     checks.push(cache_check(&reader, names));
     checks.push(journal_check(&reader, names, options));
-    checks.push(drl_check(&reader));
+    checks.push(drl_check(&reader, names));
     let sector = u64::from(pool.logical_sector_size);
     // A partition table can name any LBA: those beyond the space are said so.
     let at = |lba: u64| match lba.checked_mul(sector).filter(|&o| o < reader.size()) {
@@ -562,11 +562,83 @@ fn layout_check<D: ReadAt>(space: &Space, reader: &SpaceReader<'_, D>) -> Check 
     .truth(Truth::Format)
 }
 
+/// The check `id` of what the reader found about the copies of the header
+/// of the hidden structure `part`, if anything: the worst of it, with
+/// every copy as evidence.
+fn header_check<D: ReadAt>(id: &str, part: Part, reader: &SpaceReader<'_, D>, names: &[String]) -> Option<Check> {
+    let notes: Vec<_> = reader.header_notes().iter().filter(|n| n.part == part).collect();
+    let worst = notes.iter().max_by_key(|n| n.status)?;
+    let what = part.name();
+    let advice = match worst.status {
+        Status::Degraded => format!(
+            "Windows writes this header on every copy of the {what}'s mirror: a copy does not check out, and \
+             the space is read through another. If that one failed too, the space could not be read."
+        ),
+        Status::Suspect if worst.summary.contains("disagree") => {
+            "The copies of the header disagree: which one Windows reads is not known.".into()
+        }
+        _ => format!(
+            "The pool lists a {what} for the space, but no copy at hand holds its header: what it holds \
+             would not be read. Connect the missing disks; with every disk there, the header is lost."
+        ),
+    };
+    let mut check = Check::new(id, worst.status, worst.summary.clone())
+        .truth(Truth::CrossCheck)
+        .advice(advice);
+    let pool = reader.pool();
+    for n in &notes {
+        for (copy, place, state) in &n.copies {
+            let at = match place.map(|(disk, slab, within)| (pool.slab_location(disk, slab), within)) {
+                Some((Ok(Some((device, start))), within)) => {
+                    format!("{} at {:#x}", device_name(names, device), start + within)
+                }
+                Some((Ok(None), _)) => "a missing disk".into(),
+                Some((Err(e), _)) => e.to_string(),
+                None => "not allocated".into(),
+            };
+            let found = match state {
+                HeaderCopy::Valid => "valid".to_string(),
+                HeaderCopy::Zero => "all zero".to_string(),
+                HeaderCopy::Damaged(why) => why.clone(),
+            };
+            check = check.evidence(
+                Evidence::new(format!(
+                    "copy {copy} of the header of the {what}, byte {:#x} of its space",
+                    n.offset
+                ))
+                .at(at)
+                .expected("a valid header")
+                .found(found),
+            );
+        }
+    }
+    Some(check)
+}
+
+/// The worse of a check and the one about its structure's header copies
+/// (which says more than a check skipped for want of the structure).
+fn with_header(base: Check, header: Option<Check>) -> Check {
+    match header {
+        Some(h) if h.status >= base.status || base.status == Status::Skipped => h,
+        _ => base,
+    }
+}
+
 fn cache_check<D: ReadAt>(reader: &SpaceReader<'_, D>, names: &[String]) -> Check {
     const ID: &str = "space.cache";
+    let header = header_check(ID, Part::Cache, reader, names);
     let Some(cache) = reader.cache() else {
-        return Check::skipped(ID, "no write-back cache");
+        return with_header(Check::skipped(ID, "no write-back cache"), header);
     };
+    with_header(cache_contents_check(reader, cache, names), header)
+}
+
+fn cache_contents_check<D: ReadAt>(
+    reader: &SpaceReader<'_, D>,
+    cache: &crate::cache::CacheIndex,
+    names: &[String],
+) -> Check {
+    const ID: &str = "space.cache";
     let chunks = cache.cached_chunks();
     let partly = cache
         .mappings()
@@ -615,7 +687,15 @@ fn cache_check<D: ReadAt>(reader: &SpaceReader<'_, D>, names: &[String]) -> Chec
 
 fn journal_check<D: ReadAt>(reader: &SpaceReader<'_, D>, names: &[String], options: &Options) -> Check {
     const ID: &str = "space.journal";
+    let header = header_check(ID, Part::Journal, reader, names);
+    with_header(journal_contents_check(reader, names, options), header)
+}
+
+fn journal_contents_check<D: ReadAt>(reader: &SpaceReader<'_, D>, names: &[String], options: &Options) -> Check {
+    const ID: &str = "space.journal";
+    let parity = reader.layout().resiliency == crate::format::Resiliency::Parity || reader.is_tiered();
     let check = match reader.check_unclean_parity(options.journal_budget) {
+        Ok(None) if parity => return Check::skipped(ID, "no parity journal"),
         Ok(None) => return Check::skipped(ID, "no parity journal (not a parity space)"),
         Ok(Some(c)) => c,
         Err(e) => {
@@ -710,9 +790,12 @@ fn journal_check<D: ReadAt>(reader: &SpaceReader<'_, D>, names: &[String], optio
     .truth(Truth::CrossCheck)
 }
 
-fn drl_check<D: ReadAt>(reader: &SpaceReader<'_, D>) -> Check {
+fn drl_check<D: ReadAt>(reader: &SpaceReader<'_, D>, names: &[String]) -> Check {
     const ID: &str = "space.drl";
-    match reader.dirty_regions() {
+    let header = header_check(ID, Part::DirtyRegions, reader, names);
+    let mirror = reader.layout().resiliency == crate::format::Resiliency::Mirror;
+    let base = match reader.dirty_regions() {
+        None if mirror => Check::skipped(ID, "no dirty region log"),
         None => Check::skipped(ID, "no dirty region log (not a mirror space)"),
         Some(d) if d.dirty_runs() == 0 => Check::ok(ID, "no extent runs listed").truth(Truth::Windows),
         Some(d) => Check::new(
@@ -725,7 +808,8 @@ fn drl_check<D: ReadAt>(reader: &SpaceReader<'_, D>) -> Check {
             ),
         )
         .truth(Truth::Windows),
-    }
+    };
+    with_header(base, header)
 }
 
 /// A GPT header as found.
@@ -1530,6 +1614,96 @@ mod tests {
         let (disk, slab) = l.physical(loc.column, copy, loc.row)?;
         let (device, start) = pool.slab_location(disk, slab).unwrap().unwrap();
         Some((device, start + loc.offset_in_slab))
+    }
+
+    /// The header of a hidden structure damaged on its first copy: read
+    /// through another, degraded, the data as before; lost on every copy
+    /// with slots behind it, or junk on every copy: failed. (1.2.1 read the
+    /// first copy only, and took a damaged header for no structure.)
+    #[test]
+    fn hidden_headers_are_read_from_a_valid_copy() {
+        for (rel, role, id) in [
+            ("fixtures/mirrorthin", SpaceRole::Cache, "space.cache"),
+            ("scenarios/m5pj2/s5", SpaceRole::Other(0x0a), "space.journal"),
+            ("fixtures/drtdism", SpaceRole::Other(0x06), "space.drl"),
+        ] {
+            let disks = images(rel);
+            let (places, base) = {
+                let pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+                let space = pool.user_spaces().next().unwrap();
+                let places: Vec<(usize, u64)> = (0..4).filter_map(|c| hidden_byte(&pool, space, role, c, 0)).collect();
+                let r = pool.open_space(space.id()).unwrap();
+                let mut data = vec![0u8; 1 << 20];
+                r.read_exact_at(&mut data, 0).unwrap();
+                (places, data)
+            };
+            assert!(places.len() >= 2, "{rel}: {places:?}");
+            let damaged = |at: &[(usize, u64)], bytes: &[u8]| {
+                let mut d = disks.clone();
+                for &(device, offset) in at {
+                    d[device].insert(offset, bytes);
+                }
+                d
+            };
+            // The first copy zeroed.
+            let d = damaged(&places[..1], &[0u8; 512]);
+            let pool = Pool::open(d.iter().collect::<Vec<_>>()).unwrap();
+            let r = &reports(&pool, &Options::default())[0];
+            let c = check(r, id);
+            assert_eq!(c.status, Status::Degraded, "{rel}\n{}", r.to_text());
+            assert!(
+                c.evidence.iter().any(|e| e.found.as_deref() == Some("all zero")),
+                "{rel}: {c:?}"
+            );
+            assert!(
+                c.evidence.iter().any(|e| e.found.as_deref() == Some("valid")),
+                "{rel}: {c:?}"
+            );
+            let mut data = vec![0u8; 1 << 20];
+            pool.open_space(pool.user_spaces().next().unwrap().id())
+                .unwrap()
+                .read_exact_at(&mut data, 0)
+                .unwrap();
+            assert!(data == base, "{rel}: data differs");
+            assert!(
+                pool.write_refusal(pool.user_spaces().next().unwrap().id())
+                    .unwrap()
+                    .is_some()
+            );
+            // Junk on every copy: failed; the log keeps a second header page,
+            // which is read then.
+            let d = damaged(&places, &[0x5a; 512]);
+            let pool = Pool::open(d.iter().collect::<Vec<_>>()).unwrap();
+            let r = &reports(&pool, &Options::default())[0];
+            let expected = if id == "space.drl" {
+                Status::Degraded
+            } else {
+                Status::Failed
+            };
+            assert_eq!(check(r, id).status, expected, "{rel}\n{}", r.to_text());
+        }
+        // Every copy of a cache's header zeroed, its slots there: lost.
+        let disks = images("fixtures/mirrorthin");
+        let places = {
+            let pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+            let space = pool.user_spaces().next().unwrap();
+            assert!(!pool.open_space(space.id()).unwrap().cache().unwrap().slots().is_empty());
+            (0..4)
+                .filter_map(|c| hidden_byte(&pool, space, SpaceRole::Cache, c, 0))
+                .collect::<Vec<_>>()
+        };
+        let mut d = disks.clone();
+        for &(device, offset) in &places {
+            d[device].insert(offset, &[0u8; 512]);
+        }
+        let pool = Pool::open(d.iter().collect::<Vec<_>>()).unwrap();
+        let r = &reports(&pool, &Options::default())[0];
+        let c = check(r, "space.cache");
+        assert_eq!(c.status, Status::Failed, "{}", r.to_text());
+        assert!(
+            c.evidence[0].found.as_deref().unwrap().contains("the header is lost"),
+            "{c:?}"
+        );
     }
 
     /// A cache or parity journal header (valid CRC) naming its slot area
