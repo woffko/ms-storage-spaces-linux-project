@@ -819,10 +819,9 @@ fn info(pool: &Arc<Pool<File>>, paths: &[PathBuf], all: bool) -> Result<()> {
             println!(
                 "       verdict {}{}",
                 report.verdict().as_str(),
-                report
-                    .problems()
-                    .first()
-                    .map_or(String::new(), |c| format!(" ({}: {})", c.id, c.summary))
+                report.problems().first().map_or(String::new(), |c| {
+                    format!(" ({}: {})", c.id, storage_spaces::report::printable(&c.summary))
+                })
             );
             match open_space(pool, s.id()) {
                 Ok(r) => {
@@ -1297,7 +1296,12 @@ fn cmd_attach(
                 } else {
                     eprintln!("{}; not attached: {why}", report.headline());
                     for c in report.problems() {
-                        eprintln!("  {} {}: {}", c.status.as_str().to_uppercase(), c.id, c.summary);
+                        eprintln!(
+                            "  {} {}: {}",
+                            c.status.as_str().to_uppercase(),
+                            c.id,
+                            storage_spaces::report::printable(&c.summary)
+                        );
                     }
                 }
                 if let Some(p) = &path {
@@ -1320,10 +1324,9 @@ fn cmd_attach(
                         format!(
                             ", read-only: {} ({})",
                             verdict.as_str(),
-                            report
-                                .problems()
-                                .first()
-                                .map_or(String::new(), |c| format!("{}: {}", c.id, c.summary))
+                            report.problems().first().map_or(String::new(), |c| {
+                                format!("{}: {}", c.id, storage_spaces::report::printable(&c.summary))
+                            })
                         )
                     } else {
                         String::new()

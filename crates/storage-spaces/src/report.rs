@@ -7,7 +7,63 @@
 //! ([`Verdict::flag`]). Check ids and status words are stable: scripts may
 //! rely on them (`spaces check --json`).
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
+
+/// `s` as it may be shown on a terminal or put into a report for people:
+/// characters that move the cursor, change what a terminal shows or reorder
+/// text (control and format characters: escape sequences, carriage
+/// returns, bidirectional overrides) as `\u{..}`, and at most 1024
+/// characters. Names come from disks: any number, any character.
+pub fn printable(s: &str) -> Cow<'_, str> {
+    const MAX: usize = 1024;
+    if s.chars().all(|c| !hidden(c)) && s.chars().nth(MAX).is_none() {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i == MAX {
+            out.push_str("...");
+            break;
+        }
+        if hidden(c) {
+            write!(out, "\\u{{{:x}}}", c as u32).unwrap();
+        } else {
+            out.push(c);
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// Control characters, line and paragraph separators, and format
+/// characters (Unicode's Cf: soft hyphen, joiners, bidirectional marks,
+/// embeddings and isolates, the byte order mark, tags).
+fn hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c as u32,
+            0xad | 0x600..=0x605
+                | 0x61c
+                | 0x6dd
+                | 0x70f
+                | 0x890..=0x891
+                | 0x8e2
+                | 0x180e
+                | 0x200b..=0x200f
+                | 0x2028..=0x202e
+                | 0x2060..=0x2064
+                | 0x2066..=0x206f
+                | 0xfeff
+                | 0xfff9..=0xfffb
+                | 0x110bd
+                | 0x110cd
+                | 0x13430..=0x1343f
+                | 0x1bca0..=0x1bca3
+                | 0x1d173..=0x1d17a
+                | 0xe0001
+                | 0xe0020..=0xe007f
+        )
+}
 
 /// The result of one check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -290,22 +346,30 @@ impl Report {
     /// One line for a log or a refusal: the verdict and the worst check.
     pub fn headline(&self) -> String {
         match self.problems().first() {
-            None => format!("{}: {}", self.subject, self.verdict().as_str().to_uppercase()),
+            None => format!(
+                "{}: {}",
+                printable(&self.subject),
+                self.verdict().as_str().to_uppercase()
+            ),
             Some(c) => format!(
                 "{}: {} ({}: {})",
-                self.subject,
+                printable(&self.subject),
                 self.verdict().as_str().to_uppercase(),
-                c.id,
-                c.summary
+                printable(&c.id),
+                printable(&c.summary)
             ),
         }
     }
 
-    /// The report for people.
+    /// The report for people (what came from a disk made [`printable`]).
     pub fn to_text(&self) -> String {
-        let mut out = format!("{}: {}", self.subject, self.verdict().as_str().to_uppercase());
+        let mut out = format!(
+            "{}: {}",
+            printable(&self.subject),
+            self.verdict().as_str().to_uppercase()
+        );
         if let Some(action) = &self.action {
-            write!(out, ", {action}").unwrap();
+            write!(out, ", {}", printable(action)).unwrap();
         }
         out.push('\n');
         let width = self.checks.iter().map(|c| c.id.len()).max().unwrap_or(0).max(16);
@@ -315,13 +379,19 @@ impl Report {
             } else {
                 c.status.as_str().to_owned()
             };
-            writeln!(out, "  {status:<8} {:<width$}  {}", c.id, c.summary).unwrap();
+            writeln!(
+                out,
+                "  {status:<8} {:<width$}  {}",
+                printable(&c.id),
+                printable(&c.summary)
+            )
+            .unwrap();
             let pad = " ".repeat(11);
             for e in &c.evidence {
-                writeln!(out, "{pad}{:<9} {}", "what", e.what).unwrap();
+                writeln!(out, "{pad}{:<9} {}", "what", printable(&e.what)).unwrap();
                 for (label, value) in [("where", &e.location), ("expected", &e.expected), ("found", &e.found)] {
                     if let Some(v) = value {
-                        writeln!(out, "{pad}{label:<9} {v}").unwrap();
+                        writeln!(out, "{pad}{label:<9} {}", printable(v)).unwrap();
                     }
                 }
             }
@@ -345,12 +415,12 @@ impl Report {
             out.push_str("  what to do:\n");
             let mut seen = std::collections::HashSet::new();
             for a in advice.iter().filter(|a| seen.insert(a.as_str())) {
-                out.push_str(&wrap(a, "    - ", "      ", 78));
+                out.push_str(&wrap(&printable(a), "    - ", "      ", 78));
             }
         }
         if !self.environment.is_empty() {
             let env: Vec<String> = self.environment.iter().map(|(k, v)| format!("{k} {v}")).collect();
-            out.push_str(&wrap(&env.join(", "), "  environment: ", "    ", 78));
+            out.push_str(&wrap(&printable(&env.join(", ")), "  environment: ", "    ", 78));
         }
         out
     }
@@ -544,6 +614,38 @@ fn quote(s: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Names with escape sequences, carriage returns, line breaks, NUL,
+    /// bell, NEL and a right-to-left override reach the report text and
+    /// headline escaped (in 1.2.1 they reached terminals, report files and
+    /// the journal as they were, and could forge report lines); JSON keeps
+    /// them, escaped as JSON escapes.
+    #[test]
+    fn names_from_disks_cannot_steer_a_terminal() {
+        let evil = "\u{1b}[2J\u{1b}]0;title\u{7}\rFAKE\nok       space.state\u{0}\u{85}\u{202e}gpj.exe";
+        let mut r = Report::new(format!("space \"{evil}\" of pool \"{evil}\""));
+        r.checks.push(
+            Check::new("space.state", Status::Suspect, format!("disk \"{evil}\" is missing"))
+                .evidence(Evidence::new(evil).at(evil).expected(evil).found(evil))
+                .advice(evil),
+        );
+        r.notes.push(format!("spaces attach --space {evil}"));
+        r.action = Some(evil.into());
+        r.environment.push(("pool".into(), evil.into()));
+        for text in [r.to_text(), r.headline()] {
+            // The line breaks the report makes itself, nothing else below 0x20.
+            assert!(text.bytes().all(|b| b >= 0x20 || b == b'\n'), "{text:?}");
+            assert!(!text.chars().any(|c| c != '\n' && hidden(c)), "{text:?}");
+            assert!(text.contains("\\u{1b}[2J") && text.contains("\\u{202e}"), "{text}");
+            assert!(!text.lines().any(|l| l.starts_with("ok ")), "{text}");
+        }
+        assert_eq!(r.to_text().lines().count(), r.clone().to_text().lines().count());
+        assert!(r.to_json().contains("\\u001b[2J"));
+        // Long names are cut.
+        let long = "x".repeat(70_000);
+        assert_eq!(printable(&long).chars().count(), 1024 + 3);
+        assert!(matches!(printable("Storage pool"), Cow::Borrowed(_)));
+    }
 
     fn sample() -> Report {
         let mut r = Report::new("space \"Data\" (3f8c1d2e) of pool \"Storage pool\" (6a2b9e41)");

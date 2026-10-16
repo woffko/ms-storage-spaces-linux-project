@@ -228,14 +228,14 @@ fn reports_a_healthy_space_and_what_is_wrong_with_one() {
     );
 }
 
-/// Writes `bytes` at byte `at` of space "data" of the pool on `disks`.
+/// Writes `bytes` at byte `at` of the first space of the pool on `disks`.
 fn patch_space(disks: &[String], at: u64, bytes: &[u8]) {
     let files: Vec<File> = disks
         .iter()
         .map(|p| OpenOptions::new().read(true).write(true).open(p).unwrap())
         .collect();
     let pool = Pool::open(files).unwrap();
-    let writer = pool.open_space_rw(pool.find_space("data").unwrap().id()).unwrap();
+    let writer = pool.open_space_rw(pool.user_spaces().next().unwrap().id()).unwrap();
     writer.write_all_at(bytes, at).unwrap();
     writer.flush().unwrap();
 }
@@ -267,6 +267,35 @@ fn a_partition_entry_of_ones_is_suspect() {
     );
     assert_eq!(o.status.code(), Some(1), "{}", text(&o));
     assert!(text(&o).contains("needs --force"), "{}", text(&o));
+}
+
+/// A space renamed to a name of escape sequences, a carriage return, a
+/// line that looks like a check, and a right-to-left override: spaces check
+/// and pool health print it escaped (in 1.2.1 it reached the terminal as it
+/// was, and the report files and journal of attach).
+#[test]
+fn names_reach_terminals_escaped() {
+    let dir = Scratch(std::env::temp_dir().join(format!("spaces-names-{}", std::process::id())));
+    let disks = pool(&dir.0);
+    let all: Vec<&str> = disks.iter().map(String::as_str).collect();
+    let evil = "\u{1b}[2J\u{1b}]0;x\u{7}\rok       pool.quorum\n\u{202e}gpj";
+    let o = spaces(
+        &[
+            &["space", "rename", "--space", "data", "--name", evil, "--yes"][..],
+            &all,
+        ]
+        .concat(),
+    );
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(!text(&o).contains('\u{1b}'), "{:?}", text(&o));
+    patch_space(&disks, 2 * 512, &[0xff; 128]);
+    for args in [&["check"][..], &["pool", "health"][..]] {
+        let o = spaces(&[args, &all].concat());
+        let out = text(&o);
+        assert!(out.bytes().all(|b| b >= 0x20 || b == b'\n'), "{args:?}: {out:?}");
+        assert!(!out.contains('\u{202e}'), "{args:?}: {out:?}");
+        assert!(out.contains("\\u{1b}[2J"), "{args:?}: {out}");
+    }
 }
 
 /// Corpus pools (testdata/pools, testdata/crash; skipped when missing): the

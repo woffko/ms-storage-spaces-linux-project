@@ -164,8 +164,10 @@ impl Plan {
 
 impl fmt::Display for Plan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Names in them come from disks (or the command line).
+        use crate::report::printable;
         for line in &self.summary {
-            writeln!(f, "{line}")?;
+            writeln!(f, "{}", printable(line))?;
         }
         for (i, step) in self.steps.iter().enumerate() {
             let bytes: u64 = step
@@ -189,7 +191,7 @@ impl fmt::Display for Plan {
                 f,
                 "step {}: {} ({} bytes to {})",
                 i + 1,
-                step.what,
+                printable(&step.what),
                 bytes,
                 targets.into_iter().collect::<Vec<_>>().join(", ")
             )?;

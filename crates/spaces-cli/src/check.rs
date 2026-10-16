@@ -189,7 +189,12 @@ pub fn require<D: ReadAt>(
     match gate(report.verdict(), rw, degraded, force) {
         Decision::Refuse(why) => {
             for c in report.problems() {
-                eprintln!("  {} {}: {}", c.status.as_str().to_uppercase(), c.id, c.summary);
+                eprintln!(
+                    "  {} {}: {}",
+                    c.status.as_str().to_uppercase(),
+                    c.id,
+                    storage_spaces::report::printable(&c.summary)
+                );
             }
             anyhow::bail!("{}: {why} (spaces check tells more)", report.headline())
         }

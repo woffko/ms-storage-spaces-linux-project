@@ -488,8 +488,12 @@ report goes to:
   udisks2 shows "Unknown error when mounting" for whatever a mount helper
   refuses; the same line is in `journalctl -u udisks2`.
 
+Names come from the disks: in reports for people, refusals and listings
+their control and format characters (escape sequences, line breaks,
+bidirectional overrides) are shown escaped as `\u{..}`.
+
 `spaces check --json` prints the reports for programs, with stable check
-ids and statuses; `spaces check --bundle FILE.tar.gz` also packs the
+ids and statuses (names as they are, JSON-escaped); `spaces check --bundle FILE.tar.gz` also packs the
 reports, `spaces dump` and `spaces extents` of each pool and both ends of
 each space (its partition table) for a bug report: no file data, but the
 names and GUIDs of pools, spaces and disks, so look it over before sharing

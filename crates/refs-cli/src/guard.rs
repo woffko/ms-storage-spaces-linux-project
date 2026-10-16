@@ -155,7 +155,12 @@ pub fn write_report(report: &Report, name: &str) -> Option<PathBuf> {
 /// check (what udisks shows of a refused mount).
 pub fn first_line(report: &Report) -> String {
     match report.problems().first() {
-        Some(c) => format!("{}: {}: {}", report.verdict().as_str().to_uppercase(), c.id, c.summary),
+        Some(c) => format!(
+            "{}: {}: {}",
+            report.verdict().as_str().to_uppercase(),
+            c.id,
+            storage_spaces::report::printable(&c.summary)
+        ),
         None => report.verdict().as_str().to_uppercase(),
     }
 }

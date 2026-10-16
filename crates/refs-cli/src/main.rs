@@ -9,6 +9,7 @@ mod guard;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
+use storage_spaces::report::printable;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -721,7 +722,8 @@ fn map(vol: &Volume<Device>, out: &mut impl Write) -> Result<()> {
                 // In a compacted container: in its compressed run.
                 for x in extents.iter().filter(|x| x.written && !vol.is_compacted(x.vlcn)) {
                     let lcn = vol.translate(x.vlcn)?;
-                    writeln!(out, "{lcn:#x} {} data {path}{name} vcn {}", x.clusters, x.vcn)?;
+                    let path = printable(&format!("{path}{name}")).into_owned();
+                    writeln!(out, "{lcn:#x} {} data {path} vcn {}", x.clusters, x.vcn)?;
                 }
             }
         }
@@ -850,16 +852,19 @@ fn attributes(a: u32) -> String {
 fn ls(vol: &Volume<Device>, oid: u64, prefix: &str, long: bool, recursive: bool, out: &mut impl Write) -> Result<()> {
     for e in vol.read_dir(oid)? {
         let path = format!("{prefix}{}", e.name);
+        // Names come from the volume: shown with control and format
+        // characters escaped.
+        let shown = printable(&path);
         if long {
             writeln!(
                 out,
-                "{} {:>14} {} {path}",
+                "{} {:>14} {} {shown}",
                 attributes(e.attributes),
                 e.size,
                 time(e.times.modified)
             )?;
         } else {
-            writeln!(out, "{path}{}", if e.is_dir() { "/" } else { "" })?;
+            writeln!(out, "{shown}{}", if e.is_dir() { "/" } else { "" })?;
         }
         if recursive
             && let Target::Directory(child) = e.target
@@ -882,7 +887,7 @@ fn directory_of(vol: &Volume<Device>, path: &str) -> Result<u64> {
 }
 
 fn stat(vol: &Volume<Device>, e: &Entry, out: &mut impl Write) -> Result<()> {
-    writeln!(out, "name        {}", e.name)?;
+    writeln!(out, "name        {}", printable(&e.name))?;
     writeln!(out, "attributes  {:#x} ({})", e.attributes, attributes(e.attributes))?;
     writeln!(out, "size        {} (allocated {})", e.size, e.allocated)?;
     for (what, t) in [
@@ -919,10 +924,10 @@ fn stat(vol: &Volume<Device>, e: &Entry, out: &mut impl Write) -> Result<()> {
         }
     }
     for (name, s) in &file.streams {
-        writeln!(out, "stream      {name}: {} bytes", s.size)?;
+        writeln!(out, "stream      {}: {} bytes", printable(name), s.size)?;
     }
     for (name, s) in &file.snapshots {
-        writeln!(out, "snapshot    {name}: {} bytes", s.size)?;
+        writeln!(out, "snapshot    {}: {} bytes", printable(name), s.size)?;
     }
     if let Some(r) = &file.reparse {
         match r.link_target() {
@@ -930,8 +935,8 @@ fn stat(vol: &Volume<Device>, e: &Entry, out: &mut impl Write) -> Result<()> {
                 out,
                 "reparse     {:#010x} -> {} ({}{})",
                 r.tag,
-                t.substitute,
-                t.print,
+                printable(&t.substitute),
+                printable(&t.print),
                 if t.relative { ", relative" } else { "" }
             )?,
             None => writeln!(out, "reparse     {:#010x}, {} bytes", r.tag, r.data.len())?,
@@ -1550,7 +1555,7 @@ fn main() -> Result<()> {
                 )?;
             }
             for p in &report.problems {
-                writeln!(out, "problem: {p}")?;
+                writeln!(out, "problem: {}", printable(p))?;
             }
             if report.problem_count > report.problems.len() as u64 {
                 writeln!(out, "... {} problems in all", report.problem_count)?;

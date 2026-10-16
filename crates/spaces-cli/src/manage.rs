@@ -5,6 +5,7 @@
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use storage_spaces::report::printable;
 
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
@@ -465,7 +466,10 @@ pub fn pool(command: PoolCommand) -> Result<()> {
             let h = storage_spaces::health::health(&pool)?;
             println!(
                 "pool \"{}\": {} ({} of {} database copies at hand)",
-                pool.name, h.pool, h.database_copies.0, h.database_copies.1
+                printable(&pool.name),
+                h.pool,
+                h.database_copies.0,
+                h.database_copies.1
             );
             for d in &h.disks {
                 let disk = &pool.disks[&d.id];
@@ -475,10 +479,13 @@ pub fn pool(command: PoolCommand) -> Result<()> {
                 let left = s
                     .failures_left
                     .map_or("data lost".to_owned(), |n| format!("survives {n} more disk failure(s)"));
-                println!("  space \"{}\": {} ({left})", s.name, s.state);
+                println!("  space \"{}\": {} ({left})", printable(&s.name), s.state);
             }
             for (id, why) in &h.unknown {
-                println!("  space \"{}\": not worked out ({why})", pool.spaces[id].name());
+                println!(
+                    "  space \"{}\": not worked out ({why})",
+                    printable(pool.spaces[id].name())
+                );
             }
             Ok(())
         }
@@ -570,7 +577,7 @@ pub fn pool(command: PoolCommand) -> Result<()> {
                 if !pool.warnings.is_empty() {
                     bail!("the new pool reports: {}", pool.warnings.join("; "));
                 }
-                println!("pool \"{}\" {}", pool.name, pool.guid);
+                println!("pool \"{}\" {}", printable(&pool.name), pool.guid);
             }
             Ok(())
         }
@@ -724,7 +731,7 @@ pub fn space(command: SpaceCommand) -> Result<()> {
                 if !pool.warnings.is_empty() {
                     bail!("the pool reports: {}", pool.warnings.join("; "));
                 }
-                println!("space \"{}\" {} ({} bytes)", new.name, new.guid, new.size);
+                println!("space \"{}\" {} ({} bytes)", printable(&new.name), new.guid, new.size);
             }
             Ok(())
         }

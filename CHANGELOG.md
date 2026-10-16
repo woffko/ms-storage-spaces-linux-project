@@ -77,6 +77,14 @@
   reading the first; `spaces scan` kept only the first by name), and two
   records with one id are suspect, as is a slab mapped twice through two
   disk records of one device.
+* Names from a disk (of pools, spaces, disks, files and streams of ReFS)
+  reached terminals, report files (readable by every user) and the journal
+  as they were: escape sequences could clear the screen or set a title,
+  carriage returns and line breaks forge report lines, bidirectional
+  overrides turn text around. Reports for people, refusals, plans, `spaces
+  pool health` and `refs ls`, `stat`, `map` and `check` escape control and
+  format characters as `\u{..}` now, and cut names at 1024 characters;
+  `--json` keeps them, JSON-escaped.
 * A space whose layout is not understood made every space of its pool
   failed (`space.state`), since 1.2.0 worked out the health of a pool as a
   whole: the others are judged on their own again, as 1.1.0 did.
