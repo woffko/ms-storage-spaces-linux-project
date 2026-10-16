@@ -903,6 +903,13 @@ pub(crate) const LOG_STARTS: [u64; 2] = [0x24000, 0x8000];
 const LOG_SIZES: [u64; 3] = [0x20000, 0x40000, 0x80000];
 /// Pages read at a time from the checkpoint's position in the log on.
 const LOG_WINDOW: u64 = 16;
+/// Pages looked back from the checkpoint's position for the record before
+/// it: a record takes a page or more (up to 5 seen).
+const LOG_LOOKBACK: u64 = 64;
+/// The most the search for the newest record reads when the record before
+/// the checkpoint is not where its number says: the regions seen are 512
+/// MiB and 1 GiB, the search for the control page accepts up to 2 GiB.
+const LOG_WHOLE_READ: u64 = 2 << 30;
 
 /// The log's state of the ReFS 3.x volume at byte `offset` of `dev`
 /// (clusters of `cluster` bytes, `volume_size` bytes) whose current
@@ -1021,15 +1028,28 @@ fn read_log<D: ReadAt + ?Sized>(
         |p: &[u8]| (&p[0..4] == b"MLog" && le32(p, 4) == signature).then(|| (le64(p, 0x20), Lsn::from(le64(p, 0x28))));
     // A record's page is the region's start plus the low half of its log
     // sequence number (the high half counts wraps and epochs): the record
-    // before the checkpoint's number and any after it are at known pages.
-    // Where the one before is not there, the whole region is read.
+    // before the checkpoint's number (the nearest header behind it: records
+    // take a page or more) and any after it are at known pages. Where the
+    // one before is not there, the whole region is read.
     let len = end - start;
     let at = checkpoint.low as u64;
     if at < len && !full {
-        let before_page = start + (at + len - 1) % len;
-        let before = record(&read(before_page * PAGE, PAGE)?)
-            .filter(|&(_, lsn)| lsn < checkpoint && lsn.low as u64 == before_page - start);
-        if let Some((before_epoch, before_lsn)) = before {
+        // The pages behind the checkpoint's position, oldest first, in one
+        // read (two where the region wraps).
+        let back = LOG_LOOKBACK.min(len);
+        let first = (at + len - back) % len;
+        let mut behind = read((start + first) * PAGE, back.min(len - first) * PAGE)?;
+        if first + back > len {
+            behind.extend(read(start * PAGE, (first + back - len) * PAGE)?);
+        }
+        let pages = behind.as_chunks::<{ PAGE as usize }>().0;
+        let before = (1..=back).find_map(|k| {
+            let rel = (at + len - k) % len;
+            record(&pages[(back - k) as usize])
+                .filter(|&(_, lsn)| lsn < checkpoint && lsn.low as u64 == rel)
+                .map(|(e, lsn)| (e, lsn, start + rel))
+        });
+        if let Some((before_epoch, before_lsn, before_page)) = before {
             let mut newest = (before_epoch == epoch).then_some((before_lsn, before_page));
             // From the checkpoint's position on, a window at a time, while
             // records of this epoch at or past its number go on.
@@ -1057,7 +1077,16 @@ fn read_log<D: ReadAt + ?Sized>(
             return Ok(found(newest));
         }
     }
-    // Every record page of the current epoch, 16 MiB at a time.
+    // Every record page of the current epoch, 16 MiB at a time: up to 2 GiB.
+    if !full && len * PAGE > LOG_WHOLE_READ {
+        return Err(format_err!(
+            "the record before the checkpoint's log sequence number {:#x}:{:#x} is not where it says, and the \
+             log's {} MiB are more than are read whole",
+            checkpoint.high,
+            checkpoint.low,
+            (len * PAGE) >> 20
+        ));
+    }
     let mut newest: Option<(Lsn, u64)> = None;
     let mut page = start;
     while page < end {

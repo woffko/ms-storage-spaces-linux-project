@@ -1,6 +1,7 @@
 //! Assembling a pool from its member devices.
 
 use std::collections::BTreeMap;
+use std::hash::BuildHasher;
 
 use crate::error::{Error, Result, format_err};
 use crate::format::{
@@ -235,11 +236,16 @@ impl<D: ReadAt> Pool<D> {
         // grouped; the newest version that decodes is used, preferring the
         // one most members agree on. A copy that differs from others of the
         // same sequence was torn by an interrupted write (SDBB entries carry
-        // no checksum of their own).
-        let mut versions: Vec<(DbHeader, Vec<RawRecord>, Vec<usize>)> = Vec::new();
+        // no checksum of their own). A copy can be 64 MiB: the versions are
+        // told apart by a digest of their records (keyed at random, so that
+        // no disk can make two differ unseen), and the records of the one
+        // tried are read again.
+        let keys = std::collections::hash_map::RandomState::new();
+        let at = |m: &Member| m.partition.offset + POOL_DB_OFFSET;
+        let mut versions: Vec<(DbHeader, u64, Vec<usize>)> = Vec::new();
         for member in members.iter_mut() {
             let dev = &devices[member.device];
-            match read_database(dev, member.partition.offset + POOL_DB_OFFSET) {
+            match read_database(dev, at(member)) {
                 Ok(None) => {} // this member carries no copy
                 Ok(Some((header, records))) => {
                     if header.owner_guid != guid {
@@ -250,12 +256,13 @@ impl<D: ReadAt> Pool<D> {
                         continue;
                     }
                     member.db_sequence = Some(header.sequence);
+                    let digest = keys.hash_one(&records);
                     match versions
                         .iter_mut()
-                        .find(|(h, r, _)| h.sequence == header.sequence && *r == records)
+                        .find(|(h, d, _)| h.sequence == header.sequence && *d == digest)
                     {
                         Some((_, _, devs)) => devs.push(member.device),
-                        None => versions.push((header, records, vec![member.device])),
+                        None => versions.push((header, digest, vec![member.device])),
                     }
                 }
                 Err(e) => issues.push(Issue::UnreadableCopy {
@@ -267,8 +274,24 @@ impl<D: ReadAt> Pool<D> {
         versions.sort_by_key(|v| std::cmp::Reverse((v.0.sequence, v.2.len())));
         let mut chosen = None;
         let mut failures = Vec::new();
-        for (header, records, devs) in &versions {
-            match decode_records(records) {
+        for (header, digest, devs) in &versions {
+            let member = members
+                .iter()
+                .find(|m| m.device == devs[0])
+                .expect("a member read before");
+            let records = match read_database(&devices[member.device], at(member)) {
+                Ok(Some((_, records))) if keys.hash_one(&records) == *digest => records,
+                Ok(_) => {
+                    let e = "the copy changed between two reads".to_string();
+                    failures.push((devs.clone(), header.sequence, e));
+                    continue;
+                }
+                Err(e) => {
+                    failures.push((devs.clone(), header.sequence, e.to_string()));
+                    continue;
+                }
+            };
+            match decode_records(&records) {
                 Ok(decoded) => {
                     chosen = Some((header.clone(), decoded, devs.clone()));
                     break;

@@ -117,7 +117,9 @@ pool "Storage pool"): when a space of another pool has the name already,
 the first eight hex digits of the pool's GUID follow,
 `ss-<pool>-<space>-<guid>` (and `-p<N>` after that); `spaces detach
 <space>` finds both. Partition devices are created from the space's
-own GPT or MBR, so they exist even when Windows left out the protective MBR.
+own GPT or MBR, so they exist even when Windows left out the protective MBR;
+none are made when the partitions overlap or leave the space, or when there
+are more than 128 (the whole space is attached all the same).
 
 For `/etc/fstab`, use the partition device and `nofail`:
 

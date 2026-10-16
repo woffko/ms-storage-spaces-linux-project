@@ -46,23 +46,77 @@ const STATE_FULL: u16 = 3;
 /// space (`sector` bytes: 4096 on a space with 4 KiB sectors); a zero word
 /// ends the list. The runs cover the chunk exactly: a list that does not
 /// is read in the wrong unit or damaged, and is refused rather than read.
-fn parse_runs(words: &[u8], chunk: u64, sector: u64) -> Result<Vec<(bool, u64)>> {
-    let mut runs = Vec::new();
+/// Runs of no sectors are left out.
+fn parse_runs(words: &[u8], chunk: u64, sector: u64) -> Result<Runs> {
+    let mut kept = Vec::new();
     let mut total = 0;
     for w in words.as_chunks::<2>().0.iter().map(|&w| u16::from_le_bytes(w)) {
         if w == 0 {
             break;
         }
-        let sectors = (w & 0x7fff) as u64;
-        total += sectors * sector;
-        runs.push((w & 0x8000 != 0, sectors));
+        if w & 0x7fff != 0 {
+            total += u64::from(w & 0x7fff) * sector;
+            kept.push(w);
+        }
     }
     if total != chunk {
         return Err(format_err!(
             "cache runs cover {total:#x} bytes of a {chunk:#x} chunk (in {sector}-byte sectors)"
         ));
     }
-    Ok(runs)
+    Ok(Runs::new(kept))
+}
+
+/// The runs of a partly valid chunk, kept as their words on disk (2 bytes
+/// each: a chunk of 1 MiB in 512-byte sectors can have 2048) with the
+/// sector every 32nd ends at, so that finding a sector takes log time.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Runs {
+    /// Bit 15 valid, the low 15 bits sectors (none of them 0).
+    words: Vec<u16>,
+    /// Sectors from the chunk's start to the end of runs 31, 63, ...
+    marks: Vec<u32>,
+}
+
+impl Runs {
+    const STEP: usize = 32;
+
+    fn new(words: Vec<u16>) -> Runs {
+        let mut marks = Vec::with_capacity(words.len() / Self::STEP);
+        let mut end = 0u32;
+        for (i, &w) in words.iter().enumerate() {
+            end += u32::from(w & 0x7fff);
+            if i % Self::STEP == Self::STEP - 1 {
+                marks.push(end);
+            }
+        }
+        Runs { words, marks }
+    }
+
+    /// The runs, as (valid, sectors) from the chunk's start.
+    pub fn iter(&self) -> impl Iterator<Item = (bool, u64)> + '_ {
+        self.words.iter().map(|&w| (w & 0x8000 != 0, u64::from(w & 0x7fff)))
+    }
+
+    /// The run holding sector `sector` of the chunk: whether it is valid,
+    /// and the sector it ends at; `None` past the last run.
+    fn at(&self, sector: u64) -> Option<(bool, u64)> {
+        let block = self.marks.partition_point(|&end| u64::from(end) <= sector);
+        let mut start = block.checked_sub(1).map_or(0, |b| u64::from(self.marks[b]));
+        for &w in self.words.iter().skip(block * Self::STEP).take(Self::STEP) {
+            let end = start + u64::from(w & 0x7fff);
+            if sector < end {
+                return Some((w & 0x8000 != 0, end));
+            }
+            start = end;
+        }
+        None
+    }
+
+    /// Bytes it takes in memory, about.
+    fn weight(&self) -> u64 {
+        (2 * self.words.len() + 4 * self.marks.len()) as u64
+    }
 }
 
 /// Checks the unit of a cache's run words, the logical sector size of its
@@ -694,6 +748,15 @@ pub(crate) fn load_checkpoints(
 /// Block number of an entry that removes a chunk from the cache (destaged).
 const NO_BLOCK: u32 = u32::MAX;
 
+/// What the index of a cache's chunks may take in memory, about, over the
+/// versions its copies hold: 4 Mi chunks, what a slot area of 64 MiB holds
+/// at most (a cache of 1 TiB in chunks of 256 KiB), whatever its entries
+/// claim.
+const MAX_INDEX: u64 = 256 << 20;
+/// What a chunk of the index takes, about (its key, version, block and
+/// validity in a map), besides its runs.
+const ENTRY_WEIGHT: u64 = 64;
+
 #[derive(Debug, Clone)]
 pub struct CacheHeader {
     pub owner_guid: Guid,
@@ -831,9 +894,8 @@ pub enum Lookup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Validity {
     Full,
-    /// Runs of logical sectors of the space from the chunk start: (valid,
-    /// sectors).
-    Runs(Vec<(bool, u64)>),
+    /// Runs of logical sectors of the space from the chunk start.
+    Runs(Runs),
 }
 
 /// Owner chunk number -> (cache block, valid part).
@@ -871,7 +933,8 @@ impl CacheIndex {
             header.checkpoint_count,
         )?;
         let checkpoint = checkpoints.iter().flatten().max_by_key(|c| c.sequence).cloned();
-        let chunks = Self::map(&header, sector, &merged, checkpoint.as_ref())?;
+        let mut budget = MAX_INDEX;
+        let chunks = Self::map(&header, sector, &merged, checkpoint.as_ref(), &mut budget)?;
         let mut conflicts = HashSet::new();
         for (i, copy) in copies.iter().enumerate() {
             // Each copy with its own checkpoint, where the copies line up.
@@ -883,13 +946,15 @@ impl CacheIndex {
             if *copy == merged && own == checkpoint.as_ref() {
                 continue;
             }
-            let other = Self::map(&header, sector, copy, own)?;
+            let other = Self::map(&header, sector, copy, own, &mut budget)?;
             for key in chunks.keys().chain(other.keys()) {
                 if chunks.get(key) != other.get(key) {
                     conflicts.insert(*key);
                 }
             }
         }
+        // The slot area of each copy (up to 64 MiB) is no longer needed.
+        drop(copies);
         let slots = valid_slots(&merged, slot_size);
         Ok(CacheIndex {
             header,
@@ -905,7 +970,13 @@ impl CacheIndex {
     /// describes, read as Windows does (see [`Checkpoint`]): the
     /// checkpoint, then the slots from the one it names on while their
     /// sequences increase (from slot 0 without a checkpoint).
-    fn map(header: &CacheHeader, sector: u64, area: &[u8], checkpoint: Option<&Checkpoint>) -> Result<ChunkMap> {
+    fn map(
+        header: &CacheHeader,
+        sector: u64,
+        area: &[u8],
+        checkpoint: Option<&Checkpoint>,
+        budget: &mut u64,
+    ) -> Result<ChunkMap> {
         let slot_size = header.slot_size as usize;
         let valid = |slot: &[u8]| {
             &slot[0..8] == SPSLOT_SIGNATURE
@@ -936,6 +1007,16 @@ impl CacheIndex {
                     newest_for_block.insert(*b, version);
                 }
                 if newest_for_chunk.get(&key).is_none_or(|(v, _)| version > *v) {
+                    // What the index takes is bounded, whatever the
+                    // entries claim (a chunk costs a map entry, and its runs).
+                    let weight = ENTRY_WEIGHT
+                        + match &target {
+                            Some((_, Validity::Runs(runs))) => runs.weight(),
+                            _ => 0,
+                        };
+                    *budget = budget.checked_sub(weight).ok_or_else(|| {
+                        format_err!("the index of the write-back cache would take more than {MAX_INDEX} bytes")
+                    })?;
                     newest_for_chunk.insert(key, (version, target));
                 }
             }
@@ -1029,7 +1110,7 @@ impl CacheIndex {
                 Validity::Full => vec![true; sectors],
                 Validity::Runs(runs) => {
                     let mut v = Vec::with_capacity(sectors);
-                    for &(ok, n) in runs {
+                    for (ok, n) in runs.iter() {
                         v.extend(std::iter::repeat_n(ok, n as usize));
                     }
                     v.resize(sectors, false);
@@ -1088,21 +1169,17 @@ impl CacheIndex {
         match self.chunks.get(&(offset / chunk)) {
             None => Lookup::Miss { len: chunk - within },
             Some((block, Validity::Full)) => hit(*block, chunk - within),
-            Some((block, Validity::Runs(runs))) => {
-                let mut start = 0;
-                for &(valid, sectors) in runs {
-                    let end = start + sectors * self.sector;
-                    if within < end {
-                        return if valid {
-                            hit(*block, end - within)
-                        } else {
-                            Lookup::Miss { len: end - within }
-                        };
+            Some((block, Validity::Runs(runs))) => match runs.at(within / self.sector) {
+                Some((valid, end)) => {
+                    let end = end * self.sector;
+                    if valid {
+                        hit(*block, end - within)
+                    } else {
+                        Lookup::Miss { len: end - within }
                     }
-                    start = end;
                 }
-                Lookup::Miss { len: chunk - within }
-            }
+                None => Lookup::Miss { len: chunk - within },
+            },
         }
     }
 }
@@ -1135,7 +1212,7 @@ fn decode_entries(header: &CacheHeader, sector: u64, bytes: &[u8], count: usize)
             return Err(format_err!("bad cache entry: offset {offset:#x}"));
         }
         let validity = match state {
-            STATE_EMPTY => Validity::Runs(Vec::new()),
+            STATE_EMPTY => Validity::Runs(Runs::default()),
             STATE_PARTIAL => Validity::Runs(parse_runs(extra, chunk, sector)?),
             STATE_FULL => Validity::Full,
             other => return Err(crate::Error::Unsupported(format!("cache entry state {other}"))),

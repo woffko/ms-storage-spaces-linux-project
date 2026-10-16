@@ -32,7 +32,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use storage_spaces::gpt::read_partitions;
+use storage_spaces::gpt::{Partition, read_partitions};
 use storage_spaces::report::{Report, Verdict};
 use storage_spaces::segments::SegmentKind;
 use storage_spaces::{Pool, Space, SpaceReader};
@@ -320,8 +320,41 @@ fn mark_backend(dev: &str, state: &State) -> Result<()> {
     // 261), and the attach unit timed out. settle waits for udev's queue,
     // and not for ever.
     run("udevadm", &args, None).ok();
-    run("udevadm", &["settle", "--timeout=30"], None).ok();
+    settle();
     Ok(())
+}
+
+/// Waits for udev to work through its queue: 30 s at most at a time, and
+/// 60 s in all in one run of `spaces attach` (the attach unit may take 120
+/// s; past that, devices appear when udev gets to them).
+fn settle() {
+    static SPENT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let left = 60_000u64.saturating_sub(SPENT_MS.load(std::sync::atomic::Ordering::Relaxed));
+    if left == 0 {
+        return;
+    }
+    let timeout = format!("--timeout={}", (left / 1000).clamp(1, 30));
+    let start = std::time::Instant::now();
+    run("udevadm", &["settle", &timeout], None).ok();
+    SPENT_MS.fetch_add(start.elapsed().as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The most partitions of a space that become devices: a GPT holds 128
+/// by default, and each device costs two programs and a wait for udev.
+const MAX_PARTITION_DEVICES: usize = 128;
+
+/// The partitions of a space of `size` bytes that become devices: those of
+/// its table, if they lie inside it and apart and are not more than
+/// [`MAX_PARTITION_DEVICES`]; else why none do.
+fn partition_devices(parts: Vec<Partition>, size: u64) -> std::result::Result<Vec<Partition>, String> {
+    if parts.len() > MAX_PARTITION_DEVICES {
+        return Err(format!(
+            "{} partitions, more than the {MAX_PARTITION_DEVICES} attach makes devices for",
+            parts.len()
+        ));
+    }
+    storage_spaces::gpt::check_partitions(&parts, size).map_err(|e| e.to_string())?;
+    Ok(parts)
 }
 
 /// The device-mapper name a space of the pool `pool_guid` gets: `base`
@@ -389,7 +422,15 @@ fn run(program: &str, args: &[&str], stdin: Option<&str>) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Makes the device-mapper device `name` and waits for udev to take it in.
 fn dm_create(name: &str, table: &str, rw: bool) -> Result<()> {
+    dm_create_unsettled(name, table, rw)?;
+    settle();
+    Ok(())
+}
+
+/// [`dm_create`] without waiting for udev (several in a row, then one wait).
+fn dm_create_unsettled(name: &str, table: &str, rw: bool) -> Result<()> {
     if Path::new("/dev/mapper").join(name).exists() {
         bail!(
             "device-mapper device {name} already exists (left over from an interrupted run?); remove it with `dmsetup remove {name}`"
@@ -401,7 +442,6 @@ fn dm_create(name: &str, table: &str, rw: bool) -> Result<()> {
         &["create", "--readonly", name]
     };
     run("dmsetup", args, Some(table))?;
-    run("udevadm", &["settle", "--timeout=30"], None).ok();
     Ok(())
 }
 
@@ -783,18 +823,22 @@ pub fn attach_space(
             }
         }
         // Partitions become devices only when they lie inside the space
-        // and apart (an attach forced past the partition check gets the
-        // whole space only).
-        let parts = read_partitions(&reader, sector as u64)?;
-        if let Err(e) = storage_spaces::gpt::check_partitions(&parts, reader.size()) {
-            eprintln!("{:?}: no devices for its partitions: {e}", space.name());
-        } else {
-            for p in parts {
-                let part = format!("{name}-p{}", p.number);
-                let table = format!("0 {} linear /dev/mapper/{name} {}\n", p.length / 512, p.offset / 512);
-                state.dm.push(part.clone());
-                write_props(&part, &state, false)?;
-                dm_create(&part, &table, rw)?;
+        // and apart, and are not too many (an attach forced past the
+        // partition check gets the whole space only); udev is waited for
+        // once for them all.
+        match partition_devices(read_partitions(&reader, sector as u64)?, reader.size()) {
+            Err(why) => eprintln!("{:?}: no devices for its partitions: {why}", space.name()),
+            Ok(parts) => {
+                for p in &parts {
+                    let part = format!("{name}-p{}", p.number);
+                    let table = format!("0 {} linear /dev/mapper/{name} {}\n", p.length / 512, p.offset / 512);
+                    state.dm.push(part.clone());
+                    write_props(&part, &state, false)?;
+                    dm_create_unsettled(&part, &table, rw)?;
+                }
+                if !parts.is_empty() {
+                    settle();
+                }
             }
         }
         Ok(())
@@ -1125,6 +1169,37 @@ mod state_tests {
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         }
         fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod partition_tests {
+    use super::*;
+
+    fn parts(n: u32) -> Vec<Partition> {
+        (0..n)
+            .map(|i| Partition {
+                number: i + 1,
+                offset: (u64::from(i) + 1) << 20,
+                length: 1 << 20,
+                kind: String::new(),
+                name: String::new(),
+            })
+            .collect()
+    }
+
+    /// A table of more partitions than a GPT holds by default makes none
+    /// of them devices (4096 entries made attach run 8192 programs and wait
+    /// for udev as often), nor do partitions that overlap.
+    #[test]
+    fn too_many_or_overlapping_partitions_get_no_devices() {
+        assert_eq!(partition_devices(parts(128), 1 << 30).unwrap().len(), 128);
+        let why = partition_devices(parts(129), 1 << 30).unwrap_err();
+        assert!(why.contains("129 partitions"), "{why}");
+        assert!(partition_devices(parts(4096), 1 << 40).is_err());
+        let mut overlap = parts(2);
+        overlap[1].offset = overlap[0].offset;
+        assert!(partition_devices(overlap, 1 << 30).is_err());
     }
 }
 

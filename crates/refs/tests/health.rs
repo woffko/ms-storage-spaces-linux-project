@@ -441,6 +441,83 @@ fn checkpoints_beyond_the_volume_fail_it() {
     assert_eq!(verdict(&c), Verdict::Failed);
 }
 
+/// A device that counts what is read from it.
+struct Counted<'a>(&'a SparseImage, std::sync::atomic::AtomicU64);
+
+impl ReadAt for Counted<'_> {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        self.1.fetch_add(buf.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        self.0.read_exact_at(buf, offset)
+    }
+
+    fn size(&self) -> std::io::Result<u64> {
+        self.0.size()
+    }
+}
+
+/// The record before the checkpoint's log sequence number taking three
+/// pages (records take one to five): the check finds its header three
+/// pages back and reads a few MiB, not the whole log (1.2.1 looked one page
+/// back only, then read the log's 512 MiB).
+#[test]
+fn a_record_of_pages_before_the_checkpoint_is_found_nearby() {
+    let (mut image, offset) = fixture("r314small");
+    let vol = refs::Volume::open(&image, offset).unwrap();
+    let lsn = le64(&read(&image, offset + vol.checkpoint.lcn * 4096, 4096), 0x70);
+    let (start, end) = vol.log_state().unwrap().region;
+    drop(vol);
+    let at = (lsn & 0xffff_ffff) % (end - start);
+    for k in 1..=2 {
+        image.insert(
+            offset + (start + (at + (end - start) - k) % (end - start)) * 4096,
+            &[0u8; 4096],
+        );
+    }
+    set_record(&mut image, offset, lsn - 3);
+    let counted = Counted(&image, Default::default());
+    let c = quick_checks(&counted, offset, "p2", &|o| format!("byte {o:#x}"));
+    assert_eq!(status(&c, "fs.refs.log").status, Status::Ok, "{c:#?}");
+    let read = counted.1.into_inner();
+    assert!(read < 8 << 20, "{} MiB read", read >> 20);
+}
+
+/// A log control page naming a region of 4 GiB, no record before the
+/// checkpoint's number: the search for the newest record would read the
+/// whole region. It stops at 2 GiB: the log is not read (a warning), and
+/// little is (1.2.1 read all 4 GiB; a hostile control page may name 16).
+#[test]
+fn a_log_larger_than_is_read_whole_is_not_read() {
+    let (mut image, offset) = fixture("r314small");
+    let vol = refs::Volume::open(&image, offset).unwrap();
+    let lsn = le64(&read(&image, offset + vol.checkpoint.lcn * 4096, 4096), 0x70);
+    let state = vol.log_state().unwrap();
+    let (start, _) = state.region;
+    drop(vol);
+    // A volume 8 GiB larger, so that the region fits.
+    image.size += 8 << 30;
+    let boot = read(&image, offset, 512);
+    claim(&mut image, offset, le64(&boot, 0x18) + (8 << 30) / 512);
+    let end = start + (1 << 20);
+    for lcn in 0..0x400u64 {
+        let mut page = read(&image, offset + lcn * 4096, 4096);
+        if &page[0..4] == b"MLog" && le64(&page, 0x28) == 0 {
+            page[0xc0..0xc8].copy_from_slice(&end.to_le_bytes());
+            image.insert(offset + lcn * 4096, &page);
+        }
+    }
+    let at = (lsn & 0xffff_ffff) % (end - start);
+    for k in 1..=64 {
+        image.insert(offset + (start + at - k) * 4096, &[0u8; 4096]);
+    }
+    let counted = Counted(&image, Default::default());
+    let c = quick_checks(&counted, offset, "p2", &|o| format!("byte {o:#x}"));
+    let log = status(&c, "fs.refs.log");
+    assert_eq!(log.status, Status::Warning, "{c:#?}");
+    assert!(log.summary.contains("more than are read whole"), "{}", log.summary);
+    let read = counted.1.into_inner();
+    assert!(read < 64 << 20, "{} MiB read", read >> 20);
+}
+
 #[test]
 fn a_boot_sector_that_does_not_check_out() {
     let (mut image, offset) = fixture("r314small");

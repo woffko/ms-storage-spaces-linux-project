@@ -37,6 +37,23 @@
   check now takes the journal's ranges, the health is worked out once per
   pool, and the rest is looked up: a pool of 10 000 spaces with 40 000
   hidden ones is checked in seconds.
+* Memory taken by what a disk claims: a write-back cache whose slot area
+  (64 MiB at most) is full of entries of one-sector runs took 700 MiB to
+  load and walked every run of a chunk for every read; its runs are kept
+  as on disk now (244 MiB, and a read finds its run in log time), and the
+  index of a cache may take 256 MiB at most. Five members with differing
+  copies of a 64 MiB pool database took 370 MiB: only the copy used is
+  kept now (124 MiB).
+* ReFS: when the record before the checkpoint's log sequence number took
+  more than one page, the checks read the volume's whole log (512 MiB to
+  1 GiB) to find the newest record; they look back 64 pages for it now. A
+  log the checks would have to read whole is read up to 2 GiB (a hostile
+  control page may name 16 GiB); beyond that it is not read, a warning.
+* `spaces attach` makes no devices for the partitions of a space with more
+  than 128 of them (a table of 4096 entries cost two programs and a wait
+  for udev each), waits for udev once for all partitions of a space, and
+  waits for udev for 60 s at most in one run, so that the attach unit
+  finishes in its time.
 * A space whose layout is not understood made every space of its pool
   failed (`space.state`), since 1.2.0 worked out the health of a pool as a
   whole: the others are judged on their own again, as 1.1.0 did.

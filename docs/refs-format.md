@@ -885,11 +885,13 @@ ReFS write a checkpoint that covers the log (**verified**).
 
 The checkpoint misses changes when a record of the current epoch is not
 older than its LSN (**verified** against Windows' restart ranges). As
-records sit at the page their LSN names, `refs` reads the page of the
-record before the checkpoint's LSN (to confirm that) and the pages from
-the checkpoint's LSN on while they hold records of the current epoch
-past it, instead of the whole region (which it reads where the record
-before is not where it should be). `refs info` reports it; `refs` reads only the checkpoint, and refuses to write
+records sit at the page their LSN names, `refs` reads the record before
+the checkpoint's LSN (to confirm that: the nearest record header within
+64 pages behind it, as a record takes one page or more; up to 5 seen)
+and the pages from the checkpoint's LSN on while they hold records of the
+current epoch past it, instead of the whole region (which it reads, up to
+2 GiB, where the record before is not where it should be; a larger log is
+not read). `refs info` reports it; `refs` reads only the checkpoint, and refuses to write
 such a volume: Windows would replay the logged changes over its own (a
 directory created on such a volume collided with objects the replay
 created, which lost the directory's contents).
