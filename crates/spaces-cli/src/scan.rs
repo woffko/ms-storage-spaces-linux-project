@@ -30,7 +30,9 @@ fn skipped(name: &str) -> bool {
 /// if the device cannot be opened.
 pub fn probe(path: &Path) -> std::io::Result<Option<Candidate>> {
     let file = File::open(path)?;
-    Ok(read_header(path, &file))
+    // Every block device is read: a partition table that makes the parser
+    // panic is no member, not the end of the scan.
+    Ok(storage_spaces::isolate::caught(|| read_header(path, &file)).unwrap_or(None))
 }
 
 fn read_header(path: &Path, file: &File) -> Option<Candidate> {

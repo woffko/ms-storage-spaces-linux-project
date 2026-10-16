@@ -28,6 +28,7 @@ pub mod guard;
 mod guid;
 pub mod health;
 pub mod io;
+pub mod isolate;
 pub mod journal;
 pub mod layout;
 pub mod manage;

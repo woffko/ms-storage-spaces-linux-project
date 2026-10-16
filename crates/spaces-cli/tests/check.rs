@@ -228,6 +228,52 @@ fn reports_a_healthy_space_and_what_is_wrong_with_one() {
     );
 }
 
+/// Writes `bytes` at byte `at` of space "data" of the pool on `disks`.
+fn patch_space(disks: &[String], at: u64, bytes: &[u8]) {
+    let files: Vec<File> = disks
+        .iter()
+        .map(|p| OpenOptions::new().read(true).write(true).open(p).unwrap())
+        .collect();
+    let pool = Pool::open(files).unwrap();
+    let writer = pool.open_space_rw(pool.find_space("data").unwrap().id()).unwrap();
+    writer.write_all_at(bytes, at).unwrap();
+    writer.flush().unwrap();
+}
+
+/// A partition entry of 0xff bytes (a damaged or hostile table, LBA 2):
+/// the checks of the space must end in a report, not in a panic of the
+/// program (which `spaces attach` would share with every pool after it).
+#[test]
+fn a_partition_entry_of_ones_gets_a_report() {
+    let dir = Scratch(std::env::temp_dir().join(format!("spaces-ones-{}", std::process::id())));
+    let disks = pool(&dir.0);
+    patch_space(&disks, 2 * 512, &[0xff; 128]);
+    let all: Vec<&str> = disks.iter().map(String::as_str).collect();
+    let o = spaces(&[&["check"][..], &all].concat());
+    let out = text(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert!(out.lines().next().unwrap().starts_with("space \"data\" ("), "{out}");
+    assert!(out.contains("FAILED   space.checks"), "{out}");
+    // The servers and export ask the same checks: refused, not a panic.
+    let img = dir.0.join("data.img");
+    let o = spaces(
+        &[
+            &[
+                "export",
+                "--space",
+                "data",
+                "--output",
+                img.to_str().unwrap(),
+                "--force",
+            ][..],
+            &all,
+        ]
+        .concat(),
+    );
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(text(&o).contains("a failed space is not read at all"), "{}", text(&o));
+}
+
 /// Corpus pools (testdata/pools, testdata/crash; skipped when missing): the
 /// user's case (wc4k) is healthy now, a crashed one suspect.
 #[test]

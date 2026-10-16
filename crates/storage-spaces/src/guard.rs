@@ -405,6 +405,21 @@ fn state_check<D: ReadAt>(pool: &Pool<D>, space: &Space, health: &Result<Health,
     check
 }
 
+/// A report on space `space` of `pool` without checks yet: its subject, the
+/// pool and the space.
+pub fn empty_report<D>(pool: &Pool<D>, space: &Space) -> Report {
+    let mut report = Report::new(format!(
+        "space \"{}\" ({}) of pool \"{}\" ({})",
+        space.name(),
+        space.info.guid,
+        pool.name,
+        pool.guid
+    ));
+    report.pool = Some((pool.name.clone(), pool.guid.to_string()));
+    report.space = Some((space.name().to_owned(), space.info.guid.to_string()));
+    report
+}
+
 /// The checks of user space `space` of `pool`: the pool's, the space's,
 /// its partition table's and, through `fs`, those of its file systems.
 /// `names` names the pool's devices in evidence.
@@ -415,15 +430,7 @@ pub fn space_report<D: ReadAt>(
     options: &Options,
     fs: &mut FsHook<'_, D>,
 ) -> Report {
-    let mut report = Report::new(format!(
-        "space \"{}\" ({}) of pool \"{}\" ({})",
-        space.name(),
-        space.info.guid,
-        pool.name,
-        pool.guid
-    ));
-    report.pool = Some((pool.name.clone(), pool.guid.to_string()));
-    report.space = Some((space.name().to_owned(), space.info.guid.to_string()));
+    let mut report = empty_report(pool, space);
     report.checks = pool_checks(pool, names);
     let h = health(pool).map_err(|e| e.to_string());
     report.checks.push(state_check(pool, space, &h));

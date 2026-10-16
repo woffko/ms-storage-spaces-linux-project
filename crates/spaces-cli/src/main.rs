@@ -2,6 +2,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 
@@ -383,7 +384,7 @@ fn main() -> Result<()> {
     };
     let _ = OPEN_OPTIONS.set(storage_spaces::OpenOptions { unclean_parity });
     match cli.command {
-        Command::Info { devices, all } => info(&open_pool(&devices)?, &devices, all),
+        Command::Info { devices, all } => info(&Arc::new(open_pool(&devices)?), &devices, all),
         Command::Extents { devices, space } => {
             let pool = open_pool(&devices)?;
             extents(&pool, find_space(&pool, &space)?)
@@ -752,7 +753,7 @@ fn size(bytes: u64) -> String {
     }
 }
 
-fn info(pool: &Pool<File>, paths: &[PathBuf], all: bool) -> Result<()> {
+fn info(pool: &Arc<Pool<File>>, paths: &[PathBuf], all: bool) -> Result<()> {
     println!("Pool {:?} {}", pool.name, pool.guid);
     println!(
         "  version {}, sectors {} logical / {} physical",
@@ -1228,8 +1229,8 @@ fn cmd_attach(
     let interactive = std::io::stderr().is_terminal();
     let mut failures = 0;
     for paths in groups {
-        let pool = match open_pool_quiet(&paths) {
-            Ok(pool) => pool,
+        let pool = match check::open_pool(&paths) {
+            Ok(pool) => Arc::new(pool),
             Err(e) => {
                 eprintln!(
                     "the pool on {}: {e:#}",
@@ -1297,7 +1298,12 @@ fn cmd_attach(
                 continue;
             }
             let write = matches!(decision, check::Decision::Attach { rw: true });
-            match attach::attach_space(&pool, space, &paths, backend, write, verdict, path.as_deref()) {
+            // A panic there (on what the checks passed) fails this space only.
+            let attached = storage_spaces::isolate::caught(|| {
+                attach::attach_space(&pool, space, &paths, backend, write, verdict, path.as_deref())
+            })
+            .unwrap_or_else(|stopped| Err(anyhow::anyhow!("attaching it {stopped}")));
+            match attached {
                 Ok(state) => {
                     let mode = if state.rw {
                         ", read-write".to_string()
@@ -1334,15 +1340,6 @@ fn cmd_attach(
         bail!("{failures} space(s) or pool(s) not attached");
     }
     Ok(())
-}
-
-/// Opens a pool to check it: its warnings go into the reports.
-fn open_pool_quiet(paths: &[PathBuf]) -> Result<Pool<File>> {
-    let files = paths
-        .iter()
-        .map(|p| open_member(p, false, false))
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Pool::open(files)?)
 }
 
 #[cfg(target_os = "linux")]

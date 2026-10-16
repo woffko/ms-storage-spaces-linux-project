@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use storage_spaces::gpt::Partition;
 use storage_spaces::io::ReadAt;
+use storage_spaces::isolate;
 use storage_spaces::report::{Check, Evidence, Report, Status, Verdict};
 use storage_spaces::{Pool, SpaceReader};
 
@@ -36,7 +37,12 @@ fn fs_hook<D: ReadAt>(reader: &SpaceReader<'_, D>, part: &Partition, names: &[St
 pub fn volume_report(dev: &dyn ReadAt, offset: u64, path: &Path) -> Report {
     let name = path.display().to_string();
     let mut r = Report::new(format!("the ReFS volume on {name}"));
-    r.checks = refs::health::quick_checks(dev, offset, "the volume", &|o| format!("{name} at byte {o:#x}"));
+    // A panic in the checks (a defect a hostile volume reaches) refuses the
+    // volume instead of ending the program.
+    r.checks = isolate::caught(|| {
+        refs::health::quick_checks(dev, offset, "the volume", &|o| format!("{name} at byte {o:#x}"))
+    })
+    .unwrap_or_else(|stopped| vec![stopped.check("fs.refs.checks", "the checks of the volume")]);
     if let Some(c) = inherited(path) {
         r.checks.insert(0, c);
     }
@@ -49,13 +55,20 @@ pub fn volume_report(dev: &dyn ReadAt, offset: u64, path: &Path) -> Report {
 pub fn space_report(pool: &Pool<File>, paths: &[PathBuf], name: &str) -> Option<Report> {
     let space = pool.find_space(name)?;
     let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
-    let mut r = storage_spaces::guard::space_report(
-        pool,
-        space,
-        &names,
-        &storage_spaces::guard::Options::default(),
-        &mut fs_hook,
-    );
+    let mut r = isolate::caught(|| {
+        storage_spaces::guard::space_report(
+            pool,
+            space,
+            &names,
+            &storage_spaces::guard::Options::default(),
+            &mut fs_hook,
+        )
+    })
+    .unwrap_or_else(|stopped| {
+        let mut r = storage_spaces::guard::empty_report(pool, space);
+        r.checks.push(stopped.check("space.checks", "the checks of the space"));
+        r
+    });
     r.environment.push(("refs".into(), env!("CARGO_PKG_VERSION").into()));
     Some(r)
 }

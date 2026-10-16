@@ -616,7 +616,7 @@ fn report_for(source: &Source, dev: &dyn ReadAt, offset: u64) -> storage_spaces:
     if let Some(name) = &source.space {
         let files: std::io::Result<Vec<File>> = source.devices.iter().map(File::open).collect();
         if let Ok(files) = files
-            && let Ok(pool) = storage_spaces::Pool::open(files)
+            && let Ok(Ok(pool)) = storage_spaces::isolate::caught(|| storage_spaces::Pool::open(files))
             && let Some(r) = guard::space_report(&pool, &source.devices, name)
         {
             return r;
