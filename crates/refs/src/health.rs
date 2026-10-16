@@ -13,6 +13,11 @@ use crate::page::V1_BLOCK;
 use crate::util::{le32, le64};
 use crate::volume::{SUPERBLOCK_LCN, log_state, self_checksum_ok};
 
+/// The fewest units (clusters, blocks of 1.x) a volume can have: its boot
+/// area, the superblock at unit 0x1e and its copies at the end leave no
+/// room in fewer.
+const MIN_UNITS: u64 = 0x40;
+
 /// A superblock or checkpoint as read: where, and whether it checks out.
 struct Copy {
     n: u64,
@@ -23,10 +28,23 @@ struct Copy {
 /// The quick checks of the ReFS volume at byte `offset` of `dev`; none
 /// when there is no ReFS boot sector there. `label` names the volume in
 /// summaries ("p2"), `locate` describes a byte offset of `dev` for
-/// evidence.
+/// evidence. The volume must fit the rest of the device.
 pub fn quick_checks<D: ReadAt + ?Sized>(
     dev: &D,
     offset: u64,
+    label: &str,
+    locate: &dyn Fn(u64) -> String,
+) -> Vec<Check> {
+    let room = dev.size().ok().map(|size| size.saturating_sub(offset));
+    quick_checks_in(dev, offset, room, label, locate)
+}
+
+/// [`quick_checks`] of a volume that has `room` bytes from its start (the
+/// rest of its partition; `None`: not known), which it must fit.
+pub fn quick_checks_in<D: ReadAt + ?Sized>(
+    dev: &D,
+    offset: u64,
+    room: Option<u64>,
     label: &str,
     locate: &dyn Fn(u64) -> String,
 ) -> Vec<Check> {
@@ -74,6 +92,46 @@ pub fn quick_checks<D: ReadAt + ?Sized>(
             return checks;
         }
     };
+    let v1 = boot.major == 1;
+    // ReFS 1.x names 16 KiB blocks, 3.x clusters.
+    let unit = if v1 { V1_BLOCK } else { boot.cluster_size() };
+    let size = boot.volume_size();
+    let units = size / unit;
+    // The size decides where the copies of the superblock are, and bounds
+    // every address below: a volume larger than what holds it, or too small
+    // for its own structures, is not read.
+    if room.is_some_and(|r| size > r) || units < MIN_UNITS {
+        let mut checks = vec![
+            Check::new(
+                "fs.refs.boot",
+                Status::Suspect,
+                format!("{label}: the ReFS boot sector claims a volume of {size} bytes"),
+            )
+            .evidence(
+                Evidence::new("the size of the volume (sectors at 0x18 times bytes per sector)")
+                    .at(locate(offset))
+                    .expected(match room {
+                        Some(r) => format!(
+                            "at least {MIN_UNITS} units of {unit} bytes and at most the {r} bytes from its start"
+                        ),
+                        None => format!("at least {MIN_UNITS} units of {unit} bytes"),
+                    })
+                    .found(format!("{} sectors of {} bytes", boot.sectors, boot.bytes_per_sector)),
+            )
+            .truth(Truth::Format)
+            .advice(
+                "A volume that does not fit its partition (or is smaller than ReFS can be) is damaged, or \
+                 the partition table is: what is read may not be what Windows reads.",
+            ),
+        ];
+        for id in ["fs.refs.superblock", "fs.refs.checkpoint", "fs.refs.log"] {
+            checks.push(Check::skipped(
+                id,
+                format!("{label}: not checked, the boot sector failed"),
+            ));
+        }
+        return checks;
+    }
     let mut checks = vec![
         Check::ok(
             "fs.refs.boot",
@@ -82,19 +140,26 @@ pub fn quick_checks<D: ReadAt + ?Sized>(
                 boot.major,
                 boot.minor,
                 boot.cluster_size() >> 10,
-                boot.volume_size() as f64 / (1u64 << 30) as f64
+                size as f64 / (1u64 << 30) as f64
             ),
         )
         .truth(Truth::CrossCheck),
     ];
-    let v1 = boot.major == 1;
-    // ReFS 1.x names 16 KiB blocks, 3.x clusters.
-    let unit = if v1 { V1_BLOCK } else { boot.cluster_size() };
-    let units = boot.volume_size() / unit;
-    let at = |n: u64| offset + n * unit;
+    // The byte of `dev` where unit `n` starts, if it is in the volume.
+    let at = |n: u64| {
+        n.checked_mul(unit)
+            .filter(|&b| b < size)
+            .and_then(|b| b.checked_add(offset))
+    };
+    // Where unit `n` is, for evidence.
+    let what = if v1 { "block" } else { "cluster" };
+    let place = |n: u64| match at(n) {
+        Some(b) => locate(b),
+        None => format!("{what} {n:#x}, beyond the volume's {units:#x}"),
+    };
     let read = |n: u64, len: u64| -> Option<Vec<u8>> {
         let mut b = vec![0u8; len as usize];
-        dev.read_exact_at(&mut b, at(n)).ok()?;
+        dev.read_exact_at(&mut b, at(n)?).ok()?;
         Some(b)
     };
     // The superblock's own reference: (offset, length) in the page.
@@ -121,7 +186,7 @@ pub fn quick_checks<D: ReadAt + ?Sized>(
             Copy { n, page, valid }
         })
         .collect();
-    checks.push(superblock_check(label, v1, unit, &supers, &self_ref, &at, locate));
+    checks.push(superblock_check(label, v1, &supers, &self_ref, &at, &place, locate));
     let Some(supb) = supers.iter().find(|c| c.valid).and_then(|c| c.page.as_deref()) else {
         checks.push(Check::skipped(
             "fs.refs.checkpoint",
@@ -164,7 +229,6 @@ pub fn quick_checks<D: ReadAt + ?Sized>(
         .collect();
     let clock = |c: &Copy| c.page.as_deref().map_or(0, |p| le64(p, if v1 { 8 } else { 0x60 }));
     let current = points.iter().filter(|c| c.valid).max_by_key(|c| clock(c));
-    let what = if v1 { "block" } else { "cluster" };
     let check = match (points.iter().filter(|c| c.valid).count(), current) {
         (2, Some(c)) => Check::ok(
             "fs.refs.checkpoint",
@@ -193,7 +257,7 @@ pub fn quick_checks<D: ReadAt + ?Sized>(
             for bad in points.iter().filter(|p| !p.valid) {
                 check = check.evidence(
                     Evidence::new(format!("the checkpoint at {what} {:#x}", bad.n))
-                        .at(locate(at(bad.n)))
+                        .at(place(bad.n))
                         .expected("a checkpoint whose checksum matches")
                         .found(bad.page.as_deref().map_or("unreadable".into(), |p| signature(&p[..4]))),
                 );
@@ -211,7 +275,7 @@ pub fn quick_checks<D: ReadAt + ?Sized>(
             for bad in &points {
                 check = check.evidence(
                     Evidence::new(format!("the checkpoint at {what} {:#x}", bad.n))
-                        .at(locate(at(bad.n)))
+                        .at(place(bad.n))
                         .expected("a checkpoint whose checksum matches")
                         .found(bad.page.as_deref().map_or("unreadable".into(), |p| signature(&p[..4]))),
                 );
@@ -229,7 +293,7 @@ pub fn quick_checks<D: ReadAt + ?Sized>(
     checks.push(if v1 {
         Check::skipped("fs.refs.log", format!("{label}: the log of ReFS 1.x is not read"))
     } else {
-        match log_state(dev, offset, unit, boot.volume_size(), current.n, &[]) {
+        match log_state(dev, offset, unit, size, current.n, &[]) {
             Ok(log) if log.needs_replay() => {
                 let newest = log.newest.unwrap();
                 Check::new(
@@ -242,12 +306,16 @@ pub fn quick_checks<D: ReadAt + ?Sized>(
                 )
                 .evidence(
                     Evidence::new("the log sequence number the current checkpoint covers")
-                        .at(locate(at(current.n) + 0x70))
+                        .at(at(current.n).map_or_else(|| place(current.n), |b| locate(b + 0x70)))
                         .found(format!("{:#x}:{:#x}", log.checkpoint.high, log.checkpoint.low)),
                 )
                 .evidence(
                     Evidence::new("the newest record of the log")
-                        .at(locate(offset + log.newest_page.unwrap_or(0) * 4096))
+                        .at(log
+                            .newest_page
+                            .and_then(|p| p.checked_mul(4096))
+                            .and_then(|b| b.checked_add(offset))
+                            .map_or_else(|| "beyond the volume".to_string(), locate))
                         .expected(format!(
                             "older than the checkpoint's log sequence number {:#x}:{:#x}",
                             log.checkpoint.high, log.checkpoint.low
@@ -290,10 +358,10 @@ pub fn quick_checks<D: ReadAt + ?Sized>(
 fn superblock_check(
     label: &str,
     v1: bool,
-    unit: u64,
     supers: &[Copy],
     self_ref: &dyn Fn(&[u8]) -> (usize, usize),
-    at: &dyn Fn(u64) -> u64,
+    at: &dyn Fn(u64) -> Option<u64>,
+    place: &dyn Fn(u64) -> String,
     locate: &dyn Fn(u64) -> String,
 ) -> Check {
     const ID: &str = "fs.refs.superblock";
@@ -324,7 +392,7 @@ fn superblock_check(
             };
             evidence.push(
                 Evidence::new(format!("the superblock at {what} {:#x}", c.n))
-                    .at(locate(at(c.n)))
+                    .at(place(c.n))
                     .expected(if v1 {
                         "its own block number at 0 and a matching checksum".to_string()
                     } else {
@@ -343,7 +411,7 @@ fn superblock_check(
                 let i = m.iter().zip(&reference).position(|(a, b)| a != b).unwrap_or(0);
                 evidence.push(
                     Evidence::new(format!("the superblock at {what} {:#x}", c.n))
-                        .at(locate(at(c.n) + i as u64))
+                        .at(at(c.n).map_or_else(|| place(c.n), |b| locate(b + i as u64)))
                         .expected(format!(
                             "the same as at {what} {:#x}: {} at byte {i:#x}",
                             first.n,
@@ -354,7 +422,6 @@ fn superblock_check(
             }
         }
     }
-    let _ = unit;
     if evidence.is_empty() {
         return Check::ok(
             ID,

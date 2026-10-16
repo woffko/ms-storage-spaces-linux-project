@@ -28,7 +28,7 @@ fn fs_hook<D: ReadAt>(reader: &SpaceReader<'_, D>, part: &Partition, names: &[St
     if let Some(c) = storage_spaces::guard::ntfs_check(reader, part.offset, part.length, &label, &locate) {
         return vec![c];
     }
-    refs::health::quick_checks(reader, part.offset, &label, &locate)
+    refs::health::quick_checks_in(reader, part.offset, Some(part.length), &label, &locate)
 }
 
 /// The report on the ReFS volume at byte `offset` of `dev`, the device

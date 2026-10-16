@@ -365,6 +365,82 @@ fn a_log_newer_than_the_checkpoint_is_suspect() {
     assert_eq!(verdict(&c), Verdict::Healthy);
 }
 
+/// The boot sector at `offset` claiming `sectors` sectors, its checksum
+/// recomputed.
+fn claim(image: &mut SparseImage, offset: u64, sectors: u64) {
+    let mut boot = read(image, offset, 512);
+    boot[0x18..0x20].copy_from_slice(&sectors.to_le_bytes());
+    let sum = refs::checksum::boot_sum(&boot);
+    boot[0x16..0x18].copy_from_slice(&sum.to_le_bytes());
+    image.insert(offset, &boot);
+}
+
+/// The volume at `offset` of `image` moved to the start of a device of its
+/// own (a partition read by itself).
+fn at_start(image: &SparseImage, offset: u64) -> SparseImage {
+    let mut moved = SparseImage::new(image.size - offset);
+    for (at, len) in image.ranges() {
+        let end = at + len as u64;
+        if end > offset {
+            let from = at.max(offset);
+            moved.insert(from - offset, &read(image, from, (end - from) as usize));
+        }
+    }
+    moved
+}
+
+/// Boot sectors claiming any size, with a checksum that matches: a volume
+/// larger than its device or too small for ReFS is suspect, and nothing is
+/// computed from its size (in 1.2.1 the addresses of the superblock copies
+/// overflowed: a panic as root at attach time).
+#[test]
+fn boot_sectors_claiming_any_size_are_suspect() {
+    let (image, offset) = fixture("r314small");
+    let moved = at_start(&image, offset);
+    assert_eq!(status(&checks(&moved, 0), "fs.refs.boot").status, Status::Ok);
+    for (original, offset) in [(&image, offset), (&moved, 0)] {
+        for sectors in [0, 1, 8, 16, 1 << 55, 1 << 58, u64::MAX] {
+            let mut image = original.clone();
+            claim(&mut image, offset, sectors);
+            let c = checks(&image, offset);
+            let boot = status(&c, "fs.refs.boot");
+            assert_eq!(boot.status, Status::Suspect, "{sectors:#x}: {c:#?}");
+            assert!(boot.summary.contains("claims a volume of"), "{}", boot.summary);
+            assert_eq!(status(&c, "fs.refs.superblock").status, Status::Skipped);
+            // Reading it as a volume stops on an error, if anywhere.
+            if let Ok(vol) = refs::Volume::open(&image, offset) {
+                let _ = vol.log_state();
+            }
+        }
+    }
+    // Within its partition, the rest of the device does not count.
+    let c = refs::health::quick_checks_in(&image, offset, Some(1 << 30), "p2", &|o| format!("{o:#x}"));
+    assert_eq!(status(&c, "fs.refs.boot").status, Status::Suspect, "{c:#?}");
+}
+
+/// A superblock (validly sealed) listing checkpoints far beyond the volume:
+/// no valid checkpoint, failed, and the evidence says where they would be.
+#[test]
+fn checkpoints_beyond_the_volume_fail_it() {
+    let (mut image, offset) = fixture("r314small");
+    let (unit, _, _) = geometry(&image, offset);
+    let mut supb = read(&image, offset + 0x1e * unit, unit as usize);
+    let list = le32(&supb, 0x70);
+    supb[list..list + 8].copy_from_slice(&(1u64 << 52).to_le_bytes());
+    supb[list + 8..list + 16].copy_from_slice(&(1u64 << 63).to_le_bytes());
+    let (at, len) = (le32(&supb, 0x78), le32(&supb, 0x7c));
+    seal(&mut supb, at, len, unit as usize, false);
+    image.insert(offset + 0x1e * unit, &supb);
+    let c = checks(&image, offset);
+    let cp = status(&c, "fs.refs.checkpoint");
+    assert_eq!(cp.status, Status::Failed, "{c:#?}");
+    assert_eq!(cp.evidence.len(), 2);
+    for e in &cp.evidence {
+        assert!(e.location.as_deref().unwrap().contains("beyond the volume"), "{e:?}");
+    }
+    assert_eq!(verdict(&c), Verdict::Failed);
+}
+
 #[test]
 fn a_boot_sector_that_does_not_check_out() {
     let (mut image, offset) = fixture("r314small");

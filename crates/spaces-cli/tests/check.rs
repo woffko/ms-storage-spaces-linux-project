@@ -241,10 +241,11 @@ fn patch_space(disks: &[String], at: u64, bytes: &[u8]) {
 }
 
 /// A partition entry of 0xff bytes (a damaged or hostile table, LBA 2):
-/// the checks of the space must end in a report, not in a panic of the
-/// program (which `spaces attach` would share with every pool after it).
+/// suspect, as any table whose copies disagree. (In 1.2.1 the checks
+/// computed with its numbers and the program panicked, which `spaces
+/// attach` would have shared with every pool after it.)
 #[test]
-fn a_partition_entry_of_ones_gets_a_report() {
+fn a_partition_entry_of_ones_is_suspect() {
     let dir = Scratch(std::env::temp_dir().join(format!("spaces-ones-{}", std::process::id())));
     let disks = pool(&dir.0);
     patch_space(&disks, 2 * 512, &[0xff; 128]);
@@ -252,26 +253,20 @@ fn a_partition_entry_of_ones_gets_a_report() {
     let o = spaces(&[&["check"][..], &all].concat());
     let out = text(&o);
     assert_eq!(o.status.code(), Some(1), "{out}");
-    assert!(out.lines().next().unwrap().starts_with("space \"data\" ("), "{out}");
-    assert!(out.contains("FAILED   space.checks"), "{out}");
-    // The servers and export ask the same checks: refused, not a panic.
+    assert!(out.lines().next().unwrap().ends_with(": SUSPECT"), "{out}");
+    assert!(out.contains("SUSPECT  space.partitions"), "{out}");
+    assert!(!out.contains("panicked"), "{out}");
+    // The servers and export ask the same checks.
     let img = dir.0.join("data.img");
     let o = spaces(
         &[
-            &[
-                "export",
-                "--space",
-                "data",
-                "--output",
-                img.to_str().unwrap(),
-                "--force",
-            ][..],
+            &["export", "--space", "data", "--output", img.to_str().unwrap()][..],
             &all,
         ]
         .concat(),
     );
     assert_eq!(o.status.code(), Some(1), "{}", text(&o));
-    assert!(text(&o).contains("a failed space is not read at all"), "{}", text(&o));
+    assert!(text(&o).contains("needs --force"), "{}", text(&o));
 }
 
 /// Corpus pools (testdata/pools, testdata/crash; skipped when missing): the

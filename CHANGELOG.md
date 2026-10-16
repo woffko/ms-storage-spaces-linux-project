@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.2.2 (unreleased)
+
+### Fixes
+
+* `spaces attach` checks every pool of the system in one process, as
+  root, the moment a disk appears. A panic in the checks of one pool (on a
+  damaged or hostile disk) ended the process, and the pools after it
+  stayed detached; a loop kept them all waiting. Opening each pool and
+  checking each space now run on a thread of their own: a panic fails
+  that space (check `space.checks`), checks that take longer than 40 s
+  make it suspect (`SPACES_CHECK_TIMEOUT` sets the limit in seconds, 0
+  none), and the other pools are attached. `spaces check`, `spaces info`,
+  the servers, `export` and `refs` refuse such a space or volume instead
+  of panicking.
+* Partition tables and boot sectors in a space whose numbers lie beyond
+  any disk made the checks of attach overflow (a panic): a GPT entry of
+  0xff bytes, a GPT header naming its entries at LBA 2^56, an NTFS boot
+  sector in a partition smaller than its sector, a ReFS boot sector
+  claiming 2^55 sectors, a ReFS superblock listing checkpoints at cluster
+  2^52. They are suspect now, with where. A ReFS volume larger than its
+  partition (or the rest of its device), or smaller than ReFS can be, is
+  suspect too.
+* `ruzstd` 0.9.1: with 0.9.0 a tiny ZSTD frame could exhaust memory
+  (RUSTSEC-2026-0344) when `refs` read a compressed file of a hostile
+  volume.
+
 ## 1.2.1 (2026-10-11)
 
 Fixes from a user's report of 1.2.0 on Ubuntu 26.10: the attach unit

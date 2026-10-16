@@ -194,7 +194,7 @@ pub fn fs_checks<D: ReadAt>(reader: &SpaceReader<'_, D>, part: &Partition, names
     if let Some(c) = guard::ntfs_check(reader, part.offset, part.length, &label, &locate) {
         return vec![c];
     }
-    let mut checks = refs::health::quick_checks(reader, part.offset, &label, &locate);
+    let mut checks = refs::health::quick_checks_in(reader, part.offset, Some(part.length), &label, &locate);
     if checks.is_empty() {
         if part.kind == MSR_PARTITION_TYPE {
             return Vec::new();

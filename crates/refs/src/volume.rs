@@ -980,10 +980,13 @@ fn read_log<D: ReadAt + ?Sized>(
         for size in LOG_SIZES {
             let end = start.saturating_add(size);
             let len = 2 * cluster.max(PAGE);
-            if end.saturating_mul(PAGE).saturating_add(len) > volume_size {
+            let Some(after) = end
+                .checked_mul(PAGE)
+                .filter(|a| a.checked_add(len).is_some_and(|e| e <= volume_size))
+            else {
                 continue;
-            }
-            let pages = read(end * PAGE, len)?;
+            };
+            let pages = read(after, len)?;
             for (i, c) in (0..).zip(pages.as_chunks::<{ PAGE as usize }>().0) {
                 if is_control(c) && le64(c, 0xb8) == start && le64(c, 0xc0) == end {
                     copies.push((end + i, c.to_vec()));
@@ -1004,7 +1007,7 @@ fn read_log<D: ReadAt + ?Sized>(
         ));
     };
     let (epoch, start, end) = (le64(&control, 0x20), le64(&control, 0xb8), le64(&control, 0xc0));
-    if start >= end || (end - start) > 1 << 22 || end.saturating_mul(PAGE) > volume_size {
+    if start >= end || (end - start) > 1 << 22 || end.checked_mul(PAGE).is_none_or(|e| e > volume_size) {
         return Err(format_err!("log of pages {start:#x}..{end:#x}"));
     }
     let found = |newest: Option<(Lsn, u64)>| LogState {

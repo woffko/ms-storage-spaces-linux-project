@@ -413,9 +413,16 @@ volume in a space attached with `--degraded` or `--force` mounts only with
 * `fs.ntfs`: the NTFS boot sector and its copy in the partition's last
   sector agree.
 * `fs.refs.boot`, `fs.refs.superblock`, `fs.refs.checkpoint`,
-  `fs.refs.log`: the ReFS boot sector, the superblock and its two copies,
-  both checkpoints, and that the log holds nothing newer than the
-  checkpoint (ReFS 1.x and 3.1 keep logs `refs` does not read).
+  `fs.refs.log`: the ReFS boot sector (the volume fits its partition), the
+  superblock and its two copies, both checkpoints, and that the log holds
+  nothing newer than the checkpoint (ReFS 1.x and 3.1 keep logs `refs`
+  does not read).
+* `space.checks`: only when the checks of a space did not finish. A panic
+  in them (a defect of this program that the metadata reaches) fails the
+  space; checks that take longer than 40 s make it suspect
+  (`SPACES_CHECK_TIMEOUT=SECONDS` sets the limit, 0 none; `--deep` has
+  none). Either way the other pools and spaces are checked and attached
+  as usual.
 * With `spaces check --deep`: every listed parity stripe, `deep.scrub`
   (every copy compared, as `spaces pool scrub` does) and `deep.refs`
   (ReFS volumes checked whole, as `refs check` does).

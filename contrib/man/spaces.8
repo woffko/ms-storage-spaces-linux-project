@@ -201,7 +201,7 @@ does before it reads them, and prints a report per space: every check
 (pool.quorum, pool.members, pool.database, pool.clean, space.state,
 space.layout, space.cache, space.journal, space.drl, space.partitions,
 fs.ntfs, fs.refs.boot, fs.refs.superblock, fs.refs.checkpoint,
-fs.refs.log) with its status (ok, info, warning, skipped, degraded,
+fs.refs.log; space.checks when the checks did not finish) with its status (ok, info, warning, skipped, degraded,
 suspect, failed), its evidence (where: device and byte offset, LBA, and
 for a byte of the space the slab, disk and physical offset that hold it;
 what was expected and what was found, bytes in hex), where the truth
@@ -345,6 +345,19 @@ chunks whose mirrored copies disagree fail with an I/O error;
 returns the data as it is on disk (the highest mirror copy, the newest
 cache and journal entries). Attaching the pool to Windows once repairs its
 parity stripes.
+.SH ENVIRONMENT
+.TP
+.B SPACES_CHECK_TIMEOUT
+Seconds the checks of one space, and the opening of one pool, may take in
+.BR attach ,
+.B check
+and
+.B info
+(40 by default, 0 for no limit;
+.B check \-\-deep
+has none). Checks that take longer make the space suspect (space.checks);
+checks that stop on an internal error fail it. Either way the other pools
+and spaces are checked and attached as usual.
 .SH BACKENDS
 .TP
 .B dm

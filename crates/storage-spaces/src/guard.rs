@@ -493,7 +493,11 @@ fn space_checks<D: ReadAt>(
     checks.push(journal_check(&reader, names, options));
     checks.push(drl_check(&reader));
     let sector = u64::from(pool.logical_sector_size);
-    let at = |lba: u64| format!("LBA {lba} ({})", reader.describe(lba * sector, names));
+    // A partition table can name any LBA: those beyond the space are said so.
+    let at = |lba: u64| match lba.checked_mul(sector).filter(|&o| o < reader.size()) {
+        Some(o) => format!("LBA {lba} ({})", reader.describe(o, names)),
+        None => format!("LBA {lba} (beyond the end of the space)"),
+    };
     let (check, partitions) = partition_check(&reader, reader.size(), sector, &at);
     checks.push(check);
     let whole = Partition {
@@ -773,7 +777,9 @@ fn partition_check(
     const ID: &str = "space.partitions";
     let lbas = size / sector;
     let read = |lba: u64, len: usize| -> Result<Vec<u8>, String> {
-        let offset = lba.checked_mul(sector).filter(|o| o + len as u64 <= size);
+        let offset = lba
+            .checked_mul(sector)
+            .filter(|o| o.checked_add(len as u64).is_some_and(|end| end <= size));
         let offset = offset.ok_or_else(|| format!("LBA {lba} lies beyond the end of the space"))?;
         read_vec(dev, offset, len).map_err(|e| format!("LBA {lba}: {e}"))
     };
@@ -841,7 +847,7 @@ fn partition_check(
         for e in problems {
             check = check.evidence(e);
         }
-        let good = parts.into_iter().filter(|p| p.offset + p.length <= size).collect();
+        let good = parts.into_iter().filter(|p| inside(p, size)).collect();
         return (check, Some(good));
     };
 
@@ -1034,13 +1040,6 @@ fn partition_check(
                 .iter()
                 .map(|&c| u16::from_le_bytes(c))
                 .collect();
-            parts.push(Partition {
-                number: i as u32 + 1,
-                offset: first.saturating_mul(sector),
-                length: end.saturating_sub(first).saturating_add(1).saturating_mul(sector),
-                kind: crate::Guid::from_mixed_endian(e[0..16].try_into().unwrap()).to_string(),
-                name: String::from_utf16_lossy(&name).trim_end_matches('\0').to_string(),
-            });
             if end < first {
                 problems.push(
                     Evidence::new(format!("partition {}", i + 1))
@@ -1048,6 +1047,31 @@ fn partition_check(
                         .expected("its first LBA not after its last")
                         .found(format!("{first}..{end}")),
                 );
+                continue;
+            }
+            // A partition whose bytes cannot be counted lies beyond any
+            // space: reported, and not read.
+            let bytes = first
+                .checked_mul(sector)
+                .zip((end - first).checked_add(1).and_then(|n| n.checked_mul(sector)));
+            match bytes.filter(|&(offset, length)| offset.checked_add(length).is_some()) {
+                Some((offset, length)) => parts.push(Partition {
+                    number: i as u32 + 1,
+                    offset,
+                    length,
+                    kind: crate::Guid::from_mixed_endian(e[0..16].try_into().unwrap()).to_string(),
+                    name: String::from_utf16_lossy(&name).trim_end_matches('\0').to_string(),
+                }),
+                None => problems.push(
+                    Evidence::new(format!("partition {}", i + 1))
+                        .at(at(primary.entries_lba))
+                        .expected(format!(
+                            "inside LBAs {}..={}",
+                            primary.first_usable,
+                            primary.last_usable.min(last)
+                        ))
+                        .found(format!("LBAs {first}..={end}")),
+                ),
             }
         }
         problems.extend(bounds_problems(
@@ -1082,10 +1106,7 @@ fn partition_check(
         for e in problems.into_iter().chain(warnings) {
             check = check.evidence(e);
         }
-        let good = parts
-            .into_iter()
-            .filter(|p| p.length > 0 && p.offset + p.length <= size)
-            .collect();
+        let good = parts.into_iter().filter(|p| p.length > 0 && inside(p, size)).collect();
         return (check, Some(good));
     }
     let summary = format!(
@@ -1107,6 +1128,11 @@ fn partition_check(
     (check, Some(parts))
 }
 
+/// Whether partition `p` lies inside the first `size` bytes.
+fn inside(p: &Partition, size: u64) -> bool {
+    p.offset.checked_add(p.length).is_some_and(|end| end <= size)
+}
+
 /// Partitions outside `first..=last` (LBAs) or overlapping each other.
 fn bounds_problems(
     parts: &[Partition],
@@ -1116,7 +1142,9 @@ fn bounds_problems(
     at: &dyn Fn(u64) -> String,
 ) -> Vec<Evidence> {
     let mut out = Vec::new();
-    let lba = |p: &Partition| (p.offset / sector, (p.offset + p.length) / sector);
+    // The LBA after a partition: past any space when it cannot be counted.
+    let after = |p: &Partition| p.offset.checked_add(p.length).map_or(u64::MAX, |end| end / sector);
+    let lba = |p: &Partition| (p.offset / sector, after(p));
     for p in parts {
         let (start, end) = lba(p);
         if p.length == 0 || start < first || end.saturating_sub(1) > last {
@@ -1131,7 +1159,7 @@ fn bounds_problems(
     let mut sorted: Vec<&Partition> = parts.iter().filter(|p| p.length > 0).collect();
     sorted.sort_by_key(|p| p.offset);
     for w in sorted.windows(2) {
-        if w[0].offset + w[0].length > w[1].offset {
+        if w[0].offset.checked_add(w[0].length).is_none_or(|end| end > w[1].offset) {
             out.push(
                 Evidence::new(format!("partitions {} and {}", w[0].number, w[1].number))
                     .at(at(w[1].offset / sector))
@@ -1139,7 +1167,7 @@ fn bounds_problems(
                     .found(format!(
                         "partition {} ends at LBA {}, partition {} starts at LBA {}",
                         w[0].number,
-                        (w[0].offset + w[0].length) / sector - 1,
+                        after(w[0]).saturating_sub(1),
                         w[1].number,
                         w[1].offset / sector
                     )),
@@ -1182,8 +1210,11 @@ pub fn ntfs_check<R: ReadAt + ?Sized>(
                 .expected(format!("at most the partition's {length} bytes"))
                 .found(format!("{total} sectors of {bps} bytes")),
         );
-    } else {
-        let copy_at = offset + length - bps;
+    } else if let Some(copy_at) = offset
+        .checked_add(length)
+        .and_then(|end| end.checked_sub(bps))
+        .filter(|&c| c >= offset)
+    {
         match read_vec(dev, copy_at, 512) {
             Ok(copy) if copy == boot => {}
             Ok(copy) => {
@@ -1205,6 +1236,14 @@ pub fn ntfs_check<R: ReadAt + ?Sized>(
                     .found(e.to_string()),
             ),
         }
+    } else {
+        // No last sector to keep the copy in.
+        problems.push(
+            Evidence::new("the size of the partition")
+                .at(locate(offset))
+                .expected(format!("at least one sector of the volume ({bps} bytes)"))
+                .found(format!("{length} bytes")),
+        );
     }
     if problems.is_empty() {
         return Some(
@@ -1543,18 +1582,20 @@ mod tests {
         assert_eq!(r.verdict(), Verdict::Healthy);
     }
 
-    /// A disk of `lbas` sectors of 512 bytes with a protective MBR and both
-    /// copies of a GPT holding `parts` (first and last LBA).
-    fn gpt_disk(lbas: u64, parts: &[(u64, u64)]) -> MemDevice {
-        let mut d = vec![0u8; lbas as usize * 512];
-        d[446 + 4] = 0xee;
-        d[446 + 8..446 + 12].copy_from_slice(&1u32.to_le_bytes());
-        d[446 + 12..446 + 16].copy_from_slice(&((lbas - 1) as u32).to_le_bytes());
-        d[510] = 0x55;
-        d[511] = 0xaa;
-        let mut entries = vec![0u8; 128 * 128];
+    /// The sectors of a protective MBR and both copies of a GPT holding
+    /// `parts` (first and last LBA) on a disk of `lbas` sectors of 512
+    /// bytes, as (byte offset, bytes), the headers naming their entry
+    /// arrays at `entries` (primary, backup) as given.
+    fn gpt_sectors(lbas: u64, parts: &[(u64, u64)], entries: (u64, u64)) -> Vec<(u64, Vec<u8>)> {
+        let mut mbr = vec![0u8; 512];
+        mbr[446 + 4] = 0xee;
+        mbr[446 + 8..446 + 12].copy_from_slice(&1u32.to_le_bytes());
+        mbr[446 + 12..446 + 16].copy_from_slice(&((lbas - 1).min(u32::MAX as u64) as u32).to_le_bytes());
+        mbr[510] = 0x55;
+        mbr[511] = 0xaa;
+        let mut table = vec![0u8; 128 * 128];
         for (i, &(first, last)) in parts.iter().enumerate() {
-            let e = &mut entries[i * 128..(i + 1) * 128];
+            let e = &mut table[i * 128..(i + 1) * 128];
             // Basic data partition (mixed-endian ebd0a0a2-b9e5-4433-87c0-68b6b72699c7).
             e[0..16].copy_from_slice(&[
                 0xa2, 0xa0, 0xd0, 0xeb, 0xe5, 0xb9, 0x33, 0x44, 0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7,
@@ -1563,7 +1604,7 @@ mod tests {
             e[32..40].copy_from_slice(&first.to_le_bytes());
             e[40..48].copy_from_slice(&last.to_le_bytes());
         }
-        let entries_crc = crc32(&entries);
+        let entries_crc = crc32(&table);
         let header = |my: u64, alternate: u64, entries_lba: u64| {
             let mut h = vec![0u8; 92];
             h[0..8].copy_from_slice(b"EFI PART");
@@ -1582,13 +1623,22 @@ mod tests {
             h[16..20].copy_from_slice(&crc.to_le_bytes());
             h
         };
-        let put = |d: &mut Vec<u8>, lba: u64, bytes: &[u8]| {
-            d[lba as usize * 512..lba as usize * 512 + bytes.len()].copy_from_slice(bytes);
-        };
-        put(&mut d, 1, &header(1, lbas - 1, 2));
-        put(&mut d, 2, &entries);
-        put(&mut d, lbas - 33, &entries);
-        put(&mut d, lbas - 1, &header(lbas - 1, 1, lbas - 33));
+        vec![
+            (0, mbr),
+            (512, header(1, lbas - 1, entries.0)),
+            (2 * 512, table.clone()),
+            ((lbas - 33) * 512, table),
+            ((lbas - 1) * 512, header(lbas - 1, 1, entries.1)),
+        ]
+    }
+
+    /// A disk of `lbas` sectors of 512 bytes with a protective MBR and both
+    /// copies of a GPT holding `parts` (first and last LBA).
+    fn gpt_disk(lbas: u64, parts: &[(u64, u64)]) -> MemDevice {
+        let mut d = vec![0u8; lbas as usize * 512];
+        for (at, bytes) in gpt_sectors(lbas, parts, (2, lbas - 33)) {
+            d[at as usize..at as usize + bytes.len()].copy_from_slice(&bytes);
+        }
         MemDevice(d)
     }
 
@@ -1719,6 +1769,88 @@ mod tests {
         d.0[446 + 16 + 8..446 + 16 + 12].copy_from_slice(&3000u32.to_le_bytes());
         let (check, _) = table(&d);
         assert_eq!(check.status, Status::Suspect, "{check:?}");
+    }
+
+    /// Partition entries may hold any number: one of 0xff bytes, one far
+    /// beyond the space, one that ends at the largest LBA. Each is a
+    /// problem the check reports, none one it computes with.
+    #[test]
+    fn partition_entries_of_any_numbers_are_reported() {
+        for (first, last) in [
+            (u64::MAX, u64::MAX),
+            (1 << 60, (1 << 60) + 10),
+            (u64::MAX - 15, u64::MAX),
+            (1, u64::MAX),
+        ] {
+            let (check, parts) = table(&gpt_disk(LBAS, &[(34, 2047), (first, last)]));
+            assert_eq!(check.status, Status::Suspect, "{first:#x}: {check:?}");
+            assert!(
+                check.evidence.iter().any(|e| e.what == "partition 2"),
+                "{first:#x}: {check:?}"
+            );
+            // The other partition is still checked.
+            assert!(parts.unwrap().iter().any(|p| p.number == 1));
+        }
+    }
+
+    /// A report on the first user space of fixture `rel` after `sectors`
+    /// (byte offset, bytes) were written into it, with NTFS checked.
+    fn report_after(rel: &str, sectors: &[(u64, Vec<u8>)]) -> Report {
+        use crate::io::Overlay;
+        let disks: Vec<Overlay<SparseImage>> = images(rel).into_iter().map(Overlay::new).collect();
+        let pool = Pool::open(disks).unwrap();
+        let id = pool.user_spaces().next().unwrap().id();
+        let writer = pool.open_space_rw(id).unwrap();
+        for (at, bytes) in sectors {
+            writer.write_all_at(bytes, *at).unwrap();
+        }
+        writer.flush().unwrap();
+        drop(writer);
+        space_report(&pool, &pool.spaces[&id], &names(8), &Options::default(), &mut ntfs_hook)
+    }
+
+    /// Partition tables that name LBAs beyond any space, and an NTFS boot
+    /// sector in a partition smaller than its sector: suspect, with where
+    /// (what panicked in 1.2.1: the address of the evidence overflowed).
+    #[test]
+    fn partition_tables_beyond_any_space_are_suspect() {
+        let disks = images("fixtures/mirror3");
+        let pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+        let lbas = pool.open_space(pool.user_spaces().next().unwrap().id()).unwrap().size() / 512;
+        drop(pool);
+        let part = [(2048, lbas - 34)];
+        for entries in [(1 << 56, lbas - 33), (1 << 63, lbas - 33), (2, 1 << 63), (2, u64::MAX)] {
+            let r = report_after("fixtures/mirror3", &gpt_sectors(lbas, &part, entries));
+            let c = check(&r, "space.partitions");
+            assert_eq!(c.status, Status::Suspect, "{entries:x?}\n{}", r.to_text());
+            assert!(
+                c.evidence.iter().any(|e| e
+                    .location
+                    .as_deref()
+                    .is_some_and(|l| l.contains("beyond the end of the space"))),
+                "{entries:x?}\n{}",
+                r.to_text()
+            );
+        }
+        // An MBR whose partition 1 is LBA 0 alone, in a sector that also
+        // holds an NTFS boot sector of 4096-byte sectors.
+        let mut mbr = vec![0u8; 512];
+        mbr[0..3].copy_from_slice(&[0xeb, 0x52, 0x90]);
+        mbr[3..11].copy_from_slice(b"NTFS    ");
+        mbr[0x0b..0x0d].copy_from_slice(&4096u16.to_le_bytes());
+        mbr[446 + 4] = 0x07;
+        mbr[446 + 12..446 + 16].copy_from_slice(&1u32.to_le_bytes());
+        mbr[510] = 0x55;
+        mbr[511] = 0xaa;
+        let r = report_after("fixtures/mirror3", &[(0, mbr)]);
+        assert_eq!(check(&r, "space.partitions").status, Status::Suspect, "{}", r.to_text());
+        let ntfs = check(&r, "fs.ntfs");
+        assert_eq!(ntfs.status, Status::Suspect, "{}", r.to_text());
+        assert!(
+            ntfs.evidence.iter().any(|e| e.what == "the size of the partition"),
+            "{}",
+            r.to_text()
+        );
     }
 
     /// An NTFS volume filling a partition of `sectors` sectors of 512
