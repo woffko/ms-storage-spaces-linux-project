@@ -674,7 +674,14 @@ rows of thin spaces not allocated yet (M7).
   mutants on 20 pools took 3.0 to 6.7 s of the library's time under the load
   of the run (40 processes, later 12, reading a corpus of 222 GB through a
   page cache of 181 GB, so that reads waited on the disk), and alone at most
-  0.19 s each.
+  0.19 s each. The 31 runs that had them ran again at 12 processes in the idle
+  I/O class (12:38 to 14:42, their 20 pools of 87 GB held in the page cache):
+  930,000 mutants, no panic, no wrong data, no skipped check of a listed
+  structure, no pool without a disk healthy (208 cases), and one mutant over 3
+  s (`parity5_26100` #13381, 3.85 s, not one of the five of that pool before;
+  0.08 to 0.10 s alone, three times); that run alone once more (14:43 to
+  15:27): none. Every run of the corpus at 30,000 mutants has had a pass
+  without a slow case, and no mutant was slow twice.
 
 ### Track B (from 2026-10-02)
 

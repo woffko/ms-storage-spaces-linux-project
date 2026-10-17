@@ -35,7 +35,8 @@
   database has three or more copies; no skipped check of a structure the
   database lists; no pool without a disk healthy. 67 mutants took over 3 s
   under the load of the run (reads waiting on the disk), and alone at most
-  0.19 s (docs/security.md says what ran).
+  0.19 s; the runs that had them, again with less load beside them, one
+  other, 0.1 s alone; none was slow twice (docs/security.md says what ran).
 
 ## 1.2.2 (2026-10-17)
 
