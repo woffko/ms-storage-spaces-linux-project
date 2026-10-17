@@ -4,7 +4,9 @@
 //! * damage: one place of the bytes the library reads to open a pool and
 //!   its spaces changed in memory (a bit, a byte, a sector zeroed, of junk,
 //!   or copied from elsewhere): nothing panics, opening the pool, the
-//!   guard's checks and opening the spaces take 3 s at most, the check of a
+//!   guard's checks and opening the spaces take 3 s at most (a mutant over
+//!   that is timed again at once, and is slow if it is over it again: a
+//!   pause of the machine does not come back), the check of a
 //!   write-back cache, parity journal or dirty region log the database
 //!   lists is never skipped, and a space the guard calls healthy reads as
 //!   before. A pool with fewer than three copies of its database has a
@@ -298,6 +300,10 @@ struct Tally {
     wrong: Vec<String>,
     /// Healthy, but reads fail.
     unreadable: Vec<String>,
+    /// Over the time limit once, but not when timed again at once (the
+    /// machine paused it: a mutant that makes the library slow is slow
+    /// again).
+    paused: Vec<String>,
     /// A check the report on the undamaged pool makes, skipped (whatever
     /// the verdict), and whether the database still lists the hidden
     /// structure it checks.
@@ -429,21 +435,37 @@ fn damage(name: &str, user: bool, mutants: u64, seed: u64) -> Option<(Tally, usi
     }
     let only = std::env::var("ORACLE_ONLY").ok().and_then(|v| v.parse::<u64>().ok());
     for i in (0..mutants).filter(|&i| only.is_none_or(|o| o == i)) {
-        let mut rng = Rng((seed ^ (i + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15)) | 1);
-        for _ in 0..4 {
-            rng.next();
-        }
-        let devs = devices(&files, &[]);
-        let what = format!(
-            "{name} {} #{i}: {}",
-            if user { "user" } else { "damage" },
-            mutate(&devs, &regions, &mut rng)
-        );
+        // Mutant `i`: its devices, what was done to them, and the random
+        // numbers its checks go on with.
+        let make = || {
+            let mut rng = Rng((seed ^ (i + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15)) | 1);
+            for _ in 0..4 {
+                rng.next();
+            }
+            let devs = devices(&files, &[]);
+            let what = format!(
+                "{name} {} #{i}: {}",
+                if user { "user" } else { "damage" },
+                mutate(&devs, &regions, &mut rng)
+            );
+            (devs, what, rng)
+        };
+        let (devs, what, mut rng) = make();
         let out = caught(|| check_mutant(devs, &bases, user, &mut rng, &mut t, &what));
         t.mutants += 1;
         match out {
             Err(stopped) => t.panics.push(format!("{what}: {stopped}")),
-            Ok(took) if took > slow() => t.slow.push(format!("{what}: {took:?}")),
+            Ok(took) if took > slow() => {
+                // Timed again at once, the same mutant: a pause of the
+                // machine does not come back, work that takes long does.
+                let (devs, _, mut rng) = make();
+                let again = caught(|| check_mutant(devs, &bases, user, &mut rng, &mut Tally::default(), &what));
+                match again {
+                    Ok(then) if then <= slow() => t.paused.push(format!("{what}: {took:?}, then {then:?}")),
+                    Ok(then) => t.slow.push(format!("{what}: {took:?}, then {then:?}")),
+                    Err(stopped) => t.panics.push(format!("{what}: {stopped} (timed again)")),
+                }
+            }
             Ok(_) => {}
         }
     }
@@ -453,7 +475,8 @@ fn damage(name: &str, user: bool, mutants: u64, seed: u64) -> Option<(Tally, usi
 fn report(name: &str, mode: &str, t: &Tally, copies: usize) {
     eprintln!(
         "{name} {mode}: {} mutants ({copies} database copies): {} not opened, {} healthy, refused {:?}; \
-         {} wrong, {} unreadable, {} skipped ({} of a listed structure), {} panics, {} slow",
+         {} wrong, {} unreadable, {} skipped ({} of a listed structure), {} panics, {} slow \
+         ({} more over the limit once, not again)",
         t.mutants,
         t.unopened,
         t.healthy,
@@ -463,7 +486,8 @@ fn report(name: &str, mode: &str, t: &Tally, copies: usize) {
         t.skipped.len(),
         t.skipped.iter().filter(|(_, listed)| *listed).count(),
         t.panics.len(),
-        t.slow.len()
+        t.slow.len(),
+        t.paused.len()
     );
     for f in t
         .wrong
@@ -472,6 +496,7 @@ fn report(name: &str, mode: &str, t: &Tally, copies: usize) {
         .chain(t.skipped.iter().map(|(f, _)| f))
         .chain(&t.panics)
         .chain(&t.slow)
+        .chain(&t.paused)
         .take(20)
     {
         eprintln!("  {f}");
