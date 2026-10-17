@@ -620,6 +620,37 @@ rows of thin spaces not allocated yet (M7).
   names) read near the checkpoint, as a record's page follows from its
   LSN; `spaces detach` refusing spaces in use; upgrades attaching spaces
   anew (`detach --outdated`); no start limit for the attach unit.
+* Release `v1.2.2` (2026-10-17): fixes from the code audit of 2026-10-16: the
+  checks of attach isolated per pool and space (panics fail a space, 40 s make
+  it suspect), arithmetic, plausible values, work and memory bounded; hidden
+  structures read from every copy of their header; database copies compared by
+  meaning; names escaped; the ReFS reader's trees and tables bounded, refs
+  mount isolating each request; the writer's stream sets kept apart; three
+  data-loss fixes of `refs mount --rw`; commands that match nothing fail; the
+  docs corrected. Tests failing on 1.2.1 for each, the audit's oracles in
+  `crates/refs/tests/oracle.rs`, fuzz targets `guard_userdata` and
+  `policy_fields`. Fuzzing: every target 4 h at nice 19, one worker each with
+  at most 2 GiB (`tools/fuzz-long.sh 14400`, 2026-10-17 03:27 to 07:27, on
+  4628722, from the corpus of the earlier runs): `parity_journal` 419,275
+  runs, `cache_index` 1,417,301, `refs_parsers` 89,079,402, `pool_open`
+  242,928, `partitions` 79,072,982, `policy_fields` 484,209, `dirty_regions`
+  114,095,156, `database` 151,309,380, `manage` 737,415, `guard_userdata`
+  224,711, `create` 132,413, `record_decode` 176,909,271, `refs_write`
+  205,048, `records` 573,687,668, `refs_volume` 328,669, `pool_write` 163,519;
+  nothing found. Oracles: those of `crates/refs/tests/oracle.rs` over all 81
+  corpus pools, 30,000 mutants per pool and mode (4.86 million) and 669
+  missing-disk cases, on 4628722: no panic; no wrong data under a healthy
+  verdict on a pool with three or more database copies, and 2,311 such cases
+  on 7 pools whose damaged metadata has no second copy (the database of
+  single-disk pools; the write-back cache of `thin2c`, which a simple space
+  keeps once); no pool without a disk healthy or reading otherwise; 30 mutants
+  on 18 pools took over 3 s by the timing of the campaign, which counted the
+  oracle's own comparison of the reads: alone, timed as since bb63566, the
+  library took at most 0.32 s for each. The hidden-header oracle runs in the
+  tests over every pool
+  (`zeroed_headers_of_hidden_structures_never_make_them_vanish`). VM checks on
+  Ubuntu 26.10 and 22.04, boot check twice on 26.10. The 24 h run of every
+  target was not repeated.
 
 ### Track B (from 2026-10-02)
 

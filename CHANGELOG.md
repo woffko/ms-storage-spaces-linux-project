@@ -1,13 +1,18 @@
 # Changelog
 
-## 1.2.2 (unreleased)
+## 1.2.2 (2026-10-17)
 
 Fixes from a code audit of 1.2.1 (2026-10-16): checks that a hostile or
 damaged disk could make panic, loop or exhaust memory as root at attach
 time, verdicts that called damaged spaces healthy, names that reached
 terminals raw, ways `refs` lost data, and documentation that said more
-than the code does. The 24-hour fuzz run of every target was not repeated
-for this hotfix (docs/security.md says what ran).
+than the code does. Checked on Ubuntu 26.10 and 22.04
+(`tools/guard-check.sh`, now with a hostile space beside a healthy pool;
+`tools/mount-vm-check.sh`; `tools/package-vm-check.sh`, with an upgrade
+from 1.2.1 and a space of 200 partitions), and across two restarts on
+26.10 (`tools/boot-vm-check.sh`). The 24-hour fuzz run of every target was
+not repeated for this hotfix: every target ran 4 hours (docs/security.md
+says what ran).
 
 ### Fixes
 
