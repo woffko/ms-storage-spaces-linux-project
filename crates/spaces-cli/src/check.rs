@@ -31,10 +31,12 @@ const _: fn() = || {
 /// ones take a second or two; a hostile disk can make them loop, and
 /// `spaces attach` checks every pool in one process.
 pub fn deadline() -> Option<Duration> {
-    match std::env::var("SPACES_CHECK_TIMEOUT")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-    {
+    deadline_of(std::env::var("SPACES_CHECK_TIMEOUT").ok().as_deref())
+}
+
+/// The [`deadline`] a value of SPACES_CHECK_TIMEOUT sets.
+fn deadline_of(value: Option<&str>) -> Option<Duration> {
+    match value.and_then(|v| v.trim().parse::<u64>().ok()) {
         Some(0) => None,
         Some(s) => Some(Duration::from_secs(s)),
         None => Some(Duration::from_secs(40)),
@@ -536,6 +538,59 @@ mod tests {
         let mut files = bundle::Files::new();
         bundle_files(&pool, &reports, &mut files);
         assert!(files.iter().any(|(path, _)| path.contains("/extents/")));
+    }
+
+    /// 40 s unless SPACES_CHECK_TIMEOUT says otherwise; 0 is no limit.
+    #[test]
+    fn the_checks_take_40_s_unless_the_variable_says_otherwise() {
+        assert_eq!(deadline_of(None), Some(Duration::from_secs(40)));
+        assert_eq!(deadline_of(Some("5")), Some(Duration::from_secs(5)));
+        assert_eq!(deadline_of(Some(" 120\n")), Some(Duration::from_secs(120)));
+        assert_eq!(deadline_of(Some("0")), None);
+        assert_eq!(deadline_of(Some("soon")), Some(Duration::from_secs(40)));
+    }
+
+    /// A device that panics on every read once `armed`.
+    struct Trap {
+        disk: storage_spaces::io::SparseImage,
+        armed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl ReadAt for Trap {
+        fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+            assert!(!self.armed.load(std::sync::atomic::Ordering::Relaxed), "a defect");
+            self.disk.read_exact_at(buf, offset)
+        }
+
+        fn size(&self) -> std::io::Result<u64> {
+            self.disk.size()
+        }
+    }
+
+    /// The gate of export and the servers (`require`): checks that panic
+    /// refuse the space with a failed `space.checks`, whatever the flags.
+    #[test]
+    fn checks_that_panic_refuse_the_space_to_the_servers_and_export() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../storage-spaces/tests/fixtures/mirror3");
+        let armed = Arc::new(AtomicBool::new(false));
+        let disks: Vec<Trap> = (0..)
+            .map_while(|i| File::open(dir.join(format!("disk{i}.fixture"))).ok())
+            .map(|f| Trap {
+                disk: storage_spaces::io::SparseImage::read_from(f).unwrap(),
+                armed: Arc::clone(&armed),
+            })
+            .collect();
+        let pool = Pool::open(disks).unwrap();
+        let space = pool.user_spaces().next().unwrap();
+        require(&pool, &[], space, false, false, false).unwrap();
+        armed.store(true, Ordering::Relaxed);
+        for (degraded, force) in [(false, false), (true, true)] {
+            let e = require(&pool, &[], space, false, degraded, force)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("FAILED") && e.contains("space.checks"), "{e}");
+        }
     }
 
     #[test]

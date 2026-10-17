@@ -183,3 +183,33 @@ pub fn require_healthy(report: &Report) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A device whose every read panics.
+    struct Defect;
+
+    impl ReadAt for Defect {
+        fn read_exact_at(&self, _: &mut [u8], _: u64) -> std::io::Result<()> {
+            panic!("a defect")
+        }
+
+        fn size(&self) -> std::io::Result<u64> {
+            Ok(1 << 30)
+        }
+    }
+
+    /// What `refs mount` (and every command) asks of a volume: checks that
+    /// panic fail it, which mounts nothing and writes nothing, instead of
+    /// ending the program.
+    #[test]
+    fn checks_that_panic_fail_the_volume() {
+        let r = volume_report(&Defect, 0, Path::new("/nonexistent/volume"));
+        assert_eq!(r.verdict(), Verdict::Failed, "{}", r.to_text());
+        let c = r.checks.iter().find(|c| c.id == "fs.refs.checks").unwrap();
+        assert!(c.evidence[0].found.as_deref().unwrap().contains("a defect"), "{c:?}");
+        assert!(require_healthy(&r).is_err());
+    }
+}
