@@ -4,22 +4,26 @@
 //! * damage: one place of the bytes the library reads to open a pool and
 //!   its spaces changed in memory (a bit, a byte, a sector zeroed, of junk,
 //!   or copied from elsewhere): nothing panics, opening the pool, the
-//!   guard's checks and opening the spaces take 3 s at most, and a
-//!   space the guard calls healthy reads as before. A pool with fewer than
-//!   three copies of its database has a damaged copy nothing outvotes:
-//!   there such cases are counted, not failed;
+//!   guard's checks and opening the spaces take 3 s at most, the check of a
+//!   write-back cache, parity journal or dirty region log the database
+//!   lists is never skipped, and a space the guard calls healthy reads as
+//!   before. A pool with fewer than three copies of its database has a
+//!   damaged copy nothing outvotes: there such cases are counted, not
+//!   failed. Other checks the undamaged pool makes and a mutant's report
+//!   skips are counted;
 //! * user: the same with what the guard reads of the spaces' contents
-//!   (partition tables, boot sectors, ReFS metadata): only panics and slow
-//!   cases count;
+//!   (partition tables, boot sectors, ReFS metadata): panics, slow cases
+//!   and skipped checks of listed structures count;
 //! * missing disks: each disk away, and each pair of a pool of at most 8
 //!   disks: no space healthy, and a space the guard lets be read reads as
 //!   with every disk.
 //!
 //! The test run takes a few mutants of a fixed list of pools; a campaign
 //! sets ORACLE_MUTANTS (per pool and mode), ORACLE_POOLS ("all" or names,
-//! comma-separated), ORACLE_SEED and ORACLE_SAMPLES (reads per space and
-//! case of the missing-disk oracle). Ported from the oracle of the code
-//! audit of 2026-10-16.
+//! comma-separated), ORACLE_MODES ("damage" or "user"; both without it),
+//! ORACLE_SEED, ORACLE_ONLY (the number of one mutant, to replay it alone)
+//! and ORACLE_SAMPLES (reads per space and case of the missing-disk
+//! oracle). Ported from the oracle of the code audit of 2026-10-16.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -27,11 +31,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use storage_spaces::format::SpaceRole;
 use storage_spaces::gpt::Partition;
 use storage_spaces::guard::{self, Options};
 use storage_spaces::io::{Overlay, ReadAt, Recording, WriteAt};
 use storage_spaces::isolate::caught;
-use storage_spaces::report::{Check, Verdict};
+use storage_spaces::report::{Check, Report, Status, Verdict};
 use storage_spaces::{Pool, SpaceReader};
 
 type Dev = Overlay<Arc<File>>;
@@ -113,6 +118,47 @@ fn pools() -> Vec<String> {
         Some(list) => list.split(',').map(str::to_owned).collect(),
         None => POOLS.iter().map(|&p| p.to_owned()).collect(),
     }
+}
+
+/// The modes to run (`user` false: damage): ORACLE_MODES, else both.
+fn modes() -> Vec<bool> {
+    match std::env::var("ORACLE_MODES").ok().as_deref() {
+        Some("damage") => vec![false],
+        Some("user") => vec![true],
+        _ => vec![false, true],
+    }
+}
+
+/// Per check id of a report: how many checks it holds of it, and how many
+/// of those are skipped for want of what they check (not those skipped
+/// because another check failed).
+fn skips(r: &Report) -> BTreeMap<String, (usize, usize)> {
+    let mut out = BTreeMap::new();
+    for c in &r.checks {
+        let e: &mut (usize, usize) = out.entry(c.id.clone()).or_default();
+        e.0 += 1;
+        if c.status == Status::Skipped && !c.summary.starts_with("not checked:") {
+            e.1 += 1;
+        }
+    }
+    out
+}
+
+/// Whether the database of `pool` lists the hidden structure that check
+/// `id` of space `space` is about (a container of its role with a space
+/// that has extents); `None` for the other checks.
+fn listed<D: ReadAt>(pool: &Pool<D>, space: u64, id: &str) -> Option<bool> {
+    let role = match id {
+        "space.cache" => SpaceRole::Cache,
+        "space.journal" => SpaceRole::Other(0x0a),
+        "space.drl" => SpaceRole::Other(0x06),
+        _ => return None,
+    };
+    Some(
+        pool.children(space)
+            .filter(|c| c.info.role == role)
+            .any(|c| pool.children(c.id()).any(|s| !s.extents.is_empty())),
+    )
 }
 
 fn devices(files: &[Arc<File>], skip: &[usize]) -> Vec<Dev> {
@@ -237,6 +283,8 @@ struct Base<'p> {
     reader: SpaceReader<'p, Dev>,
     /// Where each grid point is read from.
     places: Vec<String>,
+    /// What the guard's report on it skips ([`skips`]).
+    skips: BTreeMap<String, (usize, usize)>,
 }
 
 /// What became of the mutants of one pool and mode.
@@ -250,6 +298,10 @@ struct Tally {
     wrong: Vec<String>,
     /// Healthy, but reads fail.
     unreadable: Vec<String>,
+    /// A check the report on the undamaged pool makes, skipped (whatever
+    /// the verdict), and whether the database still lists the hidden
+    /// structure it checks.
+    skipped: Vec<(String, bool)>,
     panics: Vec<String>,
     slow: Vec<String>,
 }
@@ -274,6 +326,15 @@ fn check_mutant(devs: Vec<Dev>, bases: &[Base<'_>], user: bool, rng: &mut Rng, t
         let started = Instant::now();
         let report = guard::space_report(&pool, space, &[], &options(), &mut hook);
         spent += started.elapsed();
+        let now = skips(&report);
+        for (id, &(n, s)) in &b.skips {
+            if n > s && now.get(id).is_some_and(|&(_, m)| m > s) {
+                t.skipped.push((
+                    format!("{what}: space {} {id} skipped ({})", b.id, report.verdict().as_str()),
+                    listed(&pool, b.id, id) == Some(true),
+                ));
+            }
+        }
         if report.verdict() != Verdict::Healthy {
             let id = report.problems().first().map_or("?".into(), |c| c.id.to_string());
             *t.refused.entry(id).or_default() += 1;
@@ -341,8 +402,11 @@ fn damage(name: &str, user: bool, mutants: u64, seed: u64) -> Option<(Tally, usi
     let copies = pool.members.iter().filter(|m| m.header.database_copy).count();
     let bases: Vec<Base<'_>> = pool
         .user_spaces()
-        .filter(|s| user || guard::space_report(&pool, s, &[], &options(), &mut hook).verdict() == Verdict::Healthy)
         .filter_map(|s| {
+            let report = guard::space_report(&pool, s, &[], &options(), &mut hook);
+            if !user && report.verdict() != Verdict::Healthy {
+                return None;
+            }
             let reader = pool.open_space(s.id()).ok()?;
             let size = reader.size();
             let places = (0..size.min(GRID))
@@ -354,6 +418,7 @@ fn damage(name: &str, user: bool, mutants: u64, seed: u64) -> Option<(Tally, usi
                 size,
                 reader,
                 places,
+                skips: skips(&report),
             })
         })
         .collect();
@@ -362,7 +427,8 @@ fn damage(name: &str, user: bool, mutants: u64, seed: u64) -> Option<(Tally, usi
     if regions.is_empty() {
         return Some((t, copies));
     }
-    for i in 0..mutants {
+    let only = std::env::var("ORACLE_ONLY").ok().and_then(|v| v.parse::<u64>().ok());
+    for i in (0..mutants).filter(|&i| only.is_none_or(|o| o == i)) {
         let mut rng = Rng((seed ^ (i + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15)) | 1);
         for _ in 0..4 {
             rng.next();
@@ -387,13 +453,15 @@ fn damage(name: &str, user: bool, mutants: u64, seed: u64) -> Option<(Tally, usi
 fn report(name: &str, mode: &str, t: &Tally, copies: usize) {
     eprintln!(
         "{name} {mode}: {} mutants ({copies} database copies): {} not opened, {} healthy, refused {:?}; \
-         {} wrong, {} unreadable, {} panics, {} slow",
+         {} wrong, {} unreadable, {} skipped ({} of a listed structure), {} panics, {} slow",
         t.mutants,
         t.unopened,
         t.healthy,
         t.refused,
         t.wrong.len(),
         t.unreadable.len(),
+        t.skipped.len(),
+        t.skipped.iter().filter(|(_, listed)| *listed).count(),
         t.panics.len(),
         t.slow.len()
     );
@@ -401,6 +469,7 @@ fn report(name: &str, mode: &str, t: &Tally, copies: usize) {
         .wrong
         .iter()
         .chain(&t.unreadable)
+        .chain(t.skipped.iter().map(|(f, _)| f))
         .chain(&t.panics)
         .chain(&t.slow)
         .take(20)
@@ -415,7 +484,7 @@ fn damage_where_the_guard_calls_a_space_healthy_does_not_change_it() {
     let (mutants, seed) = (env("ORACLE_MUTANTS", 6), env("ORACLE_SEED", 1));
     let mut failures = Vec::new();
     for name in pools() {
-        for user in [false, true] {
+        for user in modes() {
             let mode = if user { "user" } else { "damage" };
             let Some((t, copies)) = damage(&name, user, mutants, seed) else {
                 continue;
@@ -427,6 +496,7 @@ fn damage_where_the_guard_calls_a_space_healthy_does_not_change_it() {
             if !user && copies >= 3 {
                 failures.extend(t.wrong.iter().cloned());
             }
+            failures.extend(t.skipped.iter().filter(|(_, listed)| *listed).map(|(f, _)| f.clone()));
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
