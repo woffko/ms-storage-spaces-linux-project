@@ -21,6 +21,9 @@
 #            panicked in the checks, and the pools checked after it stayed
 #            detached); through udev and the attach unit, which ends with
 #            the refusal and not a crash, where the package's unit runs
+#   nomatch  attach --space or --pool naming no space found fails and says
+#            so, and check --json --space prints [] and fails (1.2.1 exited
+#            0 and printed a sentence)
 # Usage: [LINUX_VM_HOST=user@address] tools/guard-check.sh DEB [CASE...]
 # Pools: testdata/pools/{wc4k,ntfstier} and testdata/refs/{r314integ,
 # r314mirror}, copied to the VM when missing (to /srv/spaces where the VM
@@ -34,7 +37,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 deb=${1:?usage: tools/guard-check.sh DEB [CASE...]}
 shift
-cases=${*:-auto force refs inherit hostile}
+cases=${*:-auto force refs inherit hostile nomatch}
 host=${LINUX_VM_HOST:-192.168.189.142}
 [[ $host == *@* ]] || host=codex@$host
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -i "$HOME/.ssh/rustadmin_vm_ed25519")
@@ -355,6 +358,26 @@ PY
     else
       result fail "hostile no panic" "$how: $(one "$out")"
     fi
+    cleanup ;;
+  nomatch)
+    newloop $pools/wc4k/disk0.img
+    out=$(sudo "$spaces" attach --space nonexistent "$LOOP" 2>&1)
+    rc=$?
+    if [[ $rc != 0 && $out == *'no space named "nonexistent" in the pools found'* && -z $(ours | grep wc4k) ]]; then
+      result ok "nomatch space" "exit $rc"
+    else
+      result fail "nomatch space" "exit $rc: $(one "$out")"
+    fi
+    out=$(sudo "$spaces" attach --pool nonexistent "$LOOP" 2>&1)
+    rc=$?
+    if [[ $rc != 0 && $out == *'of a pool named "nonexistent"'* && -z $(ours | grep wc4k) ]]; then
+      result ok "nomatch pool" "exit $rc"
+    else
+      result fail "nomatch pool" "exit $rc: $(one "$out")"
+    fi
+    out=$(sudo "$spaces" check --json --space nonexistent "$LOOP" 2>/dev/null)
+    rc=$?
+    if [[ $rc != 0 && $out == "[]" ]]; then result ok "nomatch check" "[] and exit $rc"; else result fail "nomatch check" "exit $rc: $(one "$out")"; fi
     cleanup ;;
   *) result fail "$c" "unknown case" ;;
   esac
