@@ -565,41 +565,45 @@ fn a_record_of_pages_before_the_checkpoint_is_found_nearby() {
     assert!(read < 8 << 20, "{} MiB read", read >> 20);
 }
 
-/// A log control page naming a region of 4 GiB, no record before the
-/// checkpoint's number: the search for the newest record would read the
-/// whole region. It stops at 2 GiB: the log is not read (a warning), and
-/// little is (1.2.1 read all 4 GiB; a hostile control page may name 16).
+/// A log control page naming a region of 4 GiB, and one of 16 GiB (the
+/// most a control page may name), no record before the checkpoint's
+/// number: the search for the newest record would read the whole region.
+/// It stops at 2 GiB: the log is not read (a warning), and little is
+/// (1.2.1 read all of it).
 #[test]
 fn a_log_larger_than_is_read_whole_is_not_read() {
-    let (mut image, offset) = fixture("r314small");
-    let vol = refs::Volume::open(&image, offset).unwrap();
-    let lsn = le64(&read(&image, offset + vol.checkpoint.lcn * 4096, 4096), 0x70);
-    let state = vol.log_state().unwrap();
-    let (start, _) = state.region;
-    drop(vol);
-    // A volume 8 GiB larger, so that the region fits.
-    image.size += 8 << 30;
-    let boot = read(&image, offset, 512);
-    claim(&mut image, offset, le64(&boot, 0x18) + (8 << 30) / 512);
-    let end = start + (1 << 20);
-    for lcn in 0..0x400u64 {
-        let mut page = read(&image, offset + lcn * 4096, 4096);
-        if &page[0..4] == b"MLog" && le64(&page, 0x28) == 0 {
-            page[0xc0..0xc8].copy_from_slice(&end.to_le_bytes());
-            image.insert(offset + lcn * 4096, &page);
+    for pages in [1u64 << 20, 1 << 22] {
+        let (mut image, offset) = fixture("r314small");
+        let vol = refs::Volume::open(&image, offset).unwrap();
+        let lsn = le64(&read(&image, offset + vol.checkpoint.lcn * 4096, 4096), 0x70);
+        let state = vol.log_state().unwrap();
+        let (start, _) = state.region;
+        drop(vol);
+        // A volume larger by the region and 4 GiB, so that the region fits.
+        let more = pages * 4096 + (4 << 30);
+        image.size += more;
+        let boot = read(&image, offset, 512);
+        claim(&mut image, offset, le64(&boot, 0x18) + more / 512);
+        let end = start + pages;
+        for lcn in 0..0x400u64 {
+            let mut page = read(&image, offset + lcn * 4096, 4096);
+            if &page[0..4] == b"MLog" && le64(&page, 0x28) == 0 {
+                page[0xc0..0xc8].copy_from_slice(&end.to_le_bytes());
+                image.insert(offset + lcn * 4096, &page);
+            }
         }
+        let at = (lsn & 0xffff_ffff) % (end - start);
+        for k in 1..=64 {
+            image.insert(offset + (start + at - k) * 4096, &[0u8; 4096]);
+        }
+        let counted = Counted(&image, Default::default());
+        let c = quick_checks(&counted, offset, "p2", &|o| format!("byte {o:#x}"));
+        let log = status(&c, "fs.refs.log");
+        assert_eq!(log.status, Status::Warning, "{} GiB: {c:#?}", pages >> 18);
+        assert!(log.summary.contains("more than are read whole"), "{}", log.summary);
+        let read = counted.1.into_inner();
+        assert!(read < 64 << 20, "{} GiB: {} MiB read", pages >> 18, read >> 20);
     }
-    let at = (lsn & 0xffff_ffff) % (end - start);
-    for k in 1..=64 {
-        image.insert(offset + (start + at - k) * 4096, &[0u8; 4096]);
-    }
-    let counted = Counted(&image, Default::default());
-    let c = quick_checks(&counted, offset, "p2", &|o| format!("byte {o:#x}"));
-    let log = status(&c, "fs.refs.log");
-    assert_eq!(log.status, Status::Warning, "{c:#?}");
-    assert!(log.summary.contains("more than are read whole"), "{}", log.summary);
-    let read = counted.1.into_inner();
-    assert!(read < 64 << 20, "{} MiB read", read >> 20);
 }
 
 #[test]
