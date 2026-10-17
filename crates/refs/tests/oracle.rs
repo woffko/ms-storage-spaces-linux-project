@@ -3,7 +3,8 @@
 //!
 //! * damage: one place of the bytes the library reads to open a pool and
 //!   its spaces changed in memory (a bit, a byte, a sector zeroed, of junk,
-//!   or copied from elsewhere): nothing panics or takes more than 3 s, and a
+//!   or copied from elsewhere): nothing panics, opening the pool, the
+//!   guard's checks and opening the spaces take 3 s at most, and a
 //!   space the guard calls healthy reads as before. A pool with fewer than
 //!   three copies of its database has a damaged copy nothing outvotes:
 //!   there such cases are counted, not failed;
@@ -254,18 +255,25 @@ struct Tally {
 }
 
 /// One mutant: the pool opened on damaged devices, the guard asked about
-/// each space, the healthy ones read where they read differently.
-fn check_mutant(devs: Vec<Dev>, bases: &[Base<'_>], user: bool, rng: &mut Rng, t: &mut Tally, what: &str) {
-    let Ok(pool) = Pool::open(devs) else {
+/// each space, the healthy ones read where they read differently. The time
+/// the library took (opening, the guard, opening the spaces; not the
+/// comparison, which reads a space whole where its layout reads otherwise).
+fn check_mutant(devs: Vec<Dev>, bases: &[Base<'_>], user: bool, rng: &mut Rng, t: &mut Tally, what: &str) -> Duration {
+    let started = Instant::now();
+    let opened = Pool::open(devs);
+    let mut spent = started.elapsed();
+    let Ok(pool) = opened else {
         t.unopened += 1;
-        return;
+        return spent;
     };
     for b in bases {
         let Some(space) = pool.spaces.get(&b.id) else {
             *t.refused.entry("space gone".into()).or_default() += 1;
             continue;
         };
+        let started = Instant::now();
         let report = guard::space_report(&pool, space, &[], &options(), &mut hook);
+        spent += started.elapsed();
         if report.verdict() != Verdict::Healthy {
             let id = report.problems().first().map_or("?".into(), |c| c.id.to_string());
             *t.refused.entry(id).or_default() += 1;
@@ -275,7 +283,10 @@ fn check_mutant(devs: Vec<Dev>, bases: &[Base<'_>], user: bool, rng: &mut Rng, t
         if user {
             continue;
         }
-        let reader = match pool.open_space(b.id) {
+        let started = Instant::now();
+        let opened = pool.open_space(b.id);
+        spent += started.elapsed();
+        let reader = match opened {
             Ok(r) if r.size() == b.size => r,
             Ok(r) => {
                 t.wrong.push(format!("{what}: size {} for {}", r.size(), b.size));
@@ -319,6 +330,7 @@ fn check_mutant(devs: Vec<Dev>, bases: &[Base<'_>], user: bool, rng: &mut Rng, t
             }
         }
     }
+    spent
 }
 
 /// The damage oracle on pool `name` (with `user`, of what the guard reads
@@ -361,15 +373,12 @@ fn damage(name: &str, user: bool, mutants: u64, seed: u64) -> Option<(Tally, usi
             if user { "user" } else { "damage" },
             mutate(&devs, &regions, &mut rng)
         );
-        let started = Instant::now();
         let out = caught(|| check_mutant(devs, &bases, user, &mut rng, &mut t, &what));
         t.mutants += 1;
-        if let Err(stopped) = out {
-            t.panics.push(format!("{what}: {stopped}"));
-        }
-        let took = started.elapsed();
-        if took > slow() {
-            t.slow.push(format!("{what}: {took:?}"));
+        match out {
+            Err(stopped) => t.panics.push(format!("{what}: {stopped}")),
+            Ok(took) if took > slow() => t.slow.push(format!("{what}: {took:?}")),
+            Ok(_) => {}
         }
     }
     Some((t, copies))
