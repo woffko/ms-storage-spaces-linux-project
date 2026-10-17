@@ -118,3 +118,17 @@ path = "fuzz_targets/refs_write.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "guard_userdata"
+path = "fuzz_targets/guard_userdata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy_fields"
+path = "fuzz_targets/policy_fields.rs"
+test = false
+doc = false
+bench = false

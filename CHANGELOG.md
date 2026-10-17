@@ -156,6 +156,21 @@ for this hotfix (docs/security.md says what ran).
   (RUSTSEC-2026-0344) when `refs` read a compressed file of a hostile
   volume.
 
+### Testing
+
+* Two fuzz targets: `guard_userdata` (the guard on whatever a space
+  holds: its first and last 64 KiB, with the NTFS and ReFS checks of
+  attach) and `policy_fields` (record fields at the edges of their types,
+  then health, opening, the journal check, the device-mapper table, a read
+  and the guard, under a watchdog); seeds and dictionaries from the
+  audit's cases (`fuzz/seeds.py`, `fuzz/dicts`, which `tools/fuzz-long.sh`
+  passes on).
+* `crates/refs/tests/oracle.rs`: the audit's oracles over the corpus,
+  in a small budget (more with `ORACLE_MUTANTS` and `ORACLE_POOLS=all`):
+  damage where the library reads a pool (or what the guard reads of its
+  spaces) changes nothing the guard calls healthy, and a pool without one
+  or two of its disks is never healthy and reads as whole.
+
 ### Documentation
 
 * Turning off attaching at plug-in with the packages: their udev rule is

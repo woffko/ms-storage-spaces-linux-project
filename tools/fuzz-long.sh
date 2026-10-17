@@ -1,7 +1,9 @@
 #!/bin/bash
 # The long fuzzing run of the release checklist: every cargo-fuzz target for
 # SECONDS (default 24 h), one worker each at nice 19 and at most 2 GiB of
-# memory each, from and into fuzz/corpus/<target>. OUT (default
+# memory each, from and into fuzz/corpus/<target> (with the seeds
+# fuzz/seeds.py writes there, and fuzz/dicts/<target>.dict where there is
+# one). OUT (default
 # testdata/work/fuzz-long) gets a log per target, the commit, the start and
 # end times and each target's exit status in `results`; findings land in
 # fuzz/artifacts/<target>. A run cut short (a host crash) is resumed by
@@ -20,14 +22,17 @@ git status --porcelain --untracked-files=no | grep -q . && echo "(with uncommitt
 for t in "${targets[@]}"; do
   (cd fuzz && nice -n 19 cargo +nightly fuzz build "$t" >/dev/null 2>&1) || { echo "cannot build $t" >&2; exit 1; }
 done
+python3 fuzz/seeds.py || { echo "cannot write the seeds" >&2; exit 1; }
 date -Iseconds > "$out/started"
 : > "$out/results"
 for t in "${targets[@]}"; do
   mkdir -p "fuzz/corpus/$t" "fuzz/artifacts/$t"
+  dict=()
+  [ -f "fuzz/dicts/$t.dict" ] && dict=(-dict="dicts/$t.dict")
   (
     cd fuzz &&
       nice -n 19 "target/x86_64-unknown-linux-gnu/release/$t" -artifact_prefix="artifacts/$t/" \
-        -max_total_time="$seconds" -rss_limit_mb=2048 -timeout=300 -print_final_stats=1 "corpus/$t" \
+        -max_total_time="$seconds" -rss_limit_mb=2048 -timeout=300 -print_final_stats=1 "${dict[@]}" "corpus/$t" \
         > "../$out/$t.log" 2>&1
     echo "$t exit $?" >> "../$out/results"
   ) &
