@@ -1126,7 +1126,7 @@ scenario state and pool image) are given for comparison.
 | local groups of dual parity | 64 (and at most half the columns) | 3 |
 | redundancy (disk failures tolerated) | 3 | 2 |
 | a space's size, a tier's or cache's range, what the extents map | 2^60 bytes | 16 GiB |
-| slab numbers and counts of an extent | 2^32 | 47 |
+| slab numbers and counts of an extent | 2^32 (a count 1 at least) | 47 (counts 1 at least) |
 | offsets in the cache and journal spaces (slot area, checkpoints, data) | 2^56 | a few GiB |
 
 The pool's own metadata space is mirrored once per disk (copies 8 and

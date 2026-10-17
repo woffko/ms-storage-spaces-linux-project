@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+* An extent record whose count of slabs is 0 (which Windows never writes:
+  no pool of the corpus has one) left its space healthy, reading zeros
+  where the extent belonged: the plausible values of 1.2.2 bound the count
+  from above only. Such a space now fails (`space.layout`), as for the
+  other implausible numbers.
+
+### Testing
+
+* The boundary values of the plausibility limits are tried in every field
+  on every fixture (79, not 8 as in 1.2.2) and in the slot, checkpoint and
+  data offsets of write-back cache and parity journal headers, their CRC
+  sealed again, each case within 5 s (`crates/storage-spaces/tests/bounds.rs`).
+
 ## 1.2.2 (2026-10-17)
 
 Fixes from a code audit of 1.2.1 (2026-10-16): checks that a hostile or

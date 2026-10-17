@@ -2,18 +2,28 @@
 //! (records carry no checksum, and each number is a varint of up to 64
 //! bits): the placement policy of a space or of its hidden spaces, a
 //! space's size or a tier's range, and the copy, column and slab numbers of
-//! extents. Opening the pool, its health, the guard's report, opening a
-//! space, describing and reading it must end in an error or a refusal of
-//! that space within seconds: never a panic, never a loop.
+//! extents; and the offsets the header of a write-back cache or parity
+//! journal names (CRC sealed). Each of {0, 1, 2^31, 2^32, 2^36, 2^56, 2^63,
+//! 2^64 - 1} in each field, on every fixture: opening the pool, its health,
+//! the guard's report, opening a space, describing and reading it end
+//! within 5 s, never in a panic or a loop, and a value beyond the limits of
+//! `storage_spaces::limits` (or 2^31 and more of a number of columns, copies
+//! or slabs) fails the space that holds it.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use storage_spaces::Pool;
+use storage_spaces::format::SpaceRole;
 use storage_spaces::guard::{self, Options};
-use storage_spaces::io::SparseImage;
+use storage_spaces::io::{ReadAt, SparseImage};
 use storage_spaces::isolate::isolated;
+use storage_spaces::layout::Layout;
+use storage_spaces::limits::{MAX_COPIES, MAX_LOG_OFFSET, MAX_SPACE_SIZE};
 use storage_spaces::report::Verdict;
 
 fn load(name: &str) -> Vec<SparseImage> {
@@ -22,6 +32,17 @@ fn load(name: &str) -> Vec<SparseImage> {
         .map_while(|i| File::open(dir.join(format!("disk{i}.fixture"))).ok())
         .map(|f| SparseImage::read_from(f).unwrap())
         .collect()
+}
+
+/// Every fixture: its name and disks.
+fn fixtures() -> Vec<(String, Vec<SparseImage>)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names.into_iter().map(|n| (n.clone(), load(&n))).collect()
 }
 
 /// A number of the metadata.
@@ -39,9 +60,15 @@ enum Field {
     SlabCount,
     VirtualSlab,
     PhysicalSlab,
+    CacheSlots,
+    CacheCheckpoints,
+    CacheData,
+    JournalSlots,
+    JournalCheckpoints,
+    JournalRunSize,
 }
 
-const FIELDS: [Field; 12] = [
+const FIELDS: [Field; 18] = [
     Field::Redundancy,
     Field::Copies,
     Field::Groups,
@@ -54,47 +81,167 @@ const FIELDS: [Field; 12] = [
     Field::SlabCount,
     Field::VirtualSlab,
     Field::PhysicalSlab,
+    Field::CacheSlots,
+    Field::CacheCheckpoints,
+    Field::CacheData,
+    Field::JournalSlots,
+    Field::JournalCheckpoints,
+    Field::JournalRunSize,
 ];
 
 const VALUES: [u64; 8] = [0, 1, 1 << 31, 1 << 32, 1 << 36, 1 << 56, 1 << 63, u64::MAX];
 
+impl Field {
+    /// A field of the 0x60-byte header of a write-back cache or parity
+    /// journal (its CRC at 0x24): the role of its hidden space, its
+    /// signature and the field's byte.
+    fn header(self) -> Option<(SpaceRole, &'static [u8], usize)> {
+        let cache = (SpaceRole::Cache, &b"SPCACHE\0"[..]);
+        let journal = (SpaceRole::Other(0x0a), &b"SPVDT\0\0\0"[..]);
+        let ((role, signature), at) = match self {
+            Field::CacheSlots => (cache, 0x30),
+            Field::CacheCheckpoints => (cache, 0x40),
+            Field::CacheData => (cache, 0x50),
+            Field::JournalSlots => (journal, 0x30),
+            Field::JournalCheckpoints => (journal, 0x40),
+            Field::JournalRunSize => (journal, 0x50),
+            _ => return None,
+        };
+        Some((role, signature, at))
+    }
+
+    /// Whether `value` lies far beyond what any pool holds in this field
+    /// (beyond a limit, or 2^31 and more of a number of columns, copies or
+    /// slabs); `None` for the fields where no value need fail a space.
+    fn beyond(self, value: u64) -> Option<bool> {
+        Some(match self {
+            Field::Redundancy | Field::Copies | Field::Groups | Field::Columns | Field::ExtentColumn => {
+                value >= 1 << 31
+            }
+            Field::ExtentCopy => value >= MAX_COPIES,
+            Field::Size => value > MAX_SPACE_SIZE,
+            Field::SlabCount => value == 0 || value >= 1 << 31,
+            Field::VirtualSlab | Field::PhysicalSlab => value >= 1 << 31,
+            Field::CacheSlots | Field::CacheData | Field::JournalSlots => value > MAX_LOG_OFFSET,
+            _ => return None,
+        })
+    }
+}
+
 /// Sets `field` to `value` in the decoded records of the user spaces (and
 /// their extents), or with `all` in those of every space: what decoding
-/// any record holding the number gives.
-fn set(pool: &mut Pool<SparseImage>, field: Field, value: u64, all: bool) {
+/// any record holding the number gives. The user spaces whose own records
+/// or extents changed.
+fn set(pool: &mut Pool<SparseImage>, field: Field, value: u64, all: bool) -> Vec<u64> {
+    let mut own = Vec::new();
     for space in pool.spaces.values_mut().filter(|s| all || s.is_user()) {
+        let mut changed = false;
         let info = &mut space.info;
         if let Some(p) = &mut info.policy {
-            match field {
-                Field::Redundancy => p.redundancy = value,
-                Field::Copies => p.copies = value,
-                Field::Groups => p.groups = value,
-                Field::Columns => p.columns = value,
-                _ => {}
+            let f = match field {
+                Field::Redundancy => Some(&mut p.redundancy),
+                Field::Copies => Some(&mut p.copies),
+                Field::Groups => Some(&mut p.groups),
+                Field::Columns => Some(&mut p.columns),
+                _ => None,
+            };
+            if let Some(f) = f {
+                *f = value;
+                changed = true;
             }
         }
         match field {
-            Field::Size if info.size.is_some() => info.size = Some(value),
+            Field::Size if info.size.is_some() => {
+                info.size = Some(value);
+                changed = true;
+            }
             Field::RangeStart => info.range = info.range.map(|(_, len)| (value, len)),
             Field::RangeLength => info.range = info.range.map(|(start, _)| (start, value)),
             _ => {}
         }
         for e in &mut space.extents {
-            match field {
-                Field::ExtentCopy => e.copy = value,
-                Field::ExtentColumn => e.column = value,
-                Field::SlabCount => e.slab_count = value,
-                Field::VirtualSlab => e.virtual_slab = value,
-                Field::PhysicalSlab => e.physical_slab = value,
-                _ => {}
-            }
+            let f = match field {
+                Field::ExtentCopy => &mut e.copy,
+                Field::ExtentColumn => &mut e.column,
+                Field::SlabCount => &mut e.slab_count,
+                Field::VirtualSlab => &mut e.virtual_slab,
+                Field::PhysicalSlab => &mut e.physical_slab,
+                _ => break,
+            };
+            *f = value;
+            changed = true;
+        }
+        if changed && space.is_user() {
+            own.push(space.id());
         }
     }
+    own
 }
+
+fn crc32(data: &[u8]) -> u32 {
+    !data.iter().fold(!0u32, |mut c, &b| {
+        c ^= u32::from(b);
+        for _ in 0..8 {
+            c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
+        }
+        c
+    })
+}
+
+/// Sets header field `field` to `value` on every copy at hand of the
+/// header of each write-back cache or parity journal of the user spaces of
+/// `disks`, the CRC sealed again: the user spaces whose header changed.
+fn set_header(disks: &mut [SparseImage], field: Field, value: u64) -> Vec<u64> {
+    let (role, signature, at) = field.header().unwrap();
+    let places: Vec<(u64, usize, u64)> = {
+        let pool = Pool::open(disks.iter().collect::<Vec<_>>()).unwrap();
+        let mut places = Vec::new();
+        for user in pool.user_spaces() {
+            for container in pool.children(user.id()).filter(|c| c.info.role == role) {
+                for child in pool.children(container.id()).filter(|c| !c.extents.is_empty()) {
+                    let Some(policy) = child.info.policy else { continue };
+                    let base = child.info.range.map_or(0, |(start, _)| start);
+                    let Ok(l) = Layout::with_base(&policy, &child.extents, base) else {
+                        continue;
+                    };
+                    let loc = l.locate(base);
+                    places.extend(l.copies_of(loc.column).into_iter().filter_map(|copy| {
+                        let (disk, slab) = l.physical(loc.column, copy, loc.row)?;
+                        let (device, start) = pool.slab_location(disk, slab).ok()??;
+                        Some((user.id(), device, start + loc.offset_in_slab))
+                    }));
+                }
+            }
+        }
+        places
+    };
+    let mut own = Vec::new();
+    for (user, device, offset) in places {
+        let mut header = vec![0u8; 0x60];
+        disks[device].read_exact_at(&mut header, offset).unwrap();
+        // (A fixture holds the copies reading needs.)
+        if !header.starts_with(signature) {
+            continue;
+        }
+        header[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        header[0x24..0x28].fill(0);
+        let crc = crc32(&header);
+        header[0x24..0x28].copy_from_slice(&crc.to_le_bytes());
+        disks[device].insert(offset, &header);
+        if !own.contains(&user) {
+            own.push(user);
+        }
+    }
+    own
+}
+
+/// Per field: the cases run, those on fixtures without what it is in, the
+/// slowest case and its time.
+type Seen = BTreeMap<String, (u64, u64, Duration, String)>;
 
 /// What `spaces attach`, `info` and the servers do with a pool, up to its
 /// data: the verdict of each user space.
-fn exercise(pool: Pool<SparseImage>) -> Vec<(Verdict, String)> {
+fn exercise(pool: Pool<SparseImage>) -> Vec<(u64, Verdict, String)> {
     let _ = storage_spaces::health::health(&pool);
     for s in pool.spaces.values() {
         let _ = s.allocated();
@@ -105,7 +252,7 @@ fn exercise(pool: Pool<SparseImage>) -> Vec<(Verdict, String)> {
     };
     for space in pool.user_spaces() {
         let r = guard::space_report(&pool, space, &[], &options, &mut guard::ntfs_hook);
-        verdicts.push((r.verdict(), r.to_text()));
+        verdicts.push((space.id(), r.verdict(), r.to_text()));
         let Ok(reader) = pool.open_space(space.id()) else {
             continue;
         };
@@ -123,49 +270,96 @@ fn exercise(pool: Pool<SparseImage>) -> Vec<(Verdict, String)> {
 }
 
 /// Every number of the list in every field, of the user spaces and of all
-/// spaces: no panic, no loop, and a user space whose own policy or extents
-/// hold a number beyond any pool's is not healthy.
+/// spaces, on every fixture: no panic, no loop, and a user space whose own
+/// policy, extents or log header hold a number far beyond any pool's
+/// fails.
 #[test]
 fn numbers_beyond_any_pool_are_refused_not_computed_with() {
-    for name in [
-        "simple1c",
-        "mirror3",
-        "parity3",
-        "lrc12",
-        "tiered",
-        "wc64",
-        "mirrorthin",
-        "m4kn",
-    ] {
-        let disks = load(name);
+    let fixtures = fixtures();
+    assert!(fixtures.len() >= 79, "{} fixtures", fixtures.len());
+    let mut cases = Vec::new();
+    for f in 0..fixtures.len() {
         for field in FIELDS {
             for value in VALUES {
                 for all in [false, true] {
-                    let mut pool = Pool::open(disks.clone()).unwrap();
-                    // Whether the user spaces' own records or extents change.
-                    let own = pool.user_spaces().any(|s| match field {
-                        Field::Size | Field::RangeStart | Field::RangeLength => false,
-                        Field::ExtentCopy
-                        | Field::ExtentColumn
-                        | Field::SlabCount
-                        | Field::VirtualSlab
-                        | Field::PhysicalSlab => !s.extents.is_empty(),
-                        _ => true,
-                    });
-                    set(&mut pool, field, value, all);
-                    let case = format!("{name}: {field:?} = {value:#x}{}", if all { " (all)" } else { "" });
-                    let verdicts = isolated(Some(Duration::from_secs(10)), move || exercise(pool))
-                        .unwrap_or_else(|stopped| panic!("{case}: {stopped}"));
-                    if own && value >= 1 << 31 && !all {
-                        assert!(
-                            verdicts.iter().all(|(v, _)| *v == Verdict::Failed),
-                            "{case}: {verdicts:?}"
-                        );
+                    if !(all && field.header().is_some()) {
+                        cases.push((f, field, value, all));
                     }
                 }
             }
         }
     }
+    let limit = Duration::from_secs(5);
+    let next = AtomicUsize::new(0);
+    let failures = Mutex::new(Vec::new());
+    let seen: Mutex<Seen> = Mutex::default();
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get().min(16));
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                while let Some(&(f, field, value, all)) = cases.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    let (name, disks) = &fixtures[f];
+                    let case = format!("{name}: {field:?} = {value:#x}{}", if all { " (all)" } else { "" });
+                    let mut disks = disks.clone();
+                    let (own, pool) = if field.header().is_some() {
+                        let own = set_header(&mut disks, field, value);
+                        (own, Pool::open(disks))
+                    } else {
+                        match Pool::open(disks) {
+                            Ok(mut pool) => (set(&mut pool, field, value, all), Ok(pool)),
+                            Err(e) => (Vec::new(), Err(e)),
+                        }
+                    };
+                    let key = format!("{field:?}");
+                    if own.is_empty() && field.header().is_some() {
+                        seen.lock().unwrap().entry(key).or_default().1 += 1;
+                        continue;
+                    }
+                    let Ok(pool) = pool else { continue };
+                    let started = Instant::now();
+                    let out = isolated(Some(limit), move || exercise(pool));
+                    let took = started.elapsed();
+                    {
+                        let mut seen = seen.lock().unwrap();
+                        let e = seen.entry(key).or_default();
+                        e.0 += 1;
+                        if took > e.2 {
+                            (e.2, e.3) = (took, case.clone());
+                        }
+                    }
+                    let verdicts = match out {
+                        Ok(v) => v,
+                        Err(stopped) => {
+                            failures.lock().unwrap().push(format!("{case}: {stopped}"));
+                            continue;
+                        }
+                    };
+                    let beyond = field.beyond(value) == Some(true) && !all;
+                    for (id, verdict, text) in &verdicts {
+                        if beyond && own.contains(id) && *verdict != Verdict::Failed {
+                            failures
+                                .lock()
+                                .unwrap()
+                                .push(format!("{case}: space {id} {}\n{text}", verdict.as_str()));
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let seen = seen.into_inner().unwrap();
+    let run: u64 = seen.values().map(|e| e.0).sum();
+    eprintln!("{} fixtures, {run} cases ({} workers)", fixtures.len(), workers);
+    for (field, (n, without, slowest, case)) in &seen {
+        eprintln!("  {field}: {n} cases ({without} skipped: no such header), slowest {slowest:?} ({case})");
+    }
+    let failures = failures.into_inner().unwrap();
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 /// A space whose layout is not understood fails alone: the others of its

@@ -214,10 +214,13 @@ impl Layout {
         let mut outdated: BTreeMap<u64, Vec<Run>> = BTreeMap::new();
         for e in extents {
             // Slab numbers beyond 2^32 (1 EiB) cannot be real; the limit keeps
-            // all offset arithmetic far from overflowing.
-            if [e.virtual_slab, e.slab_count, e.physical_slab]
-                .iter()
-                .any(|&n| n > MAX_SLABS)
+            // all offset arithmetic far from overflowing. An extent maps one
+            // slab at least: one of none would leave its rows unmapped, read
+            // as zeros.
+            if e.slab_count == 0
+                || [e.virtual_slab, e.slab_count, e.physical_slab]
+                    .iter()
+                    .any(|&n| n > MAX_SLABS)
             {
                 return Err(format_err!(
                     "extent with implausible slab numbers: virtual {}, count {}, physical {}",
