@@ -225,6 +225,17 @@ impl Database {
     /// slots whenever no run of free slots is long enough (as Windows does,
     /// see [`Database::grow`]), up to 4 MiB.
     pub fn updated(&self, writes: &[(u8, u8, &[u8])], frees: &[u32]) -> Result<(Database, Vec<u32>)> {
+        // What is written must read back as it was meant: a record the
+        // reader cannot decode makes every copy of the database unreadable.
+        for &(kind, version, body) in writes {
+            let raw = crate::format::RawRecord {
+                id: 0,
+                kind,
+                version,
+                body: body.to_vec(),
+            };
+            crate::format::Record::decode(&raw).map_err(|e| format_err!("a record to write does not decode: {e}"))?;
+        }
         let mut base = self.clone();
         loop {
             let mut db = base.clone();
@@ -311,6 +322,29 @@ impl Database {
 mod tests {
     use super::*;
     use crate::io::MemDevice;
+
+    /// A record the reader would not decode is not written: every copy of
+    /// the database would be unreadable (1.2.1 wrote a renamed space's
+    /// record whose name length had wrapped).
+    #[test]
+    fn records_that_do_not_decode_are_not_written() {
+        let db = Database::new(Guid([7; 16]), 1024);
+        let e = db.updated(&[(3, 16, &[0xff; 12])], &[]).unwrap_err();
+        assert!(e.to_string().contains("does not decode"), "{e}");
+        // An extent record that decodes is.
+        let extent = crate::format::ExtentRecord {
+            flags: 0,
+            slab_count: 1,
+            space_id: 1,
+            virtual_slab: 0,
+            column: 0,
+            copy: 0,
+            stale_marker: 0,
+            disk_id: 1,
+            physical_slab: 0,
+        };
+        assert!(db.updated(&[(4, 6, &extent.encode(1))], &[]).is_ok());
+    }
 
     /// An empty database of 16 formatted slots.
     fn empty() -> Database {

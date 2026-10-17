@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use storage_spaces::gpt::{MSR_PARTITION_TYPE, Partition};
 use storage_spaces::guard::{self, Options};
 use storage_spaces::health::Health;
@@ -196,7 +196,7 @@ pub fn require<D: ReadAt>(
                     storage_spaces::report::printable(&c.summary)
                 );
             }
-            anyhow::bail!("{}: {why} (spaces check tells more)", report.headline())
+            bail!("{}: {why} (spaces check tells more)", report.headline())
         }
         _ => Ok(()),
     }
@@ -388,7 +388,10 @@ fn bundle_files<D: ReadAt>(pool: &Pool<D>, reports: &[Report], out: &mut bundle:
 }
 
 /// `spaces check`: prints the reports; returns whether every space is
-/// healthy.
+/// healthy. An error when there was nothing to check: no pool found (or
+/// none that could be read), or no space that `only` names (1.2.1 said so
+/// and exited 0, so that a script took it for healthy; `--json` printed
+/// that text, not `[]`).
 pub fn run(
     json: bool,
     deep: bool,
@@ -403,9 +406,11 @@ pub fn run(
     };
     let mut all = Vec::new();
     let mut files = bundle::Files::new();
+    let mut pools = 0;
     for paths in groups {
         match open_pool(&paths) {
             Ok(pool) => {
+                pools += 1;
                 let pool = Arc::new(pool);
                 let reports = reports(&pool, &paths, only, deep);
                 if bundle_path.is_some()
@@ -421,11 +426,16 @@ pub fn run(
             Err(e) => all.push(unopened(&paths, &format!("{e:#}"))),
         }
     }
-    if all.is_empty() {
-        println!("no Storage Spaces pool members found");
-    } else if json {
+    if json {
         print!("{}", reports_to_json(&all));
-    } else {
+    }
+    if all.is_empty() {
+        match only {
+            Some(key) if pools > 0 => bail!("no space named {key:?} in the pools found"),
+            _ if pools == 0 => bail!("no Storage Spaces pool members found"),
+            _ => println!("no spaces in the pools found"),
+        }
+    } else if !json {
         for (i, r) in all.iter().enumerate() {
             if i > 0 {
                 println!();
@@ -498,6 +508,35 @@ fn scanned() -> Vec<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Numbers in a pool's extents beyond any disk (a physical slab of
+    /// 2^36, a run of 2^36 slabs): `spaces extents` and `spaces info` show
+    /// them, and `spaces check --bundle` packs them, instead of overflowing
+    /// (1.2.1 panicked in each, and the bundle is what a user with a bad
+    /// pool is told to make).
+    #[test]
+    fn numbers_beyond_any_disk_are_shown_not_computed_with() {
+        use storage_spaces::io::SparseImage;
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../storage-spaces/tests/fixtures/mirror2");
+        let disks: Vec<SparseImage> = (0..)
+            .map_while(|i| std::fs::File::open(dir.join(format!("disk{i}.fixture"))).ok())
+            .map(|f| SparseImage::read_from(f).unwrap())
+            .collect();
+        let mut pool = Pool::open(disks).unwrap();
+        let id = pool.user_spaces().next().unwrap().id();
+        let e = &mut pool.spaces.get_mut(&id).unwrap().extents[0];
+        (e.physical_slab, e.slab_count) = (1 << 36, 1 << 36);
+        let pool = Arc::new(pool);
+        let space = &pool.spaces[&id];
+        let text = crate::extents_text(&pool, space);
+        let offset = (1u128 << 36) * u128::from(storage_spaces::format::SLAB_SIZE);
+        assert!(text.contains(&format!("{offset:#x}")), "{text}");
+        assert_eq!(space.allocated(), u64::MAX);
+        let reports = reports(&pool, &[], None, false);
+        let mut files = bundle::Files::new();
+        bundle_files(&pool, &reports, &mut files);
+        assert!(files.iter().any(|(path, _)| path.contains("/extents/")));
+    }
 
     #[test]
     fn the_gate_follows_the_verdict_and_the_flags() {

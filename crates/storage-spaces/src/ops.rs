@@ -195,9 +195,7 @@ pub fn plan_create_pool(
     if disks.is_empty() {
         return Err(Error::Pool("a pool needs at least one disk".into()));
     }
-    if name.is_empty() || name.encode_utf16().count() > 256 {
-        return Err(Error::Pool("the pool needs a name of 1 to 256 characters".into()));
-    }
+    check_name("the pool", name)?;
     let widest = disks
         .iter()
         .map(|d| d.logical_sector)
@@ -346,11 +344,9 @@ pub fn plan_create_space<D: ReadAt>(pool: &Pool<D>, spec: &SpaceSpec, guids: Gui
             pool.version
         )));
     }
-    if pool.find_space(&spec.name).is_some() || spec.name.is_empty() {
-        return Err(Error::Pool(format!(
-            "a space named \"{}\" exists or the name is empty",
-            spec.name
-        )));
+    check_name("the space", &spec.name)?;
+    if pool.find_space(&spec.name).is_some() {
+        return Err(Error::Pool(format!("a space named \"{}\" exists", spec.name)));
     }
     let mut slabs = Slabs::of(&db)?;
     let n = slabs.disks() as u64;
@@ -567,12 +563,21 @@ fn space_id<D: ReadAt>(pool: &Pool<D>, name: &str) -> Result<u64> {
         .ok_or_else(|| Error::Pool(format!("no space \"{name}\"")))
 }
 
+/// The names the planners give pools, spaces and tiers: 1 to 256
+/// characters (UTF-16 units), as pools were created with already. The
+/// records take 65534 (in 1.2.1 renaming to a longer name wrapped the
+/// count and made every copy of the database unreadable).
+fn check_name(what: &str, name: &str) -> Result<()> {
+    if name.is_empty() || name.encode_utf16().count() > 256 {
+        return Err(Error::Pool(format!("{what} needs a name of 1 to 256 characters")));
+    }
+    Ok(())
+}
+
 /// `spaces pool rename`.
 pub fn plan_rename_pool<D: ReadAt>(pool: &Pool<D>, name: &str) -> Result<Plan> {
     let db = check_pool(pool)?;
-    if name.is_empty() {
-        return Err(Error::Pool("the name must not be empty".into()));
-    }
+    check_name("the pool", name)?;
     let next = crate::manage::rename_pool(&db, name, filetime_now())?;
     Ok(database_plan(
         pool,
@@ -585,10 +590,9 @@ pub fn plan_rename_pool<D: ReadAt>(pool: &Pool<D>, name: &str) -> Result<Plan> {
 pub fn plan_rename_space<D: ReadAt>(pool: &Pool<D>, space: &str, name: &str) -> Result<Plan> {
     let db = check_pool(pool)?;
     let id = space_id(pool, space)?;
-    if name.is_empty() || pool.find_space(name).is_some() {
-        return Err(Error::Pool(format!(
-            "a space named \"{name}\" exists or the name is empty"
-        )));
+    check_name("the space", name)?;
+    if pool.find_space(name).is_some() {
+        return Err(Error::Pool(format!("a space named \"{name}\" exists")));
     }
     let next = crate::manage::rename_space(&db, id, name, filetime_now())?;
     Ok(database_plan(
@@ -971,7 +975,7 @@ pub fn plan_retire_disk<D: ReadAt>(pool: &Pool<D>, disk_id: u64) -> Result<Plan>
         .ok_or_else(|| Error::Pool(format!("no disk record {disk_id}")))?;
     record.sequence = sequence;
     record.database_copy = false;
-    let body = record.encode();
+    let body = record.encode()?;
     let (mut next, _) = db.updated(&[(old.kind, old.version, &body)], &[old.id])?;
     next.commit(sequence, now);
     write_db(&mut plan, "disk without its database copy", &next, false);
@@ -1610,10 +1614,9 @@ pub fn plan_create_tier<D: ReadAt>(
             crate::create::POOL_VERSION
         )));
     }
-    if name.is_empty() || tier_templates(&db)?.iter().any(|t| t.name == name) {
-        return Err(Error::Pool(format!(
-            "a tier named \"{name}\" exists or the name is empty"
-        )));
+    check_name("the tier", name)?;
+    if tier_templates(&db)?.iter().any(|t| t.name == name) {
+        return Err(Error::Pool(format!("a tier named \"{name}\" exists")));
     }
     if !(1..=3).contains(&resiliency) || columns.is_some_and(|c| !(1..=8).contains(&c)) {
         return Err(Error::Pool("a tier: simple, mirror or parity, 1 to 8 columns".into()));
@@ -1664,10 +1667,9 @@ pub fn plan_create_tiered_space<D: ReadAt>(
             crate::create::POOL_VERSION
         )));
     }
-    if pool.find_space(name).is_some() || name.is_empty() {
-        return Err(Error::Pool(format!(
-            "a space named \"{name}\" exists or the name is empty"
-        )));
+    check_name("the space", name)?;
+    if pool.find_space(name).is_some() {
+        return Err(Error::Pool(format!("a space named \"{name}\" exists")));
     }
     if tiers.len() != 2 {
         return Err(Error::Pool(

@@ -71,7 +71,7 @@ pub fn set_disk(db: &Database, disk_id: u64, media: Option<u8>, usage: Option<u8
     if let Some(u) = usage {
         disk.usage = u;
     }
-    replace(db, &old, &disk.encode(), timestamp)
+    replace(db, &old, &disk.encode()?, timestamp)
 }
 
 /// `Set-VirtualDisk -NewFriendlyName`: the space record rewritten with the
@@ -237,7 +237,7 @@ pub fn add_disk<D: crate::io::ReadAt>(
         physical_slab: 0,
     };
     let bodies = [
-        record.encode(),
+        record.encode()?,
         pool_body.encode()?,
         metadata.encode()?,
         copy.encode(sequence),
@@ -263,7 +263,7 @@ pub fn add_disk<D: crate::io::ReadAt>(
     // The second: the disk's record with its database copy.
     record.sequence = sequence + 1;
     record.database_copy = true;
-    let body = record.encode();
+    let body = record.encode()?;
     let (mut second, _) = first.updated(&[(2, 8, &body)], &[ids[0]])?;
     second.commit(sequence + 1, timestamp);
 

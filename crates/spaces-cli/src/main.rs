@@ -402,7 +402,7 @@ fn main() -> Result<()> {
             force,
         } => {
             let pool = open_pool(&devices)?;
-            let space = find_space(&pool, &space)?;
+            let space = find_user_space(&pool, &space)?;
             check::require(&pool, &devices, space, false, degraded, force)?;
             export(&pool, space, &output)
         }
@@ -420,7 +420,7 @@ fn main() -> Result<()> {
             } else {
                 open_pool_exclusive(&devices)?
             };
-            let space = find_space(&pool, &space)?;
+            let space = find_user_space(&pool, &space)?;
             check::require(&pool, &devices, space, rw, degraded, force)?;
             serve_nbd(&pool, space, &socket, ready_file.as_deref(), rw)
         }
@@ -438,7 +438,7 @@ fn main() -> Result<()> {
             } else {
                 open_pool_exclusive(&devices)?
             }));
-            let found = find_space(pool, &space)?;
+            let found = find_user_space(pool, &space)?;
             check::require(pool, &devices, found, rw, degraded, force)?;
             let id = found.id();
             let writer: Option<&'static storage_spaces::SpaceWriter<'static, File>> = if rw {
@@ -469,7 +469,7 @@ fn main() -> Result<()> {
             force,
         } => {
             let pool: &'static Pool<File> = Box::leak(Box::new(open_pool_exclusive(&devices)?));
-            let found = find_space(pool, &space)?;
+            let found = find_user_space(pool, &space)?;
             check::require(pool, &devices, found, false, degraded, force)?;
             let reader = Box::leak(Box::new(open_space(pool, found.id())?));
             fuse::serve(reader, pool.logical_sector_size, &mountpoint, ready_file.as_deref())
@@ -610,8 +610,7 @@ pub(crate) fn open_member(p: &Path, write: bool, exclusive: bool) -> Result<File
     {
         use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
         if exclusive && std::fs::metadata(p).is_ok_and(|m| m.file_type().is_block_device()) {
-            const O_EXCL: i32 = 0o200;
-            options.custom_flags(O_EXCL);
+            options.custom_flags(libc::O_EXCL);
         }
     }
     let file = options
@@ -742,6 +741,17 @@ fn find_space<'p>(pool: &'p Pool<File>, key: &str) -> Result<&'p Space> {
         return Ok(s);
     }
     bail!("no space named {key:?}")
+}
+
+/// A user space by name, GUID or id: what `export` and the servers read.
+/// A hidden space (a cache, a journal, a tier: `spaces info --all` lists
+/// them) is no space of its own to read (1.2.1 took its id, and the checks
+/// panicked).
+fn find_user_space<'p>(pool: &'p Pool<File>, key: &str) -> Result<&'p Space> {
+    match find_space(pool, key)? {
+        s if s.is_user() => Ok(s),
+        s => bail!("space {} is a hidden part of another, not read by itself", s.id()),
+    }
 }
 
 fn size(bytes: u64) -> String {
@@ -1234,7 +1244,7 @@ fn cmd_attach(
     // On a terminal the whole report of a refused space; under the attach
     // unit (the journal) a line for the space and one per failing check.
     let interactive = std::io::stderr().is_terminal();
-    let mut failures = 0;
+    let (mut failures, mut matched) = (0, 0);
     for paths in groups {
         let pool = match check::open_pool(&paths) {
             Ok(pool) => Arc::new(pool),
@@ -1259,6 +1269,7 @@ fn cmd_attach(
             if space_sel.is_some_and(|s| s != space.name() && !s.eq_ignore_ascii_case(&space.info.guid.to_string())) {
                 continue;
             }
+            matched += 1;
             if attach::is_attached(space) {
                 println!("{:?} is already attached", space.name());
                 continue;
@@ -1350,6 +1361,14 @@ fn cmd_attach(
     }
     if failures > 0 {
         bail!("{failures} space(s) or pool(s) not attached");
+    }
+    // Asked for one that is not there (1.2.1 exited 0 silently).
+    if matched == 0 && (pool_sel.is_some() || space_sel.is_some()) {
+        bail!(
+            "no space{}{} in the pools found",
+            space_sel.map_or(String::new(), |s| format!(" named {s:?}")),
+            pool_sel.map_or(String::new(), |p| format!(" of a pool named {p:?}"))
+        );
     }
     Ok(())
 }

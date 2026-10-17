@@ -619,16 +619,20 @@ pub fn encode_varint(v: u64) -> Vec<u8> {
 /// Encodes a string as [`Cursor::string`] reads it: UTF-16BE with the
 /// terminating NUL, prefixed by its length in code units; an empty string
 /// (the usual description) is a length of 0 without a terminator.
-pub fn encode_string(s: &str) -> Vec<u8> {
+pub fn encode_string(s: &str) -> Result<Vec<u8>> {
     if s.is_empty() {
-        return vec![0, 0];
+        return Ok(vec![0, 0]);
     }
     let units: Vec<u16> = s.encode_utf16().chain([0]).collect();
-    let mut out = (units.len() as u16).to_be_bytes().to_vec();
+    // The count is a u16 and includes the terminating 0: a longer string
+    // would wrap it (1.2.1 then wrote a record no reader decodes).
+    let count = u16::try_from(units.len())
+        .map_err(|_| format_err!("a string of {} UTF-16 units (at most 65534)", units.len() - 1))?;
+    let mut out = count.to_be_bytes().to_vec();
     for u in units {
         out.extend_from_slice(&u.to_be_bytes());
     }
-    out
+    Ok(out)
 }
 
 /// The security descriptor Windows 11 24H2 adds to a space record the first
@@ -708,7 +712,7 @@ pub fn edit_space_record(body: &[u8], edit: &SpaceEdit) -> Result<Vec<u8>> {
         out.splice(size, encode_varint(n));
     }
     if let Some(n) = edit.name {
-        out.splice(name, encode_string(n));
+        out.splice(name, encode_string(n)?);
     }
     out.splice(sequence, encode_varint(edit.sequence));
     Ok(out)
@@ -849,8 +853,14 @@ mod tests {
         assert_eq!(encode_varint(5), [1, 5]);
         assert_eq!(encode_varint(0x4000_0000), [4, 0x40, 0, 0, 0]);
         assert_eq!(encode_varint(0xffff_ffff), [4, 0xff, 0xff, 0xff, 0xff]);
-        assert_eq!(encode_string("m5db"), [0, 5, 0, b'm', 0, b'5', 0, b'd', 0, b'b', 0, 0]);
-        assert_eq!(encode_string(""), [0, 0]);
+        assert_eq!(
+            encode_string("m5db").unwrap(),
+            [0, 5, 0, b'm', 0, b'5', 0, b'd', 0, b'b', 0, 0]
+        );
+        assert_eq!(encode_string("").unwrap(), [0, 0]);
+        // 65534 units and the 0 fill the count; one more would wrap it.
+        assert_eq!(encode_string(&"x".repeat(65534)).unwrap()[..2], [0xff, 0xff]);
+        assert!(encode_string(&"x".repeat(65535)).is_err());
         for v in [0, 1, 0xff, 0x100, u64::MAX] {
             assert_eq!(Cursor::new(&encode_varint(v)).varint().unwrap(), v);
         }

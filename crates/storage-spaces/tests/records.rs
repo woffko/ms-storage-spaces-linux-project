@@ -54,7 +54,7 @@ fn every_record_windows_wrote_is_reproduced_byte_for_byte() {
                 };
                 let encoded = match r.kind {
                     1 => PoolBody::decode(r.version, &r.body).map(|p| p.encode().unwrap()),
-                    2 => DiskBody::decode(&r.body).map(|d| d.encode()),
+                    2 => DiskBody::decode(&r.body).map(|d| d.encode().unwrap()),
                     3 | 6 => SpaceBody::decode(r.kind == 6, &r.body).map(|s| s.encode().unwrap()),
                     _ => continue,
                 };

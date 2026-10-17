@@ -117,7 +117,7 @@ impl NewPool {
                 size: d.size,
                 data_size: table.pool_partition().length - DATA_AREA_OFFSET,
             };
-            records.push((DISK_RECORD, disk.encode()));
+            records.push((DISK_RECORD, disk.encode()?));
         }
         let metadata = SpaceBody {
             child: false,

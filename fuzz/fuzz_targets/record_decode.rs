@@ -63,5 +63,9 @@ fuzz_target!(|data: &[u8]| {
     );
     assert_eq!(Cursor::new(&encode_varint(v)).varint().unwrap(), v);
     let text = String::from_utf8_lossy(&data[2..]).replace('\0', "");
-    assert_eq!(Cursor::new(&encode_string(&text)).string().unwrap(), text);
+    match encode_string(&text) {
+        Ok(bytes) => assert_eq!(Cursor::new(&bytes).string().unwrap(), text),
+        // Only what the u16 count cannot hold is refused.
+        Err(_) => assert!(text.encode_utf16().count() > 65534),
+    }
 });

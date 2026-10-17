@@ -698,7 +698,7 @@ fn extents_beyond_their_disk_stop_the_planners() {
     let mut disk = DiskBody::decode(&record.body).unwrap();
     disk.data_size = 2 << 28;
     disk.sequence = db.sequence() + 1;
-    let body = disk.encode();
+    let body = disk.encode().unwrap();
     let (mut patched, _) = db.updated(&[(2, record.version, &body)], &[record.id]).unwrap();
     patched.commit(db.sequence() + 1, 1);
     for d in &base {

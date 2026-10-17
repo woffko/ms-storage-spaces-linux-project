@@ -19,7 +19,7 @@ fuzz_target!(|data: &[u8]| {
         }
         2 => {
             if let Ok(d) = DiskBody::decode(body) {
-                assert_eq!(d.encode(), body);
+                assert_eq!(d.encode().expect("a decoded disk record encodes"), body);
             }
         }
         3 => {

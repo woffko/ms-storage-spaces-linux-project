@@ -153,6 +153,11 @@ and
 for a refused space also to standard error: whole on a terminal,
 otherwise a line for the space and one per failing check (the attach
 unit's lines in the journal). Spaces already attached are left alone.
+Exits with 1 when a space or pool was not attached, and when
+.B \-\-pool
+or
+.B \-\-space
+names none of those found (without them, finding no pool is no error).
 Every device attach makes gets udev properties (SS_SPACE, SS_POOL,
 SS_VERDICT, SS_FORCED, from
 .IR /run/storage\-spaces/udev ):
@@ -225,7 +230,12 @@ also writes a .tar.gz with the reports,
 and the first and last 64 KiB of each space (its partition table) for a
 bug report: no file data, but the names and GUIDs of pools, spaces and
 disks (review it before sharing it). Exits with 1 unless every space is
-healthy.
+healthy, and when there was nothing to check: no pool found (or none that
+could be read), or no space that
+.B \-\-space
+names
+.RB ( \-\-json
+then prints an empty list).
 .TP
 .B info\fR, \fBextents\fR, \fBexport\fR, \fBdm\-table
 Inspect a pool given by its member devices or images: pool, disks (usage,

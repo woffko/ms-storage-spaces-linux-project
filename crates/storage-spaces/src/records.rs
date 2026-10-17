@@ -111,8 +111,8 @@ impl PoolBody {
         let mut out = encode_varint(0);
         out.extend(encode_varint(self.sequence));
         out.extend_from_slice(&self.guid.0);
-        out.extend(encode_string(&self.name));
-        out.extend(encode_string(&self.description));
+        out.extend(encode_string(&self.name)?);
+        out.extend(encode_string(&self.description)?);
         out.extend(encode_varint(0));
         out.extend_from_slice(&self.version.to_be_bytes());
         out.push(self.logical_sector_log2);
@@ -199,26 +199,26 @@ impl DiskBody {
             size,
             data_size,
         };
-        understood("disk", body, &disk.encode())?;
+        understood("disk", body, &disk.encode()?)?;
         Ok(disk)
     }
 
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Result<Vec<u8>> {
         let mut out = encode_varint(self.id);
         out.extend(encode_varint(self.sequence));
         out.extend_from_slice(&self.guid.0);
-        out.extend(encode_string(&self.name));
-        out.extend(encode_string(&self.description));
+        out.extend(encode_string(&self.name)?);
+        out.extend(encode_string(&self.description)?);
         out.extend([0, if self.database_copy { 2 } else { 0 }, self.usage]);
         for s in [&self.manufacturer, &self.model, &self.extra[0], &self.extra[1]] {
-            out.extend(encode_string(s));
+            out.extend(encode_string(s)?);
         }
         out.extend([0x0f, self.media]);
         out.extend([0; 32]);
         out.extend(encode_varint(self.size));
         out.extend(encode_varint(self.data_size));
         out.extend(encode_varint(u64::MAX));
-        out
+        Ok(out)
     }
 }
 
@@ -348,8 +348,8 @@ impl SpaceBody {
         let mut out = encode_varint(self.id);
         out.extend(encode_varint(self.sequence));
         out.extend_from_slice(&self.guid.0);
-        out.extend(encode_string(&self.name));
-        out.extend(encode_string(&self.description));
+        out.extend(encode_string(&self.name)?);
+        out.extend(encode_string(&self.description)?);
         out.extend([0, self.internal, self.role]);
         if !self.child {
             out.extend(encode_varint(self.size));

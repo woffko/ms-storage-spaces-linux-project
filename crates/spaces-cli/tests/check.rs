@@ -328,6 +328,68 @@ fn corpus_pools_get_their_verdicts() {
     }
 }
 
+/// `--space` naming no space: `spaces check` says so and fails, with
+/// `--json` printing an empty list (1.2.1 printed a sentence and exited 0,
+/// which a script takes for healthy). Export and the servers read user
+/// spaces only: the id of a hidden one is refused (1.2.1 panicked).
+#[test]
+fn what_names_no_space_fails() {
+    let dir = Scratch(std::env::temp_dir().join(format!("spaces-none-{}", std::process::id())));
+    let disks = pool(&dir.0);
+    let all: Vec<&str> = disks.iter().map(String::as_str).collect();
+    let o = spaces(&[&["check", "--space", "nonexistent"][..], &all].concat());
+    assert_ne!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains("no space named \"nonexistent\""), "{}", text(&o));
+    let o = spaces(&[&["check", "--json", "--space", "nonexistent"][..], &all].concat());
+    assert_ne!(o.status.code(), Some(0), "{}", text(&o));
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "[]\n");
+    // No pool at all.
+    let blank = dir.0.join("blank.img");
+    File::create(&blank).unwrap().set_len(1 << 20).unwrap();
+    let o = spaces(&["check", blank.to_str().unwrap()]);
+    assert_ne!(o.status.code(), Some(0), "{}", text(&o));
+    // A hidden space by its id.
+    let files: Vec<File> = disks.iter().map(|p| File::open(p).unwrap()).collect();
+    let pool = Pool::open(files).unwrap();
+    let hidden = pool
+        .spaces
+        .values()
+        .find(|s| !s.is_user())
+        .expect("a hidden space")
+        .id();
+    drop(pool);
+    let img = dir.0.join("hidden.img");
+    let id = hidden.to_string();
+    let o = spaces(&[&["export", "--space", &id, "--output", img.to_str().unwrap()][..], &all].concat());
+    assert_ne!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains("hidden part"), "{}", text(&o));
+    assert!(!text(&o).contains("panicked"), "{}", text(&o));
+    assert!(!img.exists());
+}
+
+/// A name of 65 535 characters: refused before anything is written (1.2.1
+/// wrapped its length and wrote a record no reader decodes, in every copy
+/// of the pool database).
+#[test]
+fn a_name_too_long_for_its_record_is_refused() {
+    let dir = Scratch(std::env::temp_dir().join(format!("spaces-long-{}", std::process::id())));
+    let disks = pool(&dir.0);
+    let all: Vec<&str> = disks.iter().map(String::as_str).collect();
+    let long = "x".repeat(65_535);
+    for args in [
+        &["space", "rename", "--space", "data", "--name", &long, "--yes"][..],
+        &["pool", "rename", "--name", &long, "--yes"][..],
+    ] {
+        let o = spaces(&[args, &all].concat());
+        assert_ne!(o.status.code(), Some(0), "{args:?}");
+        assert!(text(&o).contains("1 to 256 characters"), "{}", text(&o));
+    }
+    let files: Vec<File> = disks.iter().map(|p| File::open(p).unwrap()).collect();
+    let pool = Pool::open(files).unwrap();
+    assert!(pool.find_space("data").is_some());
+    assert_eq!(pool.name, "Storage pool");
+}
+
 /// Export (as the servers) reads a space only as the guard allows: a
 /// suspect one with --force.
 #[test]

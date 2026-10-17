@@ -126,6 +126,22 @@
   where it looked. A read error at one place where the control page may be
   no longer ends the search. With two checkpoints of one clock, the checks
   took the second and the reader the first: both take the first.
+* `spaces check` exited 0 when `--space` named no space or no pool was
+  found, so that a script took it for healthy, and `--json` printed a
+  sentence then: it exits 1 now, `--json` printing `[]`. `spaces attach
+  --pool` or `--space` naming none of the spaces found exits 1 too
+  (without them, as at boot, finding no pool is no error).
+* `export` and the servers took the numeric id of a hidden space (a
+  cache, a journal: `spaces info --all` lists them) and panicked; they take
+  user spaces only. `spaces extents`, `info` and `check --bundle` (the
+  bundle a bug report asks for) panicked on extents whose numbers lie
+  beyond any disk (a physical slab of 2^36); they show them.
+* Renaming a pool or a space to a name of 65 535 characters wrapped the
+  name's length and made every copy of the pool database unreadable.
+  Names are 1 to 256 characters (as `pool create` asked already), and every
+  record a command writes must decode before it is written. Block devices
+  are opened exclusively with the system's `O_EXCL` (a fixed 0o200 before,
+  wrong on some architectures).
 * A space whose layout is not understood made every space of its pool
   failed (`space.state`), since 1.2.0 worked out the health of a pool as a
   whole: the others are judged on their own again, as 1.1.0 did.
