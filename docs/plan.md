@@ -651,6 +651,30 @@ rows of thin spaces not allocated yet (M7).
   (`zeroed_headers_of_hidden_structures_never_make_them_vanish`). VM checks on
   Ubuntu 26.10 and 22.04, boot check twice on 26.10. The 24 h run of every
   target was not repeated.
+* After `v1.2.2` (2026-10-17, not released): an extent of no slabs fails its
+  space (1.2.2 called such a space healthy, reading zeros); the bounds of the
+  plausible values tried on every fixture and on the offsets of cache and
+  journal headers; the hidden-header test asserting the outcomes of the
+  audit's plan; the oracles comparing what each mutant's report skips; tests
+  of the isolation of every gate. Then the oracles, now also comparing what a
+  mutant's report skips, ran again over the same pools and budgets (2026-10-17
+  09:06 to 12:07, on 3c67ae6, 4.86 million mutants, 669 missing-disk cases):
+  no panic, no unreadable read; no wrong data under a healthy verdict on a
+  pool with three or more database copies, and 2,301 such cases on the same 7
+  pools (the same mutants give 2,311 against 1.2.2: on `full` and `au1g`, 10
+  made an extent of no slabs, which now fails its space); no skipped check of
+  a structure the database lists, and 1,971 other skips counted: 1,886 in the
+  damage mode (a structure a damaged database kept once or twice no longer
+  lists, or a space no longer read as before; the space refused, suspect or
+  failed, in each of the 396 printed), 85 in the user mode, all on the three
+  NTFS pools, where a page copied from another disk overwrote the first
+  sectors of the space (MBR and primary GPT header): healthy, with no
+  partition table, since the guard does not look for the backup GPT header
+  then (left for 1.3); no pool without a disk healthy or reading otherwise; 67
+  mutants on 20 pools took 3.0 to 6.7 s of the library's time under the load
+  of the run (40 processes, later 12, reading a corpus of 222 GB through a
+  page cache of 181 GB, so that reads waited on the disk), and alone at most
+  0.19 s each.
 
 ### Track B (from 2026-10-02)
 

@@ -7,8 +7,9 @@
 * An extent record whose count of slabs is 0 (which Windows never writes:
   no pool of the corpus has one) left its space healthy, reading zeros
   where the extent belonged: the plausible values of 1.2.2 bound the count
-  from above only. Such a space now fails (`space.layout`), as for the
-  other implausible numbers.
+  from above only. One changed byte of a pool database kept once can make
+  such a record (10 of the oracle's mutants did). Such a space now fails
+  (`space.layout`), as for the other implausible numbers.
 
 ### Testing
 
@@ -16,6 +17,25 @@
   on every fixture (79, not 8 as in 1.2.2) and in the slot, checkpoint and
   data offsets of write-back cache and parity journal headers, their CRC
   sealed again, each case within 5 s (`crates/storage-spaces/tests/bounds.rs`).
+* `zeroed_headers_of_hidden_structures_never_make_them_vanish` asserts
+  what each zeroed copy of the header of a write-back cache, parity
+  journal or dirty region log must give: never a skipped check; with
+  another copy, a degraded space reading as before; without one, a failed
+  space (suspect with a copy on a missing disk, a note when the header is
+  zero everywhere and nothing follows it); and writing refused. Over the
+  81 corpus pools: 216 copies, 207 degraded, 4 failed, 5 notes.
+* The oracles compare each mutant's report with the undamaged pool's: a
+  skipped check of a structure the database lists fails them, other
+  skips are counted. `ORACLE_MODES` runs one mode, `ORACLE_ONLY` one
+  mutant.
+* Tests for the isolation of the gates of the servers, `export` and
+  `refs` (devices that panic) and for `SPACES_CHECK_TIMEOUT`.
+* The oracles ran again over the 81 corpus pools, 30,000 mutants per pool
+  and mode: no panic; no wrong data under a healthy verdict where the pool
+  database has three or more copies; no skipped check of a structure the
+  database lists; no pool without a disk healthy. 67 mutants took over 3 s
+  under the load of the run (reads waiting on the disk), and alone at most
+  0.19 s (docs/security.md says what ran).
 
 ## 1.2.2 (2026-10-17)
 
