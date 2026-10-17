@@ -26,8 +26,9 @@
   81 corpus pools: 216 copies, 207 degraded, 4 failed, 5 notes.
 * The oracles compare each mutant's report with the undamaged pool's: a
   skipped check of a structure the database lists fails them, other
-  skips are counted. `ORACLE_MODES` runs one mode, `ORACLE_ONLY` one
-  mutant.
+  skips are counted. A mutant over 3 s is timed again at once and is
+  slow only if it is over 3 s again. `ORACLE_MODES` runs one mode,
+  `ORACLE_ONLY` one mutant.
 * Tests for the isolation of the gates of the servers, `export` and
   `refs` (devices that panic) and for `SPACES_CHECK_TIMEOUT`.
 * The oracles ran again over the 81 corpus pools, 30,000 mutants per pool
@@ -36,7 +37,9 @@
   database lists; no pool without a disk healthy. 67 mutants took over 3 s
   under the load of the run (reads waiting on the disk), and alone at most
   0.19 s; the runs that had them, again with less load beside them, one
-  other, 0.1 s alone; none was slow twice (docs/security.md says what ran).
+  other, 0.1 s alone; none was slow twice. A third run of the whole
+  campaign at 12 processes: the same results, and no mutant over 3 s at
+  all (docs/security.md says what ran).
 
 ## 1.2.2 (2026-10-17)
 

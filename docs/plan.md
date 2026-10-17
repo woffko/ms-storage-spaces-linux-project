@@ -681,7 +681,14 @@ rows of thin spaces not allocated yet (M7).
   s (`parity5_26100` #13381, 3.85 s, not one of the five of that pool before;
   0.08 to 0.10 s alone, three times); that run alone once more (14:43 to
   15:27): none. Every run of the corpus at 30,000 mutants has had a pass
-  without a slow case, and no mutant was slow twice.
+  without a slow case, and no mutant was slow twice. A third run of the whole
+  campaign (16:00 to 19:08, on bce66cd, which times a mutant over 3 s again
+  before it counts; 12 processes in the idle I/O class): 4.86 million mutants,
+  no panic, no unreadable read, no wrong data under a healthy verdict on a
+  pool with three or more database copies (2,301 on the 7 others, as before),
+  no skipped check of a structure the database lists (1,971 other skips, as
+  before), 669 missing-disk cases none healthy, and no mutant over 3 s, not
+  even once.
 
 ### Track B (from 2026-10-02)
 
