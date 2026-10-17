@@ -76,6 +76,32 @@ fn a_journal_listing_billions_of_stripes_is_counted_not_walked() {
     );
 }
 
+/// The same run grown to 2^32 rows: a space of 2^61 bytes, past the
+/// plausible size of one (`limits`), is refused at once instead of walked.
+#[test]
+fn a_journal_run_of_2_32_rows_is_refused_at_once() {
+    let mut pool = load("scenarios/m5pj2/s5");
+    let id = pool.user_spaces().next().unwrap().id();
+    let disk = {
+        let space = pool.spaces.get_mut(&id).unwrap();
+        let data = space.info.policy.unwrap().columns - space.info.policy.unwrap().redundancy;
+        let e = space.extents.iter_mut().find(|e| e.virtual_slab == 0).unwrap();
+        e.slab_count = 1 << 32;
+        e.physical_slab = 1 << 31;
+        space.info.size = Some((1u64 << 32).saturating_mul(data * (256 << 20)));
+        e.disk_id
+    };
+    pool.disks.get_mut(&disk).unwrap().member = None;
+    let refused = timed("journal check, 2^32 rows", 20, move || {
+        pool.open_space(id)
+            .and_then(|r| r.check_unclean_parity(Some(1 << 30)))
+            .err()
+            .map(|e| e.to_string())
+    });
+    let e = refused.expect("refused");
+    assert!(e.contains("beyond 1 EiB"), "{e}");
+}
+
 /// 10 000 user spaces and 40 000 hidden spaces under one of them: the
 /// reports of every space, and a family, in seconds.
 #[test]
