@@ -101,6 +101,16 @@
   and the data of open files with it. The request fails with EIO now and
   the mount goes on; after a panic inside a change (`--rw`) every later
   request fails so, as the volume in memory may be half changed.
+* ReFS writing: replacing a file's data (`refs write`, a file written
+  whole through `refs mount --rw`) reset its record's counter of stream
+  set ids, so the next named stream written in clusters (over 1 KiB) took
+  the stream set of one the file had: both then read the newer one's
+  bytes, and deleting either removed the other's rows, after which the
+  file could not be opened. The counter is kept now, a new set takes an id
+  past every set of the record, and `refs check` reports a key twice in a
+  page or record and a stream whose set has no rows (it saw nothing of
+  this before, nor did the fuzzing of the writer, which now writes and
+  deletes named streams too).
 * ReFS `fs.refs.log`: a log whose control page was not found was a
   warning, so healthy; it is suspect now when the checkpoint shows records
   written to the log, a warning when it shows none, and the summary says

@@ -2967,9 +2967,13 @@ impl<D: WriteAt> Volume<D> {
             };
             let mut record = make(self, &mut tx, band, file)?;
             // Kept: creation and access times, attributes (but the bits
-            // that describe the content).
+            // that describe the content), the last stream set id given
+            // out (the named streams in clusters keep theirs).
             record[0x28..0x30].copy_from_slice(&old[0x28..0x30]);
             record[0x40..0x48].copy_from_slice(&old[0x40..0x48]);
+            if let (Some(to), Some(last)) = (record.get_mut(0x9c..0xa0), old.get(0x9c..0xa0)) {
+                to.copy_from_slice(last);
+            }
             let attributes = (le32(&old, 0x48) & !SPARSE) | (le32(&record, 0x48) & SPARSE);
             record[0x48..0x4c].copy_from_slice(&attributes.to_le_bytes());
             // Named streams stay, with the stream sets of those in clusters.
@@ -3448,8 +3452,9 @@ impl<D: WriteAt> Volume<D> {
 
     /// Writes a named stream to clusters, as Windows does: a stream row
     /// naming its stream set (set id: `set`, else past the record's
-    /// counter at 0x9c, from 0xf000), the set's header row and its live
-    /// level with the extents. An inline stream of that name goes.
+    /// counter at 0x9c and every set the record has, from 0xf000), the
+    /// set's header row and its live level with the extents. An inline
+    /// stream of that name goes.
     fn write_stream_clusters(
         &mut self,
         file: FileAt,
@@ -3464,8 +3469,22 @@ impl<D: WriteAt> Volume<D> {
                 file.name
             )));
         }
-        let last = le32(&file.record, 0x9c);
-        let set = set.unwrap_or(if last == 0 { 0xf000 } else { u64::from(last) + 1 });
+        // A set id no row of the record has: two streams of one set would
+        // share their rows, and each read the other's clusters.
+        let present = embedded_rows(&file.record)?
+            .iter()
+            .filter(|r| is_set_row(r))
+            .map(|r| le64(row_key(r), 0x30))
+            .max();
+        let last = u64::from(le32(&file.record, 0x9c)).max(present.unwrap_or(0));
+        let set = match set {
+            Some(set) => set,
+            None if last == 0 => 0xf000,
+            None => last
+                .checked_add(1)
+                .filter(|&s| s <= u64::from(u32::MAX))
+                .ok_or_else(|| format_err!("{}: no stream set id left after {last:#x}", file.name))?,
+        };
         let band = self.data_band(file.dir)?;
         {
             let mut tx = Transaction::begin(&*self)?;
@@ -3501,7 +3520,8 @@ impl<D: WriteAt> Volume<D> {
                 row(&set_key(live.len(), LIVE_STREAM, 0), &live, ROW_EMBEDS_NODE),
             );
             let mut record = record_with_rows(&file.record, &rows, le32(&file.record, 0x98))?;
-            record[0x9c..0xa0].copy_from_slice(&(set.max(u64::from(last)) as u32).to_le_bytes());
+            let counter = u32::try_from(set.max(last)).map_err(|_| format_err!("stream set id {set:#x}"))?;
+            record[0x9c..0xa0].copy_from_slice(&counter.to_le_bytes());
             for at in [0x30, 0x38, 0x40] {
                 record[at..at + 8].copy_from_slice(&now.to_le_bytes());
             }
@@ -4902,4 +4922,52 @@ fn split_id_row(id: u64, home: u64) -> (Vec<u8>, Vec<u8>) {
     value[8..16].copy_from_slice(&id.to_le_bytes());
     value[16..24].copy_from_slice(&home.to_le_bytes());
     (key, value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use storage_spaces::io::{Overlay, SparseImage};
+
+    /// The small fixture, its changes kept in memory.
+    fn small() -> Volume<Overlay<SparseImage>> {
+        let image = SparseImage::read_from(&include_bytes!("../tests/fixtures/r314small/disk.fixture")[..]).unwrap();
+        Volume::open(Overlay::new(image), 16 << 20).unwrap()
+    }
+
+    /// What 1.2.1's writer could leave: a file record with a row twice (two
+    /// streams' sets with one id), a stream naming a set without rows
+    /// (the other's deleted with it). `refs check` names both (1.2.1 saw
+    /// nothing, so neither did the fuzzing of the writer).
+    #[test]
+    fn check_finds_rows_twice_and_streams_without_their_set() {
+        let mut vol = small();
+        let now = 134_500_000_000_000_000;
+        vol.create_file("/f.txt", b"hello", now).unwrap();
+        vol.write_stream("/f.txt", "a", &[0x41; 5000], now).unwrap();
+        assert_eq!(vol.check(&[]).unwrap().problems, Vec::<String>::new());
+        let file = vol.file_at("/f.txt").unwrap();
+        let rows = embedded_rows(&file.record).unwrap();
+        // A set row twice.
+        let mut twice = rows.clone();
+        let set_row = rows.iter().find(|r| is_set_row(r)).unwrap().clone();
+        insert_attribute(&mut twice, set_row);
+        let record = record_with_rows(&file.record, &twice, le32(&file.record, 0x98)).unwrap();
+        let mut v = small();
+        v.create_file("/f.txt", b"hello", now).unwrap();
+        v.write_stream("/f.txt", "a", &[0x41; 5000], now).unwrap();
+        let at = v.file_at("/f.txt").unwrap();
+        v.store_record(&at, &record, &[]).unwrap();
+        let problems = v.check(&[]).unwrap().problems;
+        assert!(
+            problems.iter().any(|p| p.contains("two attribute rows")),
+            "{problems:?}"
+        );
+        // The set's rows gone, the stream row kept.
+        let without: Vec<Vec<u8>> = rows.into_iter().filter(|r| !is_set_row(r)).collect();
+        let record = record_with_rows(&file.record, &without, le32(&file.record, 0x98)).unwrap();
+        vol.store_record(&file, &record, &[]).unwrap();
+        let problems = vol.check(&[]).unwrap().problems;
+        assert!(problems.iter().any(|p| p.contains("which has no rows")), "{problems:?}");
+    }
 }

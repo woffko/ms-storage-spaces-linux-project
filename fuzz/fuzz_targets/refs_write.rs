@@ -6,11 +6,14 @@
 //! operations the rest of the input picks (times, attributes, overwriting,
 //! creating, writing, changing in place, renaming, moving, linking,
 //! cloning and deleting files and
-//! directories, also through the names those operations give) on a
+//! directories, also through the names those operations give, writing and
+//! deleting named streams) on a
 //! writable overlay. Fuzzing builds accept every checksum. Whatever
 //! the metadata says, nothing may panic and no byte may be written outside
 //! the volume; on the unpatched fixture, whatever the operations, the
-//! volume must check clean afterwards (refs check).
+//! volume must check clean afterwards (refs check, which since 1.2.2 also
+//! finds a key twice in a page or record and named streams whose stream
+//! set has no rows).
 #![no_main]
 
 use std::sync::LazyLock;
@@ -114,6 +117,9 @@ fuzz_target!(|data: &[u8]| {
             6 if n % 3 == 0 => vol.link_file(path, "/linked", now),
             6 if n % 3 == 1 => vol.clone_file(path, "/cloned", now),
             6 => vol.delete_file(path, now),
+            // Named streams, two of them, in the record or in clusters.
+            7 if n % 4 == 0 => vol.write_stream(path, ["a", "b"][n / 4 % 2], &vec![0x77; n % 6000], now),
+            7 if n % 4 == 1 => vol.delete_stream(path, ["a", "b"][n / 4 % 2], now),
             _ => vol.create_directory(path, now),
         };
     }

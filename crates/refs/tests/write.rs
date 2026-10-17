@@ -1523,6 +1523,63 @@ fn writing_named_streams_in_clusters() {
     assert_pages_valid(&vol, &skip, "streams in clusters");
 }
 
+/// Named streams in clusters written before and after the file's data is
+/// replaced keep stream sets of their own: each reads its own bytes, and
+/// deleting one leaves the other (1.2.1 rebuilt the record with its
+/// counter of set ids at 0, so the second stream took the first's set:
+/// both read the second's bytes, deleting one took the other's rows, and
+/// `refs check` saw nothing).
+#[test]
+fn rewriting_a_file_keeps_its_stream_sets_apart() {
+    let (image, manifest, skip) = load("r314small");
+    let offset = manifest["partition_offset"].as_u64().unwrap();
+    let overlay = Overlay::new(&image);
+    let mut vol = Volume::open(&overlay, offset).unwrap();
+    let now = 134_500_000_000_000_000;
+    let streams = |vol: &Volume<_>| -> BTreeMap<String, (Vec<u8>, u64)> {
+        let entry = vol.lookup("/f1.txt").unwrap();
+        let file = vol.open_file(&entry).unwrap();
+        let sets: BTreeMap<String, u64> = vol
+            .attribute_rows(&entry)
+            .unwrap()
+            .into_iter()
+            .filter(|(k, v)| k.len() > 0x10 && k[8..12] == [2, 0, 0, 0x80] && k[12] == 0xb0 && v.len() >= 0x44)
+            .map(|(k, v)| {
+                let name: Vec<u16> = k[0x10..].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                (
+                    String::from_utf16(&name).unwrap(),
+                    u64::from_le_bytes(v[0x3c..0x44].try_into().unwrap()),
+                )
+            })
+            .collect();
+        file.streams
+            .iter()
+            .map(|(n, s)| {
+                let mut data = vec![0u8; s.size as usize];
+                vol.read_stream(s, 0, &mut data).unwrap();
+                (n.clone(), (data, sets[n]))
+            })
+            .collect()
+    };
+    vol.create_file("/f1.txt", b"hello", now).unwrap();
+    vol.write_stream("/f1.txt", "a", &[0x41; 5000], now).unwrap();
+    vol.write_file("/f1.txt", &[0x55; 3000], now).unwrap();
+    vol.write_stream("/f1.txt", "b", &[0x42; 5000], now).unwrap();
+    let s = streams(&vol);
+    assert_eq!(s["a"].0, [0x41; 5000]);
+    assert_eq!(s["b"].0, [0x42; 5000]);
+    assert_ne!(s["a"].1, s["b"].1, "one stream set for both");
+    assert_eq!(vol.check(&skip).unwrap().problems, Vec::<String>::new());
+    vol.delete_stream("/f1.txt", "a", now).unwrap();
+    let s = streams(&vol);
+    assert_eq!(s.keys().collect::<Vec<_>>(), ["b"]);
+    assert_eq!(s["b"].0, [0x42; 5000]);
+    assert_eq!(vol.check(&skip).unwrap().problems, Vec::<String>::new());
+    assert_allocated(&vol, &skip, "streams after a rewrite");
+    vol.delete_file("/f1.txt", now).unwrap();
+    assert_eq!(vol.check(&skip).unwrap().problems, Vec::<String>::new());
+}
+
 #[test]
 fn writing_integrity_streams_on_64k_clusters() {
     // 64 KiB clusters: CRC-64 per 16 KiB (kind 2), as Windows writes them.

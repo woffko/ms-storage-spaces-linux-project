@@ -22,13 +22,14 @@
 use std::collections::BTreeMap;
 
 use storage_spaces::io::ReadAt;
+use storage_spaces::report::hex;
 
 use crate::error::{Result, format_err};
 use crate::file::{Content, Target};
 use crate::node::Node;
 use crate::page::{PAGE_HEADER_SIZE, PageRef};
 use crate::refcount;
-use crate::util::{le16, le32, le64};
+use crate::util::{le16, le32, le64, utf16};
 use crate::volume::{ROOT_DIRECTORY, Volume};
 
 /// Problems listed in a report at most (the count goes on).
@@ -160,6 +161,43 @@ impl Allocator {
         }
         None
     }
+}
+
+/// What is wrong with the attribute rows of a file's record: a key twice
+/// (a lookup finds one of the rows; 1.2.1's writer gave a second named
+/// stream the stream set of the first, so that both had its rows), a
+/// named stream in clusters naming a stream set that has no rows (its
+/// extents are gone).
+fn record_problems(rows: &[(Vec<u8>, Vec<u8>)]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut keys: Vec<&[u8]> = rows.iter().map(|(k, _)| k.as_slice()).collect();
+    keys.sort_unstable();
+    if let Some(w) = keys.windows(2).find(|w| w[0] == w[1]) {
+        out.push(format!("two attribute rows with the key {}", hex(w[0], 0x50)));
+    }
+    let sets: std::collections::HashSet<u64> = rows
+        .iter()
+        .filter(|(k, _)| k.len() >= 0x38 && le32(k, 8) == 3)
+        .map(|(k, _)| le64(k, 0x30))
+        .collect();
+    for (k, v) in rows {
+        // A named stream or a snapshot of one, in clusters: its set at
+        // 0x3c (0: the levels of the file's own data).
+        let in_clusters = k.len() >= 0x10
+            && le32(k, 8) == 0x8000_0002
+            && le32(k, 12) & 0xffff == 0xb0
+            && v.len() >= 0x44
+            && matches!(le16(v, 0x10), 0 | 2)
+            && le16(v, 2) & 0x1000 != 0;
+        let set = le64(v, 0x3c);
+        if in_clusters && set != 0 && !sets.contains(&set) {
+            out.push(format!(
+                "stream {:?} names stream set {set:#x}, which has no rows",
+                utf16(&k[0x10..])
+            ));
+        }
+    }
+    out
 }
 
 /// A page for the check to read: (its reference, physical, its allocator,
@@ -311,6 +349,17 @@ impl<D: ReadAt> Volume<D> {
                 continue;
             }
             let node = Node::at(&page, PAGE_HEADER_SIZE)?;
+            // Each key once (a lookup finds one of two rows with a key).
+            if node.is_leaf() {
+                let keys: Vec<&[u8]> = node.rows().flatten().map(|r| r.key).collect();
+                if let Some(w) = keys.windows(2).find(|w| w[0] == w[1]) {
+                    report.problem(format!(
+                        "{what}: page {:#x}: two rows with the key {}",
+                        r.lcns[0],
+                        hex(w[0], 0x20)
+                    ));
+                }
+            }
             let depth = match parent {
                 Some((level, _)) if node.level.checked_add(1) != Some(level) => {
                     report.problem(format!(
@@ -367,6 +416,13 @@ impl<D: ReadAt> Volume<D> {
                     continue;
                 }
                 report.files += 1;
+                // Its record's rows first: what they lack makes the file
+                // fail to open, and they say why.
+                if let Ok(rows) = self.attribute_rows(&e) {
+                    for p in record_problems(&rows) {
+                        report.problem(format!("{name}: {p}"));
+                    }
+                }
                 let file = match self.open_file(&e) {
                     Ok(f) => f,
                     Err(err) => {

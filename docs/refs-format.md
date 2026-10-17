@@ -741,7 +741,12 @@ table's rows for a text diff):
   header; values as for the levels of $DATA (the header: next level id
   0x1001, one level; the live level: the extent map, row flag 1). A new
   set takes 0xf000, or the record's counter at 0x9c plus one, and the
-  counter follows; rewriting a stream keeps its set id. Deleting one in
+  counter follows; rewriting a stream keeps its set id. `refs` takes one
+  past both the counter and every set the record has, and rewriting a
+  file's data keeps the counter (1.2.1 reset it, and the next stream took
+  the set of an existing one: both then shared its rows). `refs check`
+  reports a key twice in a page or a record and a stream naming a set
+  without rows. Deleting one in
   clusters removes its row and its set's rows and frees the set's
   clusters. `refs` writes and deletes streams both ways (**verified**:
   Windows' rows but for the order of rewritten rows and the split of
