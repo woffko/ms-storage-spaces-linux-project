@@ -27,6 +27,7 @@ refs \- read Microsoft ReFS volumes on Linux
 .br
 .B refs mount
 .I source mountpoint
+.RB [ \-\-rw ]
 .RB [ \-\-allow\-other ]
 .RB [ \-\-force ]
 .br
@@ -273,9 +274,11 @@ at the end of the volume, both checkpoints and the log (records newer
 than the checkpoint mean Windows let go of the volume without dismounting
 it: what refs reads is older than what Windows shows), and for
 .B \-\-space
-or a device of an attached space the checks of the pool and the space; a
-report with the evidence and the verdict (healthy, degraded, suspect,
-failed), exiting with 1 unless healthy.
+or a device of an attached space the checks of the pool and the space
+(fs.refs.boot, fs.refs.superblock, fs.refs.checkpoint, fs.refs.log;
+space.verdict, the verdict attach gave the space; fs.refs.checks when the
+checks did not finish); a report with the evidence and the verdict
+(healthy, degraded, suspect, failed), exiting with 1 unless healthy.
 .BR ls ,
 .BR cat ,
 .B stat

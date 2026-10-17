@@ -2,6 +2,13 @@
 
 ## 1.2.2 (unreleased)
 
+Fixes from a code audit of 1.2.1 (2026-10-16): checks that a hostile or
+damaged disk could make panic, loop or exhaust memory as root at attach
+time, verdicts that called damaged spaces healthy, names that reached
+terminals raw, ways `refs` lost data, and documentation that said more
+than the code does. The 24-hour fuzz run of every target was not repeated
+for this hotfix (docs/security.md says what ran).
+
 ### Fixes
 
 * `spaces attach` checks every pool of the system in one process, as
@@ -148,6 +155,24 @@
 * `ruzstd` 0.9.1: with 0.9.0 a tiny ZSTD frame could exhaust memory
   (RUSTSEC-2026-0344) when `refs` read a compressed file of a hostile
   volume.
+
+### Documentation
+
+* Turning off attaching at plug-in with the packages: their udev rule is
+  in `/usr/lib/udev/rules.d`, where removing it does not last; override it
+  with a link to `/dev/null` in `/etc/udev/rules.d`, or mask the unit
+  (user guide, spaces(8) FILES, which lists both rule locations and the
+  report and udev directories). spaces(8) and the user guide list every
+  check id; `attach --degraded` and `--force` say what 1.2.0 made them;
+  refs(1) shows `mount --rw`.
+* The user guide says that a pool's spaces served by processes attach one
+  at a time until 1.3, that the attach unit drops capabilities by a
+  deny-list (CAP_SYS_ADMIN and others stay), that `--unclean-parity data`
+  is for reading, and that `disk add --wipe` clears nothing beyond the
+  partition table it writes.
+* docs/security.md: `refs` writes when asked and runs as root for
+  udisks2, ReFS volumes root mounts are open to every user, what is
+  bounded and what is not, and the fuzz runs as they were.
 
 ## 1.2.1 (2026-10-11)
 

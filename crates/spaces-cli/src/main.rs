@@ -78,11 +78,13 @@ enum Command {
         space: Option<String>,
         #[arg(long, value_enum, default_value = "auto")]
         backend: attach::Backend,
-        /// Attach pools with missing disks as long as every space is readable.
+        /// Attach degraded spaces too (missing disks, out-of-date copies:
+        /// redundancy reduced), read-only.
         #[arg(long)]
         degraded: bool,
-        /// Attach even when fewer than half of the pool's disks are present
-        /// (their metadata may describe an old state of the pool).
+        /// Attach degraded and suspect spaces too (a pool without its
+        /// quorum, copies that disagree, a ReFS log Windows would replay),
+        /// read-only. Failed spaces are never attached.
         #[arg(long)]
         force: bool,
         /// Attach read-write (only spaces whose state is fully understood;

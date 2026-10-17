@@ -22,7 +22,7 @@ disks are never written, unless a space is attached read-write
 | Storage tiers, mirror-accelerated parity | read |
 | 512-byte and 4 KiB logical sectors, interleave 16 KiB to 1 MiB | read |
 | Pools after a crash or power loss | read; parity stripes and mirror rows left inconsistent by writes in flight are refused (see below) |
-| Several spaces per pool, fragmented and extended spaces | read |
+| Several spaces per pool, fragmented and extended spaces | read; through servers one at a time (see below) |
 | Member disks with 512-byte, 512e and 4Kn sectors | read |
 | Pools after a disk was retired, replaced or removed | read |
 | Pools created by Windows 8/10/Server | not supported |
@@ -70,8 +70,13 @@ would do) removes it again; detach spaces first (`spaces detach`).
 The udev rule starts `storage-spaces-attach.service` whenever a pool member
 appears, so pools are attached at boot and when their disks are plugged in
 (read-only; see Hardening below); installing starts it once too, for the
-pools whose disks are there already. To attach by hand only, remove
-`/etc/udev/rules.d/69-storage-spaces.rules`. Removing the package
+pools whose disks are there already. To attach by hand only: after
+`contrib/install.sh`, remove `/etc/udev/rules.d/69-storage-spaces.rules`;
+with the packages, whose rule is
+`/usr/lib/udev/rules.d/69-storage-spaces.rules` (an upgrade would bring a
+removed one back), override it with an empty one, `sudo ln -s /dev/null
+/etc/udev/rules.d/69-storage-spaces.rules`, or mask the unit, `sudo
+systemctl mask storage-spaces-attach.service`. Removing the package
 detaches the spaces its `spaces` serves; the spaces another installation's
 `spaces` serves (such as `contrib/install.sh`'s in `/usr/local`) stay
 attached.
@@ -134,6 +139,14 @@ logical sector size matches the disks, and ublk otherwise. ublk keeps
 mirror and parity spaces readable when a disk fails while mounted; the
 device-mapper mapping reads one copy only.
 
+Until 1.3 a pool's spaces share its disks badly: a space served by a
+process (ublk, nbd, fuse: mirror and parity spaces, and the simple ones
+device-mapper does not serve, see above and Writing) holds the pool's
+disks exclusively, so that another space of that pool, through any
+backend, fails to attach ("in use by another process") while it is
+attached; device-mapper spaces of one pool attach side by side.
+`spaces export` and `spaces check` are not affected.
+
 | Backend | Requirement |
 |---|---|
 | `dm` | `dmsetup` |
@@ -171,8 +184,10 @@ writes into rows not allocated yet. In a new row of a thin parity space, the
 stripes not written yet hold whatever the disks held and their parity does
 not match it; the parity journal lists them as not consistent, as it does
 for rows Windows allocates, so `spaces` refuses to read them (I/O error)
-unless `--unclean-parity data` is given. File systems do not read what they
-have not written, but a copy of the whole device does.
+unless `--unclean-parity data` is given (for reading: writing needs a
+healthy space, which a space with such stripes is not). File systems do
+not read what they have not written, but a copy of the whole device
+does.
 
 Discards (`fstrim`, the `discard` mount option, `blkdiscard`) give the rows
 of thin simple and mirror spaces back to the pool once they are discarded
@@ -299,7 +314,9 @@ sudo spaces disk retire --disk 2 --yes DISKS...                        # move ev
 sudo spaces disk remove --disk 2 --yes DISKS...                        # then take it out of the pool
 ```
 
-`disk add` takes a blank disk (`--wipe` as above) and a pool of at most
+`disk add` takes a blank disk (`--wipe` takes one that is not, and unlike
+`pool create --wipe` clears nothing but what the new partition table
+overwrites) and a pool of at most
 four disks. `disk retire` moves every extent of the disk to the others
 (pools of up to five disks); it needs room there, and the rows of every
 space need enough other disks (a three-column parity space needs three
@@ -429,7 +446,12 @@ volume in a space attached with `--degraded` or `--force` mounts only with
   does not read). A log whose control page is not found is suspect when
   the checkpoint shows records written to it (whether Windows would
   replay some is not known), a warning when it shows none.
-* `space.checks`: only when the checks of a space did not finish. A panic
+* `fs`: a partition of neither file system (skipped: not checked).
+* `pool.open`: disks that do not assemble into a pool (failed, with why).
+* `space.verdict` (`refs check --quick` and `refs mount` on a device of an
+  attached space): the verdict attach gave the space.
+* `space.checks` (`fs.refs.checks` for a volume `refs` checks on its
+  own): only when the checks of a space did not finish. A panic
   in them (a defect of this program that the metadata reaches) fails the
   space; checks that take longer than 40 s make it suspect
   (`SPACES_CHECK_TIMEOUT=SECONDS` sets the limit, 0 none; `--deep` has
@@ -799,8 +821,11 @@ security`, scores 9.5 UNSAFE before, 5.1 MEDIUM after):
 
 * `storage-spaces-attach.service` (installed by `contrib/install.sh`):
   no new privileges, the file system read-only except `/run`, a private
-  `/tmp`, no namespaces, no network but local sockets and netlink, only
-  the capabilities device-mapper and the module loader need. Home
+  `/tmp`, no namespaces, no network but local sockets and netlink, and
+  without 24 capabilities it has no use for (a deny-list:
+  `CapabilityBoundingSet=~...`; those device-mapper and the module loader
+  need, CAP_SYS_ADMIN and CAP_SYS_MODULE, stay, and so do others such as
+  CAP_SYS_RAWIO and CAP_DAC_OVERRIDE; there is no system call filter). Home
   directories stay readable, as pool disks may be image files. The
   private `/tmp` and `/var/tmp` are empty file systems of its own
   (`TemporaryFileSystem=`), not `PrivateTmp=`: that orders a unit after

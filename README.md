@@ -31,7 +31,7 @@ against pools created by Windows.
 | Dual parity, 7-10 columns (Reed-Solomon over GF(16)) | read; any two missing disks rebuilt |
 | Dual parity, 11+ columns (local reconstruction code) | read; any two missing disks rebuilt |
 | Storage tiers, mirror-accelerated parity | read |
-| Fixed and thin provisioning, several spaces per pool, extended spaces | read |
+| Fixed and thin provisioning, several spaces per pool, extended spaces | read (attached through a server process, one space of a pool at a time until 1.3: see the user guide) |
 | The per-space write-back cache | read, including data not yet moved out of it |
 | 512-byte and 4 KiB logical sectors; 512e and 4Kn member disks | read |
 | Retired, replaced or missing disks, out-of-date mirror copies | read as far as the redundancy allows |

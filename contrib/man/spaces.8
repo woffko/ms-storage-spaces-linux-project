@@ -206,7 +206,11 @@ does before it reads them, and prints a report per space: every check
 (pool.quorum, pool.members, pool.database, pool.clean, space.state,
 space.layout, space.cache, space.journal, space.drl, space.partitions,
 fs.ntfs, fs.refs.boot, fs.refs.superblock, fs.refs.checkpoint,
-fs.refs.log; space.checks when the checks did not finish) with its status (ok, info, warning, skipped, degraded,
+fs.refs.log, fs for a partition of neither file system; pool.open for
+disks that do not assemble into a pool, space.checks when the checks did
+not finish; with
+.BR \-\-deep ,
+deep.scrub and deep.refs) with its status (ok, info, warning, skipped, degraded,
 suspect, failed), its evidence (where: device and byte offset, LBA, and
 for a byte of the space the slab, disk and physical offset that hold it;
 what was expected and what was found, bytes in hex), where the truth
@@ -403,10 +407,26 @@ Read-only.
 .I /run/storage-spaces/
 State of attached spaces.
 .TP
+.I /run/storage-spaces/reports/
+The reports of the checks of attach and
+.B refs mount
+(as root), a text and a JSON file per space or volume.
+.TP
+.I /run/storage-spaces/udev/
+The udev properties of the devices attach made.
+.TP
+.I /usr/lib/udev/rules.d/69-storage-spaces.rules
+.TQ
 .I /etc/udev/rules.d/69-storage-spaces.rules
 Starts
 .B storage-spaces-attach.service
-when a pool member appears.
+when a pool member appears: the packages install the first,
+.B contrib/install.sh
+the second. To attach by hand only, remove the second, or override the
+first with
+.B ln \-s /dev/null /etc/udev/rules.d/69-storage-spaces.rules
+(or
+.BR "systemctl mask storage-spaces-attach.service" ).
 .SH EXAMPLES
 .nf
 spaces scan
