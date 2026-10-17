@@ -111,6 +111,15 @@
   page or record and a stream whose set has no rows (it saw nothing of
   this before, nor did the fuzzing of the writer, which now writes and
   deletes named streams too).
+* `refs mount --rw`: renaming a file over another to a name `refs` does
+  not write yet (anything but printable ASCII: `mv -f tmp кириллица.txt`,
+  the way editors save) deleted the other file, then failed; the rename is
+  checked first now, and a refused one changes nothing. Closing a file
+  opened for reading while it was open for writing made the writer's next
+  write fail (EBADF) and could lose what it had written. A write-back that
+  failed (a write error) was forgotten, and the next flush and the close
+  succeeded; now it is kept, and every flush tries again and reports the
+  error until it is written.
 * ReFS `fs.refs.log`: a log whose control page was not found was a
   warning, so healthy; it is suspect now when the checkpoint shows records
   written to the log, a warning when it shows none, and the summary says

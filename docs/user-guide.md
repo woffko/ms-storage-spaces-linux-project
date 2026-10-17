@@ -662,7 +662,12 @@ streams (`setfattr -n user.NAME`). Every change is one transaction with a new ch
 crash or a pulled cable leaves the volume as it was after the last
 completed change. Symbolic links cannot be made. The mount is served by
 one thread; it suits copying files to or from a Dev Drive, not heavy
-use. A request that stops on an internal error (a defect of `refs` that
+use. Replacing a file by renaming another over it (`mv -f`, and the way
+editors save) takes two changes until 1.3: the file there is deleted, then
+the other renamed, so a crash between them leaves the first deleted and
+the other under its old name. What the rename needs is checked before the
+first change: a rename `refs` refuses (to a name that is not printable
+ASCII, for now) changes nothing. A request that stops on an internal error (a defect of `refs` that
 the volume reaches) fails with EIO and the mount goes on, read-only or
 not; after one inside a change, the volume in memory may be half changed,
 so every later request fails with EIO: unmount it (the volume on disk is

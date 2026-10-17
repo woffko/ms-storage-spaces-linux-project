@@ -191,6 +191,9 @@ struct State {
     dir_entries: usize,
     files: HashMap<String, Arc<RefsFile>>,
     pending: HashMap<u64, Pending>,
+    /// The handles open for writing: the inode each holds the buffer of.
+    writers: HashMap<u64, u64>,
+    next_handle: u64,
     /// The lookups the kernel holds per inode (`forget` gives them back).
     lookups: HashMap<u64, u64>,
 }
@@ -206,11 +209,22 @@ impl State {
             dir_entries: 0,
             files: HashMap::new(),
             pending: HashMap::new(),
+            writers: HashMap::new(),
+            next_handle: 1,
             lookups: HashMap::new(),
         };
         s.paths.insert(INodeNo::ROOT.0, vec!["/".to_owned()]);
         s.inodes.insert("/".to_owned(), INodeNo::ROOT.0);
         s
+    }
+
+    /// A new handle open for writing inode `ino` (handles for reading are
+    /// 0: they hold no buffer).
+    fn writer(&mut self, ino: u64) -> u64 {
+        let fh = self.next_handle;
+        self.next_handle += 1;
+        self.writers.insert(fh, ino);
+        fh
     }
 
     /// The inode of a path, made on first sight; the names of one record
@@ -654,27 +668,146 @@ impl RefsFs {
     }
 
     /// Writes back a file opened for writing, if it changed: in place
-    /// what was written (`update_file`), or the file anew.
+    /// what was written (`update_file`), or the file anew. It stays
+    /// changed until that is done, so that every later flush tries again
+    /// and reports the error (1.2.1 forgot the changes at the first try).
     fn write_back(&self, ino: u64) -> Result<(), Errno> {
         let (file, len, ranges, whole) = {
-            let mut s = self.state.lock_ok();
-            match s.pending.get_mut(&ino) {
-                Some(p) if p.dirty => {
-                    p.dirty = false;
-                    let ranges = std::mem::take(&mut p.ranges);
-                    let whole = std::mem::replace(&mut p.whole, false);
-                    (p.file.try_clone().map_err(|_| Errno::EIO)?, p.len, ranges, whole)
-                }
+            let s = self.state.lock_ok();
+            match s.pending.get(&ino) {
+                Some(p) if p.dirty => (
+                    p.file.try_clone().map_err(|_| Errno::EIO)?,
+                    p.len,
+                    p.ranges.clone(),
+                    p.whole,
+                ),
                 _ => return Ok(()),
             }
         };
         let path = self.path(ino)?;
         let source = PendingData(&file, len);
         if whole {
-            self.change(&path, |v| v.write_file_from(&path, &source, now()))
+            self.change(&path, |v| v.write_file_from(&path, &source, now()))?;
         } else {
-            self.change(&path, |v| v.update_file(&path, &source, &ranges, now()))
+            self.change(&path, |v| v.update_file(&path, &source, &ranges, now()))?;
         }
+        // Written (a mount for writing has one thread: nothing was written
+        // meanwhile).
+        if let Some(p) = self.state.lock_ok().pending.get_mut(&ino) {
+            p.dirty = false;
+            p.ranges.clear();
+            p.whole = false;
+        }
+        Ok(())
+    }
+
+    /// Opens inode `ino` with open(2)'s `flags`: for writing, its content
+    /// in a buffer its writers share. The handle (0 for reading only).
+    fn open_inode(&self, ino: u64, flags: i32) -> Result<u64, Errno> {
+        let path = self.path(ino)?;
+        let vol = self.vol.read_ok();
+        self.file(&vol, &path)?;
+        if flags & 3 == 0 {
+            return Ok(0);
+        }
+        if !self.writable {
+            return Err(Errno::EROFS);
+        }
+        let truncate = flags & O_TRUNC != 0;
+        let mut s = self.state.lock_ok();
+        if let Some(p) = s.pending.get_mut(&ino) {
+            if truncate {
+                p.set_len(0)?;
+                p.dirty = true;
+                p.whole = true;
+            }
+            p.handles += 1;
+            return Ok(s.writer(ino));
+        }
+        drop(s);
+        let mut p = if truncate {
+            Pending::new()?
+        } else {
+            self.content(&vol, &path)?
+        };
+        p.dirty = truncate;
+        p.whole = truncate;
+        let mut s = self.state.lock_ok();
+        s.pending.insert(ino, p);
+        Ok(s.writer(ino))
+    }
+
+    /// Writes `data` at `offset` into the buffer of inode `ino`.
+    fn write_inode(&self, ino: u64, offset: u64, data: &[u8]) -> Result<u32, Errno> {
+        let mut s = self.state.lock_ok();
+        let p = s.pending.get_mut(&ino).ok_or(Errno::EBADF)?;
+        if offset.saturating_add(data.len() as u64) > MAX_WRITTEN {
+            return Err(Errno::EFBIG);
+        }
+        p.write_at(offset, data)?;
+        p.dirty = true;
+        Ok(data.len() as u32)
+    }
+
+    /// Closes handle `fh` of inode `ino`: what was written goes to the
+    /// volume, and the buffer goes with the last handle open for writing
+    /// once it is written (a handle for reading holds none: 1.2.1 counted
+    /// its close against the writers, and a writer still open then wrote
+    /// into nothing, EBADF).
+    fn release_inode(&self, ino: u64, fh: u64) -> Result<(), Errno> {
+        let r = self.write_back(ino);
+        let mut s = self.state.lock_ok();
+        if s.writers.remove(&fh).is_some()
+            && let Some(p) = s.pending.get_mut(&ino)
+        {
+            p.handles = p.handles.saturating_sub(1);
+        }
+        if s.pending.get(&ino).is_some_and(|p| p.handles == 0 && !p.dirty) {
+            s.pending.remove(&ino);
+        }
+        r
+    }
+
+    /// Renames `from` to `to` (paths), replacing what `to` names unless
+    /// `flags` say otherwise. Replacing takes two changes (the target is
+    /// deleted, then the source renamed): everything the rename checks is
+    /// checked before the first, so that a refused rename leaves the
+    /// target (1.2.1 deleted it, then the library refused the new name).
+    fn rename_paths(&self, from: &str, to: &str, flags: RenameFlags) -> Result<(), Errno> {
+        if flags.contains(RenameFlags::RENAME_EXCHANGE) {
+            return Err(Errno::EINVAL);
+        }
+        let exists = match self.resolve(&self.vol.read_ok(), to) {
+            Err(Errno::ENOENT) => None,
+            r => r?,
+        };
+        if let Some(target) = exists {
+            if flags.contains(RenameFlags::RENAME_NOREPLACE) {
+                return Err(Errno::EEXIST);
+            }
+            // The name only changes case: Windows' names ignore case.
+            if !from.eq_ignore_ascii_case(to) {
+                let source = self.resolve(&self.vol.read_ok(), from)?.ok_or(Errno::EBUSY)?;
+                if source.is_dir() != target.is_dir() {
+                    return Err(if target.is_dir() { Errno::EISDIR } else { Errno::ENOTDIR });
+                }
+                if !self.writable {
+                    return Err(Errno::EROFS);
+                }
+                self.vol.read_ok().check_move(from, to).map_err(|e| errno(to, e))?;
+                self.change(to, |v| v.delete_file(to, now()))?;
+                self.changed(Some(to));
+            }
+        }
+        let (from_dir, _) = split(from);
+        let (to_dir, to_name) = split(to);
+        if from_dir == to_dir {
+            self.change(from, |v| v.rename(from, to_name, now()))?;
+        } else {
+            self.change(from, |v| v.move_file(from, to, now()))?;
+        }
+        self.moved(from, to);
+        Ok(())
     }
 
     /// The entry reply for a path just made.
@@ -875,36 +1008,7 @@ impl Filesystem for RefsFs {
             let r = (|| -> Result<(), Errno> {
                 let from = self.name_path(parent, name)?;
                 let to = self.name_path(newparent, newname)?;
-                if flags.contains(RenameFlags::RENAME_EXCHANGE) {
-                    return Err(Errno::EINVAL);
-                }
-                let exists = match self.resolve(&self.vol.read_ok(), &to) {
-                    Err(Errno::ENOENT) => None,
-                    r => r?,
-                };
-                if let Some(target) = exists {
-                    if flags.contains(RenameFlags::RENAME_NOREPLACE) {
-                        return Err(Errno::EEXIST);
-                    }
-                    // The name only changes case: Windows' names ignore case.
-                    if !from.eq_ignore_ascii_case(&to) {
-                        let source = self.resolve(&self.vol.read_ok(), &from)?.ok_or(Errno::EBUSY)?;
-                        if source.is_dir() != target.is_dir() {
-                            return Err(if target.is_dir() { Errno::EISDIR } else { Errno::ENOTDIR });
-                        }
-                        self.change(&to, |v| v.delete_file(&to, now()))?;
-                        self.changed(Some(&to));
-                    }
-                }
-                let (from_dir, _) = split(&from);
-                let (to_dir, to_name) = split(&to);
-                if from_dir == to_dir {
-                    self.change(&from, |v| v.rename(&from, to_name, now()))?;
-                } else {
-                    self.change(&from, |v| v.move_file(&from, &to, now()))?;
-                }
-                self.moved(&from, &to);
-                Ok(())
+                self.rename_paths(&from, &to, flags)
             })();
             match r {
                 Ok(()) => reply.ok(),
@@ -938,43 +1042,9 @@ impl Filesystem for RefsFs {
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
-        self.guard("open", move || {
-            let r = (|| -> Result<(), Errno> {
-                let path = self.path(ino.0)?;
-                let vol = self.vol.read_ok();
-                self.file(&vol, &path)?;
-                if flags.0 & 3 == 0 {
-                    return Ok(());
-                }
-                if !self.writable {
-                    return Err(Errno::EROFS);
-                }
-                let truncate = flags.0 & O_TRUNC != 0;
-                let mut s = self.state.lock_ok();
-                if let Some(p) = s.pending.get_mut(&ino.0) {
-                    p.handles += 1;
-                    if truncate {
-                        p.set_len(0)?;
-                        p.dirty = true;
-                        p.whole = true;
-                    }
-                    return Ok(());
-                }
-                drop(s);
-                let mut p = if truncate {
-                    Pending::new()?
-                } else {
-                    self.content(&vol, &path)?
-                };
-                p.dirty = truncate;
-                p.whole = truncate;
-                self.state.lock_ok().pending.insert(ino.0, p);
-                Ok(())
-            })();
-            match r {
-                Ok(()) => reply.opened(FileHandle(0), FopenFlags::empty()),
-                Err(e) => reply.error(e),
-            }
+        self.guard("open", move || match self.open_inode(ino.0, flags.0) {
+            Ok(fh) => reply.opened(FileHandle(fh), FopenFlags::empty()),
+            Err(e) => reply.error(e),
         })
     }
 
@@ -989,19 +1059,22 @@ impl Filesystem for RefsFs {
         reply: ReplyCreate,
     ) {
         self.guard("create", move || {
-            let r = (|| -> Result<FileAttr, Errno> {
+            let r = (|| -> Result<(FileAttr, u64), Errno> {
                 let path = self.name_path(parent, name)?;
                 self.change(&path, |v| v.create_file(&path, b"", now()))?;
                 let ino = self.inode(&path, None);
                 let mut p = Pending::new()?;
                 p.whole = true;
-                self.state.lock_ok().pending.insert(ino, p);
-                self.attr(&self.vol.read_ok(), ino)
+                let mut s = self.state.lock_ok();
+                s.pending.insert(ino, p);
+                let fh = s.writer(ino);
+                drop(s);
+                Ok((self.attr(&self.vol.read_ok(), ino)?, fh))
             })();
             match r {
-                Ok(attr) => {
+                Ok((attr, fh)) => {
                     self.state.lock_ok().looked_up(attr.ino.0);
-                    reply.created(&TTL, &attr, fuser::Generation(0), FileHandle(0), FopenFlags::empty())
+                    reply.created(&TTL, &attr, fuser::Generation(0), FileHandle(fh), FopenFlags::empty())
                 }
                 Err(e) => reply.error(e),
             }
@@ -1057,19 +1130,9 @@ impl Filesystem for RefsFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
-        self.guard("write", move || {
-            let mut s = self.state.lock_ok();
-            let Some(p) = s.pending.get_mut(&ino.0) else {
-                return reply.error(Errno::EBADF);
-            };
-            if offset + data.len() as u64 > MAX_WRITTEN {
-                return reply.error(Errno::EFBIG);
-            }
-            if let Err(e) = p.write_at(offset, data) {
-                return reply.error(e);
-            }
-            p.dirty = true;
-            reply.written(data.len() as u32)
+        self.guard("write", move || match self.write_inode(ino.0, offset, data) {
+            Ok(n) => reply.written(n),
+            Err(e) => reply.error(e),
         })
     }
 
@@ -1183,25 +1246,15 @@ impl Filesystem for RefsFs {
         &self,
         _req: &Request,
         ino: INodeNo,
-        _fh: FileHandle,
+        fh: FileHandle,
         _flags: OpenFlags,
         _lock_owner: Option<LockOwner>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        self.guard("release", move || {
-            let r = self.write_back(ino.0);
-            let mut s = self.state.lock_ok();
-            if let Some(p) = s.pending.get_mut(&ino.0) {
-                p.handles = p.handles.saturating_sub(1);
-                if p.handles == 0 && !p.dirty {
-                    s.pending.remove(&ino.0);
-                }
-            }
-            match r {
-                Ok(()) => reply.ok(),
-                Err(e) => reply.error(e),
-            }
+        self.guard("release", move || match self.release_inode(ino.0, fh.0) {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(e),
         })
     }
 
@@ -1659,6 +1712,8 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use storage_spaces::io::{Overlay, SparseImage};
+
     /// The status file of `refs mount --status-file`: opening with the
     /// bytes read while the volume opens, then mounted or failed, each
     /// state whole; nothing changes it after that.
@@ -1790,16 +1845,17 @@ mod tests {
         assert!(s.files.len() <= FILES_KEPT);
     }
 
-    /// A volume served from memory (the fixture r314small; changes stay
-    /// in an overlay).
-    fn served(writable: bool) -> RefsFs {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../refs/tests/fixtures/r314small");
-        let image =
-            storage_spaces::io::SparseImage::read_from(std::fs::File::open(dir.join("disk.fixture")).unwrap()).unwrap();
+    /// A fixture's volume served from the device `device` makes of its
+    /// image.
+    fn serve(name: &str, writable: bool, device: impl FnOnce(SparseImage) -> Rw) -> RefsFs {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../refs/tests/fixtures")
+            .join(name);
+        let image = SparseImage::read_from(std::fs::File::open(dir.join("disk.fixture")).unwrap()).unwrap();
         let text = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
         let manifest: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).unwrap();
         let offset = manifest["partition_offset"].as_u64().unwrap();
-        let vol = Volume::open(Box::new(storage_spaces::io::Overlay::new(image)) as Rw, offset).unwrap();
+        let vol = Volume::open(device(image), offset).unwrap();
         RefsFs {
             vol: RwLock::new(vol),
             writable,
@@ -1808,6 +1864,110 @@ mod tests {
             state: Mutex::new(State::new()),
             broken: AtomicBool::new(false),
         }
+    }
+
+    /// The fixture r314small served from memory (changes stay in an
+    /// overlay).
+    fn served(writable: bool) -> RefsFs {
+        serve("r314small", writable, |image| Box::new(Overlay::new(image)))
+    }
+
+    /// A device whose writes fail while `fail` is set.
+    struct Flaky(Overlay<SparseImage>, Arc<AtomicBool>);
+
+    impl storage_spaces::io::ReadAt for Flaky {
+        fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+            self.0.read_exact_at(buf, offset)
+        }
+
+        fn size(&self) -> std::io::Result<u64> {
+            self.0.size()
+        }
+    }
+
+    impl WriteAt for Flaky {
+        fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
+            if self.1.load(Ordering::SeqCst) {
+                return Err(std::io::Error::other("a write error"));
+            }
+            self.0.write_all_at(buf, offset)
+        }
+
+        fn flush(&self) -> std::io::Result<()> {
+            self.0.flush()
+        }
+    }
+
+    /// Renaming a file over another to a name the library does not write
+    /// (it takes printable ASCII only, for now) is refused before anything
+    /// changes: the file there stays (1.2.1 deleted it, then the rename
+    /// failed).
+    #[test]
+    fn a_refused_rename_over_a_file_leaves_it() {
+        let fs = serve("r314basic4k", true, |image| Box::new(Overlay::new(image)));
+        let r = fs.rename_paths("/names/plain.txt", "/names/кириллица.txt", RenameFlags::empty());
+        assert_eq!(r, Err(Errno::EOPNOTSUPP));
+        let vol = fs.vol.read_ok();
+        assert!(vol.lookup("/names/кириллица.txt").is_ok(), "the target is gone");
+        let size = vol.lookup("/names/plain.txt").unwrap().size;
+        drop(vol);
+        // Over an ASCII name: replaced.
+        fs.rename_paths("/names/plain.txt", "/names/with spaces.txt", RenameFlags::empty())
+            .unwrap();
+        let vol = fs.vol.read_ok();
+        assert!(vol.lookup("/names/plain.txt").is_err());
+        assert_eq!(vol.lookup("/names/with spaces.txt").unwrap().size, size);
+    }
+
+    /// A file open for writing and for reading: closing the reader leaves
+    /// the writer's buffer (1.2.1 counted every close against the writers:
+    /// the writer's next write failed with EBADF, and what it wrote before
+    /// was written back only if the reader closed last).
+    #[test]
+    fn closing_a_reader_leaves_the_writers_buffer() {
+        let fs = served(true);
+        let ino = fs.inode("/small.txt", None);
+        let w = fs.open_inode(ino, 1).unwrap();
+        let r = fs.open_inode(ino, 0).unwrap();
+        assert_eq!(r, 0);
+        assert_eq!(fs.write_inode(ino, 0, b"first"), Ok(5));
+        fs.release_inode(ino, r).unwrap();
+        assert_eq!(fs.write_inode(ino, 5, b" then"), Ok(5));
+        fs.release_inode(ino, w).unwrap();
+        assert!(!fs.state.lock_ok().pending.contains_key(&ino));
+        let vol = fs.vol.read_ok();
+        let file = vol.open_file(&vol.lookup("/small.txt").unwrap()).unwrap();
+        let mut buf = [0u8; 10];
+        vol.read_stream(file.data.as_ref().unwrap(), 0, &mut buf).unwrap();
+        assert_eq!(&buf, b"first then");
+    }
+
+    /// A write-back that fails keeps what was written: every later flush
+    /// tries again and reports the error until it is written (1.2.1 forgot
+    /// it at the first error, and the next flush said all was well).
+    #[test]
+    fn a_failed_write_back_is_kept_and_reported_until_written() {
+        let fail = Arc::new(AtomicBool::new(false));
+        let device = fail.clone();
+        let fs = serve("r314small", true, move |image| {
+            Box::new(Flaky(Overlay::new(image), device))
+        });
+        let ino = fs.inode("/small.txt", None);
+        let fh = fs.open_inode(ino, 1).unwrap();
+        fs.write_inode(ino, 0, b"kept").unwrap();
+        fail.store(true, Ordering::SeqCst);
+        assert_eq!(fs.write_back(ino), Err(Errno::EIO));
+        assert_eq!(fs.write_back(ino), Err(Errno::EIO), "the second flush");
+        assert_eq!(fs.release_inode(ino, fh), Err(Errno::EIO));
+        assert!(fs.state.lock_ok().pending.contains_key(&ino), "the buffer went");
+        fail.store(false, Ordering::SeqCst);
+        fs.write_back(ino).unwrap();
+        let vol = fs.vol.read_ok();
+        let file = vol.open_file(&vol.lookup("/small.txt").unwrap()).unwrap();
+        let mut buf = [0u8; 4];
+        vol.read_stream(file.data.as_ref().unwrap(), 0, &mut buf).unwrap();
+        assert_eq!(&buf, b"kept");
+        assert_eq!(vol.check(&[]).unwrap().problems, Vec::<String>::new());
     }
 
     /// Every handler runs in `guard`: a panic in one answers its request

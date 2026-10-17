@@ -3182,6 +3182,36 @@ impl<D: WriteAt> Volume<D> {
         self.split_file(path, to, false, now)
     }
 
+    /// What `rename` and `move_file` of `path` to `to` check before they
+    /// write, but that `to` is free: whoever replaces `to` deletes it
+    /// first, and checks this before (a move refused after that would
+    /// leave neither).
+    pub fn check_move(&self, path: &str, to: &str) -> Result<()> {
+        self.writable_version()?;
+        let entry = self.lookup(path.trim_end_matches('/'))?;
+        let to = to.trim_end_matches('/');
+        let (to_parent, to_name) = to.rsplit_once('/').unwrap_or(("", to));
+        check_name(to_name)?;
+        let target = self.directory_of(to_parent)?;
+        let Target::Directory(oid) = entry.target else {
+            return self.file_at(path).map(drop);
+        };
+        if entry.attributes & 0x400 != 0 || oid == ROOT_DIRECTORY {
+            return Err(Error::Unsupported(format!("{path}: a junction or the root")));
+        }
+        let mut up = target;
+        for _ in 0..4096 {
+            if up == oid {
+                return Err(Error::Unsupported(format!("{path}: moving a directory below itself")));
+            }
+            if up == ROOT_DIRECTORY {
+                break;
+            }
+            up = self.parent_of(up)?;
+        }
+        Ok(())
+    }
+
     /// Moves or renames a directory, as Windows does: its entry (times
     /// and all) goes to the new parent under the new name, the link row of
     /// its own record names them, its parent-child row follows, and the
