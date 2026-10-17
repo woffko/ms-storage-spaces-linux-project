@@ -16,6 +16,11 @@
 #            the space nothing uses anew with the new program and keeps the
 #            one whose volume is mounted on its old server, saying so
 #   remove   removing it detaches the spaces its own spaces serves, and only those
+#   partitions  a space whose table names 200 partitions (a pool made here,
+#            in ~/sstest/scratch/parts): attach makes no devices for them
+#            (at most 128), says so and attaches the space, in seconds
+#            (1.2.1 made a device for each, two programs and a wait for udev
+#            apiece)
 # Usage: [LINUX_VM_HOST=user@address] [OLD_DEB=deb] tools/package-vm-check.sh DEB [CASE...]
 # Test pools: testdata/pools/{wc4k,ntfstier,sect4k}, copied to ~/sstest/pools
 # on the VM when missing, attached through read-only loop devices. Where an
@@ -27,7 +32,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 deb=${1:?usage: tools/package-vm-check.sh DEB [CASE...]}
 shift
-cases=${*:-install gpt user cycle servers busy upgrade remove}
+cases=${*:-install gpt user cycle servers busy partitions upgrade remove}
 host=${LINUX_VM_HOST:-192.168.189.142}
 [[ $host == *@* ]] || host=codex@$host
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -i "$HOME/.ssh/rustadmin_vm_ed25519")
@@ -83,7 +88,7 @@ attach_pools() { # attach_pools POOL...: loop devices of the pools' disks (attac
   done
 }
 ours() { # dm names of the attached spaces of the test pools
-  sudo sh -c 'cat /run/storage-spaces/*.state' 2>/dev/null | sed -n 's/^dm=\(ss-ss_\(wc4k\|ntfstier\|sect4k\)-[^-]*\)$/\1/p' | sort -u
+  sudo sh -c 'cat /run/storage-spaces/*.state' 2>/dev/null | sed -n 's/^dm=\(ss-ss_\(wc4k\|ntfstier\|sect4k\|parts\)-[^-]*\)$/\1/p' | sort -u
 }
 served_by() { # the program the server of attached space $1 (dm name) runs, "" without a server
   local f u
@@ -116,10 +121,11 @@ cleanup() { # the test pools' spaces and loop devices, by whichever spaces is th
       [[ -x $b ]] && sudo "$b" detach "$d" >/dev/null 2>&1 && break
     done
   done
-  for l in $(losetup -a | grep -E "($HOME/sstest|/srv/spaces)/pools/(wc4k|ntfstier|sect4k)/" | cut -d: -f1); do
+  for l in $(losetup -a | grep -E "($HOME/sstest|/srv/spaces)/(pools/(wc4k|ntfstier|sect4k)|scratch/parts)/" | cut -d: -f1); do
     sudo losetup -d "$l" 2>/dev/null || true
   done
   sudo rm -rf /opt/sstest
+  rm -rf ~/sstest/scratch/parts
 }
 cleanup # what an interrupted run left behind
 trap 'cleanup; rm -f ~/sstest/check.deb ~/sstest/old.deb' EXIT
@@ -245,6 +251,38 @@ for c in $CASES; do
     else
       result fail remove "$bad"
     fi ;;
+  partitions)
+    d=~/sstest/scratch/parts
+    rm -rf "${d:?}" && mkdir -p "$d" && truncate -s 3G "$d/disk0.img"
+    if ! /usr/sbin/spaces pool create --name ss_parts --yes "$d/disk0.img" >/dev/null 2>&1 ||
+      ! /usr/sbin/spaces space create --name parts --resiliency simple --size 1G --yes "$d/disk0.img" >/dev/null 2>&1; then
+      result fail partitions "cannot make the pool"
+      continue
+    fi
+    l=$(sudo losetup -f --show "$d/disk0.img")
+    # Only its own pool goes afterwards: the later cases need the others.
+    drop_parts() {
+      for x in $(ours | grep parts); do sudo /usr/sbin/spaces detach "$x" >/dev/null 2>&1; done
+      sudo losetup -d "$l" 2>/dev/null
+      rm -rf "${d:?}"
+    }
+    sudo /usr/sbin/spaces attach --rw --space parts "$l" >/dev/null 2>&1
+    dm=$(ours | grep parts | head -1)
+    if [[ -z $dm ]]; then result fail partitions "cannot attach it for writing"; drop_parts; continue; fi
+    { echo "label: gpt"; echo "table-length: 256"
+      for _ in $(seq 200); do echo "size=1MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"; done
+    } | sudo sfdisk -q "/dev/mapper/$dm" >/dev/null 2>&1
+    sudo /usr/sbin/spaces detach "$dm" >/dev/null 2>&1
+    t0=$SECONDS
+    out=$(sudo /usr/sbin/spaces attach --space parts "$l" 2>&1)
+    took=$((SECONDS - t0))
+    devices=$(find /dev/mapper -name "$dm-p*" | wc -l)
+    if [[ $out == *"no devices for its partitions: 200 partitions"* && -b /dev/mapper/$dm && $devices == 0 && $took -lt 60 ]]; then
+      result ok partitions "200 partitions, no devices for them, the space attached in ${took} s"
+    else
+      result fail partitions "$(echo "$out" | tr '\n' ' ') ($devices partition devices, ${took} s)"
+    fi
+    drop_parts ;;
   *) result fail "$c" "unknown case" ;;
   esac
 done

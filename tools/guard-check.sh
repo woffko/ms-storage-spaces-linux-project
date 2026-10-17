@@ -14,6 +14,13 @@
 #            read-only
 #   inherit  a ReFS volume in a space attached past its verdict mounts only
 #            with -o force
+#   hostile  a pool made here whose space holds a partition table with an
+#            entry of 0xff bytes and a partition whose ReFS boot sector
+#            claims 2^58 sectors, beside healthy wc4k: the hostile space is
+#            refused with its report, wc4k attached, nothing panics (1.2.1
+#            panicked in the checks, and the pools checked after it stayed
+#            detached); through udev and the attach unit, which ends with
+#            the refusal and not a crash, where the package's unit runs
 # Usage: [LINUX_VM_HOST=user@address] tools/guard-check.sh DEB [CASE...]
 # Pools: testdata/pools/{wc4k,ntfstier} and testdata/refs/{r314integ,
 # r314mirror}, copied to the VM when missing (to /srv/spaces where the VM
@@ -27,7 +34,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 deb=${1:?usage: tools/guard-check.sh DEB [CASE...]}
 shift
-cases=${*:-auto force refs inherit}
+cases=${*:-auto force refs inherit hostile}
 host=${LINUX_VM_HOST:-192.168.189.142}
 [[ $host == *@* ]] || host=codex@$host
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -i "$HOME/.ssh/rustadmin_vm_ed25519")
@@ -85,7 +92,7 @@ newloop() { # newloop IMAGE [losetup options]: LOOP = a read-only loop device
 }
 ours() { # dm names of the spaces of the test pools
   sudo sh -c 'cat /run/storage-spaces/*.state' 2>/dev/null |
-    sed -n 's/^dm=\(ss-ss_\(wc4k\|ntfstier\|r314mirror\)-[^-]*\)$/\1/p' | sort -u
+    sed -n 's/^dm=\(ss-ss_\(wc4k\|ntfstier\|r314mirror\|hostile\)-[^-]*\)$/\1/p' | sort -u
 }
 umount_all() {
   for m in /mnt/gc-*; do
@@ -261,6 +268,93 @@ for c in $CASES; do
     opts=$(findmnt -no OPTIONS --mountpoint /mnt/gc-inherit 2>/dev/null | tail -1)
     if mountpoint -q /mnt/gc-inherit && [[ ,$opts, == *,ro,* ]]; then result ok "inherit forced" "$opts"; else result fail "inherit forced" "$(one "$out")"; fi
     umount_all
+    cleanup ;;
+  hostile)
+    h=$scratch/hostile
+    mkdir -p "$h" && truncate -s 3G "$h/disk0.img"
+    if ! "$spaces" pool create --name ss_hostile --yes "$h/disk0.img" >/dev/null 2>&1 ||
+      ! "$spaces" space create --name hostile --resiliency simple --size 1G --yes "$h/disk0.img" >/dev/null 2>&1; then
+      result fail hostile "cannot make the pool"
+      continue
+    fi
+    # Its contents written through a read-write attach of it alone.
+    hl=$(sudo losetup -f --show "$h/disk0.img")
+    sudo "$spaces" attach --rw --space hostile "$hl" >/dev/null 2>&1
+    dm=$(ours | grep hostile | head -1)
+    if [[ -z $dm ]]; then result fail hostile "cannot attach it for writing"; sudo losetup -d "$hl"; continue; fi
+    sudo python3 - "/dev/mapper/$dm" <<'PY'
+import struct, sys, zlib
+lbas = (1 << 30) // 512
+entries = bytearray(128 * 128)
+entries[0:128] = b"\xff" * 128
+e = bytearray(128)
+e[0:16] = bytes.fromhex("a2a0d0ebe5b9334487c068b6b72699c7")
+e[16:32] = b"\x02" * 16
+e[32:40] = struct.pack("<Q", 2048)
+e[40:48] = struct.pack("<Q", 2048 + 65535)
+entries[128:256] = e
+h = bytearray(92)
+h[0:8] = b"EFI PART"
+h[8:16] = struct.pack("<II", 0x10000, 92)
+h[24:56] = struct.pack("<QQQQ", 1, lbas - 1, 34, lbas - 34)
+h[72:88] = struct.pack("<QII", 2, 128, 128)
+h[88:92] = struct.pack("<I", zlib.crc32(entries))
+h[16:20] = struct.pack("<I", zlib.crc32(bytes(h)))
+mbr = bytearray(512)
+mbr[446 + 4] = 0xEE
+mbr[446 + 8:446 + 16] = struct.pack("<II", 1, lbas - 1)
+mbr[510:512] = b"\x55\xaa"
+boot = bytearray(512)
+boot[3:11] = b"ReFS\0\0\0\0"
+boot[0x10:0x14] = b"FSRS"
+boot[0x18:0x28] = struct.pack("<QII", 1 << 58, 512, 8)
+boot[0x28:0x2a] = bytes([3, 14])
+c = 0
+for i in range(3, 512):
+    if i not in (0x16, 0x17):
+        c = (((c >> 1) | ((c & 1) << 15)) + boot[i]) & 0xFFFF
+boot[0x16:0x18] = struct.pack("<H", c)
+with open(sys.argv[1], "r+b") as f:
+    for at, data in [(0, mbr), (512, bytes(h).ljust(512, b"\0")), (1024, entries), (2048 * 512, boot)]:
+        f.seek(at)
+        f.write(data)
+PY
+    sudo "$spaces" detach "$dm" >/dev/null 2>&1
+    sudo losetup -d "$hl"
+    hguid=$(guid hostile "$h/disk0.img")
+    t0=$(date '+%F %T')
+    if ((explicit)); then
+      # An install.sh installation's unit takes udev's events here: each
+      # pool attached explicitly.
+      newloop "$h/disk0.img"
+      out=$(sudo "$spaces" attach "$LOOP" 2>&1)
+      newloop $pools/wc4k/disk0.img
+      out+=$'\n'$(sudo "$spaces" attach "$LOOP" 2>&1)
+      how="attached one pool at a time"
+    else
+      newloop "$h/disk0.img" -P
+      newloop $pools/wc4k/disk0.img -P
+      for _ in $(seq 90); do
+        [[ -n $(ours | grep wc4k) && -e $reports/$hguid.txt ]] && break
+        sleep 1
+      done
+      sudo udevadm settle
+      sleep 2
+      out=$(sudo journalctl -u storage-spaces-attach.service --since "$t0" --no-pager -o cat)
+      how="unit: $(systemctl show -p Result --value storage-spaces-attach.service)"
+    fi
+    r=$(cat "$reports/$hguid.txt" 2>/dev/null || true)
+    if [[ -n $(ours | grep wc4k) ]]; then result ok "hostile beside" "wc4k attached ($how)"; else result fail "hostile beside" "wc4k not attached: $(one "$out")"; fi
+    if [[ -z $(ours | grep hostile) && $r == *SUSPECT* && $r == *space.partitions* ]]; then
+      result ok "hostile refused" "$(head -1 <<<"$r")"
+    else
+      result fail "hostile refused" "$(one "$r")"
+    fi
+    if [[ $out != *panicked* && $r != *"internal error"* && $how != *core-dump* && $how != *signal* && $how != *timeout* ]]; then
+      result ok "hostile no panic"
+    else
+      result fail "hostile no panic" "$how: $(one "$out")"
+    fi
     cleanup ;;
   *) result fail "$c" "unknown case" ;;
   esac
