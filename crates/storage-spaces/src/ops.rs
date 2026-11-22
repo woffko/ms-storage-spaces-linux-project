@@ -24,6 +24,11 @@ pub type Guids<'a> = &'a mut dyn FnMut() -> Guid;
 /// all), every record one [`crate::records`] reproduces byte for byte, and
 /// every space healthy.
 pub fn check_pool<D: ReadAt>(pool: &Pool<D>) -> Result<Database> {
+    if let Some(version) = pool.older_layout() {
+        return Err(Error::Pool(format!(
+            "the pool has SPACEDB header version {version}: older pools are read only"
+        )));
+    }
     if !pool.warnings.is_empty() {
         return Err(Error::Pool(format!(
             "the pool is not in a clean state ({}); attach it to Windows first",
@@ -1069,6 +1074,11 @@ pub fn plan_retire_disk<D: ReadAt>(pool: &Pool<D>, disk_id: u64) -> Result<Plan>
 /// Like [`check_pool`], but a pool may miss disks (the only warnings
 /// allowed), and its spaces may be degraded (not failed).
 fn check_pool_missing_disks<D: ReadAt>(pool: &Pool<D>) -> Result<Database> {
+    if let Some(version) = pool.older_layout() {
+        return Err(Error::Pool(format!(
+            "the pool has SPACEDB header version {version}: older pools are read only"
+        )));
+    }
     let other: Vec<&String> = pool.warnings.iter().filter(|w| !w.ends_with(" is missing")).collect();
     if !other.is_empty() {
         return Err(Error::Pool(format!(

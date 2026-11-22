@@ -58,9 +58,14 @@ impl DiskHeader {
             return Err(format_err!("SPACEDB checksum mismatch"));
         }
         let version = u16::from_be_bytes([b[8], b[9]]);
-        if version != 3 {
+        // Version 2 (pool version 0x0416: two single-disk pools created by
+        // Windows Server 2019) keeps the fields of version 3 at the same
+        // offsets: the pool GUID at 0x20 is the owner of the SDBC header, the
+        // disk GUID at 0x30 that of the disk record. Such pools are read only
+        // ([`Pool::write_refusal`]).
+        if version != 2 && version != 3 {
             return Err(crate::Error::Unsupported(format!(
-                "SPACEDB header version {version} (only Windows 10/11 layout 3 is known)"
+                "SPACEDB header version {version} (only layouts 2 and 3 are known)"
             )));
         }
         Ok(DiskHeader {
@@ -491,6 +496,10 @@ fn decode_pool(c: &mut Cursor) -> Result<PoolRecord> {
 /// its child records, type 6, are version 5).
 const POLICY_PREFIXES: [&[u8]; 2] = [&[0x01, 0x00, 0x01, 0x00, 0x00], &[0x01, 0x01, 0x00, 0x00]];
 
+/// Version of the space records of pools with SPACEDB header version 2: the
+/// prefix of version 16, a shorter tail.
+const LEGACY_SPACE_RECORD: u8 = 11;
+
 /// Thin or fixed provisioning of a space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provisioning {
@@ -579,6 +588,17 @@ fn decode_space(c: &mut Cursor, is_child: bool, record_version: u8) -> Result<Sp
             range = Some((start, length));
         }
         Some(parent)
+    } else if record_version == LEGACY_SPACE_RECORD {
+        // Record version 11 (SPACEDB header version 2): three integers
+        // before the security descriptor, one after it, and no parent
+        // (only top-level spaces were seen).
+        for _ in 0..3 {
+            c.varint()?;
+        }
+        let len = c.u8()? as usize;
+        c.skip(len)?;
+        c.varint()?;
+        Some(0)
     } else {
         for _ in 0..4 {
             c.varint()?;
@@ -899,6 +919,55 @@ mod tests {
         assert_eq!(h.pool_guid, Guid([0x11; 16]));
         b[0x1ff] ^= 1; // inside the checksummed range
         assert!(DiskHeader::parse(&b).is_err());
+    }
+
+    #[test]
+    fn reads_header_versions_2_and_3_only() {
+        for (version, known) in [(1u16, false), (2, true), (3, true), (4, false)] {
+            let mut b = disk_header();
+            b[8..10].copy_from_slice(&version.to_be_bytes());
+            b[0x0c..0x10].fill(0);
+            let crc = crate::crc::crc32(&b);
+            b[0x0c..0x10].copy_from_slice(&crc.to_be_bytes());
+            let h = DiskHeader::parse(&b);
+            assert_eq!(h.is_ok(), known, "version {version}");
+            if let Ok(h) = h {
+                assert_eq!(
+                    (h.version, h.pool_guid, h.disk_guid),
+                    (version, Guid([0x11; 16]), Guid([0x22; 16]))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decodes_layout_11_space() {
+        // A fixed simple space of a pool with SPACEDB header version 2
+        // (Windows Server 2019, pool version 0x0416; name and GUID
+        // replaced): the policy prefix of layout 16, three integers before
+        // the security descriptor and one after it, no parent.
+        let body = |sd: &str| {
+            format!(
+                "01 0b 01 02 00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff 00 05 00 64 00 61 00 74 00 61 00 00 00 00 \
+                 00 00 02 05 3f c0 00 00 00 00 02 04 40 00 00 00 00 01 01 00 00 01 00 01 01 01 01 01 01 10 00 00 00 {sd} 00"
+            )
+        };
+        for sd in ["00", "04 01 00 04 80"] {
+            let mut r = raw(3, &body(sd));
+            r.version = LEGACY_SPACE_RECORD;
+            let Record::Space(s) = Record::decode(&r).unwrap() else {
+                panic!()
+            };
+            assert_eq!((s.id, s.name.as_str(), s.record_version), (0x0b, "data", 11));
+            assert_eq!((s.role, s.size), (SpaceRole::User, Some(0x3f_c000_0000)));
+            assert_eq!((s.provisioning, s.allocation_unit), (Provisioning::Fixed, 0x4000_0000));
+            assert_eq!(s.parent, Some(0));
+            let p = s.policy.unwrap();
+            assert_eq!(
+                (p.resiliency, p.copies, p.columns, p.interleave),
+                (Resiliency::Simple, 1, 1, 0x10000)
+            );
+        }
     }
 
     #[test]

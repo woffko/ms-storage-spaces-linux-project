@@ -801,9 +801,21 @@ impl<D: ReadAt> Pool<D> {
         Ok(Some((member.device, member.partition.offset + pos)))
     }
 
+    /// The SPACEDB header version of a member whose layout is older than
+    /// the one `spaces` writes (3): such pools are read from a best-effort
+    /// reading of their records, and nothing of them is written.
+    pub fn older_layout(&self) -> Option<u16> {
+        self.members.iter().map(|m| m.header.version).find(|&v| v != 3)
+    }
+
     /// Why space `id` cannot be opened for writing, or `None` if it can
     /// (the checks [`Pool::open_space_rw`] makes, without writing).
     pub fn write_refusal(&self, id: u64) -> Result<Option<String>> {
+        if let Some(version) = self.older_layout() {
+            return Ok(Some(format!(
+                "the pool has SPACEDB header version {version} (older pools are read only)"
+            )));
+        }
         // Stale database copies, and torn ones most copies outvote, are
         // brought up to date when a space is opened for writing
         // ([`Pool::update_stale_copies`]). A crash while the first copy of

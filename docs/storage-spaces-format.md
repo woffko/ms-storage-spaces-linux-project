@@ -31,7 +31,7 @@ Slabs are 256 MiB.
 | Offset | Size | Field |
 |---|---|---|
 | 0x00 | 8 | "SPACEDB " |
-| 0x08 | 2 | layout version, 3 on Windows 10/11 |
+| 0x08 | 2 | layout version; 2 on Windows Server 2019, 3 on Windows 11 |
 | 0x0a | 2 | 0x0200 |
 | 0x0c | 4 | CRC-32 (zlib, stored BE) of bytes 0..0x200 with this field zeroed (**verified**) |
 | 0x10 | 8 | how often the header was written: 1 on the disks of `New-StoragePool`; 2 on disks added later (written without, then with the database copy: `c9disk`), on a retired disk after the repair (copy cleared) and on a removed disk |
@@ -546,6 +546,16 @@ record) selects the prefix: Insider build 26340 writes pool version 29 with
 space records of version 17, Windows 11 24H2 (build 26100) pool version 28
 with version 16 (**verified**: pools `*_26100`). A record with another prefix
 is reported as an unsupported layout instead of being guessed at.
+Pools with SPACEDB header version 2 (pool version 0x0416, which `spaces
+info` shows as 1046; pool records of version 14, disk records 7, extent
+records 6 as now) write space records of version 11: the prefix of version
+16, but after the interleave only `vint 0 x3, u8 n + n bytes security
+descriptor, vint 0`, and no parent (**verified**: two single-disk pools
+created by Windows Server 2019, a fixed simple space each, read on the
+server). Which Windows releases moved from version 2 to 3 is not known.
+`spaces` reads such pools and refuses to write to them or
+change them (`Pool::older_layout`); mirror, parity, tiered and cached
+spaces of that layout, and pools of several disks, have not been seen.
 `sequence` is the database sequence at which the record was last written,
 as for disks. `number` counts the spaces a pool gets, hidden containers
 included (`spstates`: 0, 2, 4 for its three spaces, 1, 3, 5 for their dirty
